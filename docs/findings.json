@@ -439,6 +439,22 @@
           "locator": "notes"
         }
       ]
+    },
+    {
+      "id": "F-028",
+      "claim": "纯协议（cfsolve + 自带 safari-iOS profile）在 glassdoor.co.uk 上可用：CLI 3/3 成功（36–43.5s）、同站 A/B 18.43s（快于 Camoufox 19.56s）、经本仓库服务端到端 19.22s 且浏览器未启动。可用性站点相关：steamdb/udemy/quora 对该 persona 不弹挑战，glassdoor.com 因国家跳转失败。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "plans/证据/ab-methods-20261101-040608.json",
+          "locator": "summary"
+        },
+        {
+          "path": "docs/AB实测-三种过盾方法.md",
+          "locator": "一点五、同站对比"
+        }
+      ]
     }
   ]
 }

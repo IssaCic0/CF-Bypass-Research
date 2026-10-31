@@ -133,6 +133,27 @@ https://challenges.cloudflare.com/.../turnstile/f/...: rewrote the modulus (sess
  "notes": ["extracting the session params: expected one cf-chl token, found 0"]}
 ```
 
+### 二点八、结论修正：纯协议**确实能用**（站点相关）
+
+关键实测（`D:\cfsolve\challenge.exe` + 自带 safari-iOS profile）：
+
+```
+$ challenge --page https://www.glassdoor.co.uk/ /tmp/t1 --solve --fingerprint profiles/safari-26-ios.json
+cf_clearance=CrBB84fLihXiYrcOJ7CQ8z4MYpc5o3-…      ← 3/3 成功，36–43.5s
+
+# 经本仓库服务
+POST /solve {"url":"https://www.glassdoor.co.uk/"} → backend=cfsolve, 19.22s, 454B, **浏览器未启动**
+# 同站三方法 A/B：cfsolve 18.43s < Camoufox 19.56s < pydoll 失败(25.72s)
+```
+
+**站点相关性（必须知道）**：
+- `steamdb / udemy / quora` → 对 Safari-iOS persona **不弹挑战**，报 `page has no .cf-turnstile container`
+  （不是失败，是"没有可解的挑战"）
+- `glassdoor.com` → 会跳到 `glassdoor.it`，最后一步 `the clearance form set no cf_clearance cookie`
+- `glassdoor.co.uk` → ✅ 完整跑通
+
+**所以早前"0/3"是选错站**，不是方案不可行。
+
 **结论**：工具链补齐了 2/3（构建 + 码表 + modulus + 落盘都通了，浏览器也确实过盾），
 但**最后一步"提取会话参数"仍需上游适配**——这不是几行补丁能解决的。
 

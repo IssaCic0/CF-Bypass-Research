@@ -1,0 +1,54 @@
+{
+  "summary": {
+    "cfsolve": {
+      "attempts": 1,
+      "success": 1,
+      "success_rate": 1.0,
+      "avg_ok_sec": 18.43,
+      "min_ok_sec": 18.43,
+      "max_ok_sec": 18.43
+    },
+    "pydoll": {
+      "attempts": 1,
+      "success": 0,
+      "success_rate": 0.0,
+      "avg_ok_sec": null,
+      "min_ok_sec": null,
+      "max_ok_sec": null
+    },
+    "camoufox": {
+      "attempts": 1,
+      "success": 1,
+      "success_rate": 1.0,
+      "avg_ok_sec": 19.56,
+      "min_ok_sec": 19.56,
+      "max_ok_sec": 19.56
+    }
+  },
+  "results": [
+    {
+      "ok": true,
+      "elapsed": 18.43,
+      "product": "CjWnKByoFYtO",
+      "ua": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_7 ",
+      "method": "cfsolve",
+      "site": "https://www.glassdoor.co.uk/"
+    },
+    {
+      "ok": false,
+      "error": "SolveError: [unsolved/wait] 25.71s 内未取得 cf_clearance（pydoll）",
+      "elapsed": 25.72,
+      "method": "pydoll",
+      "site": "https://www.glassdoor.co.uk/"
+    },
+    {
+      "ok": true,
+      "elapsed": 19.56,
+      "product": "CkwJfzL6zWFz",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64",
+      "error": "",
+      "method": "camoufox",
+      "site": "https://www.glassdoor.co.uk/"
+    }
+  ]
+}

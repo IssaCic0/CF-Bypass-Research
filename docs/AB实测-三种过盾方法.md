@@ -17,6 +17,24 @@
 > **cfsolve 那行别误读**：它 1.7–20s 就返回，但**是失败返回**（`page has no .cf-turnstile container` /
 > `clearance form set no cf_clearance cookie`）。它快是因为"没解出来就退出"，不是"解得快"。
 
+## 一点五、同站对比（glassdoor.co.uk，2026-11-01 补测）
+
+前面那张表是**不同站点**，会被站点难度干扰。补一次**同一个站**的三方法对比：
+
+| 方法 | 结果 | 耗时 |
+|---|---|---|
+| **cfsolve（纯协议）** | ✅ 拿到 `cf_clearance` 467→454 字节 | **18.43 s** |
+| Camoufox（浏览器） | ✅ | 19.56 s |
+| pydoll（CDP+Chrome） | ❌ 未取得 clearance | 25.72 s（失败） |
+
+原始数据：`plans/证据/ab-methods-20261101-040608.json`。
+**同一站上纯协议最快，而且不起浏览器进程。**
+
+> ⚠️ 重要修正：早前"cfsolve 0/3"的结论**只说明选错了站**。实测发现
+> steamdb / udemy / quora 对 Safari-iOS 指纹**根本不弹挑战**（报 `page has no .cf-turnstile container`），
+> `glassdoor.com` 会跳到 `glassdoor.it` 导致最后一步失败；而 **`glassdoor.co.uk` 能完整跑通**。
+> 所以纯协议**可用性是站点相关的**（取决于该站是否对这套 persona 弹挑战、是否有国家跳转）。
+
 ## 二、逐站点明细
 
 | 站点 | Camoufox | pydoll | cfsolve |
