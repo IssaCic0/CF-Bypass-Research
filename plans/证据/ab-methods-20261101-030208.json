@@ -1,0 +1,101 @@
+{
+  "summary": {
+    "cfsolve": {
+      "attempts": 3,
+      "success": 0,
+      "success_rate": 0.0,
+      "avg_ok_sec": null,
+      "min_ok_sec": null,
+      "max_ok_sec": null
+    },
+    "pydoll": {
+      "attempts": 3,
+      "success": 2,
+      "success_rate": 0.667,
+      "avg_ok_sec": 74.52,
+      "min_ok_sec": 60.91,
+      "max_ok_sec": 88.12
+    },
+    "camoufox": {
+      "attempts": 3,
+      "success": 3,
+      "success_rate": 1.0,
+      "avg_ok_sec": 18.74,
+      "min_ok_sec": 15.87,
+      "max_ok_sec": 21.12
+    }
+  },
+  "results": [
+    {
+      "ok": false,
+      "error": "SolveError: [unsolved/wait] cfsolve 失败（exit=1）：Error: page has no .cf-turnstile container",
+      "elapsed": 3.07,
+      "method": "cfsolve",
+      "site": "https://steamdb.info/"
+    },
+    {
+      "ok": false,
+      "error": "SolveError: [unsolved/wait] cfsolve 失败（exit=1）：",
+      "elapsed": 19.97,
+      "method": "cfsolve",
+      "site": "https://www.glassdoor.com/"
+    },
+    {
+      "ok": false,
+      "error": "SolveError: [unsolved/wait] cfsolve 失败（exit=1）：Error: page has no .cf-turnstile container",
+      "elapsed": 1.73,
+      "method": "cfsolve",
+      "site": "https://www.udemy.com/"
+    },
+    {
+      "ok": true,
+      "elapsed": 60.91,
+      "product": "Cr0BtTmSzl8-",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64",
+      "method": "pydoll",
+      "site": "https://steamdb.info/"
+    },
+    {
+      "ok": false,
+      "error": "SolveError: [unsolved/wait] 48.98s 内未取得 cf_clearance（pydoll）",
+      "elapsed": 48.99,
+      "method": "pydoll",
+      "site": "https://www.glassdoor.com/"
+    },
+    {
+      "ok": true,
+      "elapsed": 88.12,
+      "product": "ChCD3x9eG_YE",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64",
+      "method": "pydoll",
+      "site": "https://www.udemy.com/"
+    },
+    {
+      "ok": true,
+      "elapsed": 21.12,
+      "product": "CkUs88gRIkhJ",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64",
+      "error": "",
+      "method": "camoufox",
+      "site": "https://steamdb.info/"
+    },
+    {
+      "ok": true,
+      "elapsed": 19.23,
+      "product": "Cs6q6v_Sldbs",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64",
+      "error": "",
+      "method": "camoufox",
+      "site": "https://www.glassdoor.com/"
+    },
+    {
+      "ok": true,
+      "elapsed": 15.87,
+      "product": "CuOcJabwKxtZ",
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64",
+      "error": "",
+      "method": "camoufox",
+      "site": "https://www.udemy.com/"
+    }
+  ]
+}

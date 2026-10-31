@@ -359,6 +359,38 @@
           "locator": "零点五、真机数据"
         }
       ]
+    },
+    {
+      "id": "F-023",
+      "claim": "A/B 实测（同出口、3 站、每格一次）：Camoufox 3/3 平均 18.74s；pydoll(CDP 直连真 Chrome) 2/3 平均 74.52s；cfsolve(纯协议+自带 profile) 0/3。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "plans/证据/ab-methods-20261101-030208.json",
+          "locator": "summary"
+        },
+        {
+          "path": "docs/AB实测-三种过盾方法.md",
+          "locator": "一、结果表"
+        }
+      ]
+    },
+    {
+      "id": "F-024",
+      "claim": "pydoll 在 headless 模式下 Chrome 的 UA 含 `HeadlessChrome`（实测 Chrome 156），是强检测信号；其自带 expect_cloudflare_turnstile 能在非 headless 下过盾但整体比 Camoufox 慢约 4 倍。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "solver/pydoll_backend.py",
+          "locator": "模块 docstring 的关键限制"
+        },
+        {
+          "path": "docs/AB实测-三种过盾方法.md",
+          "locator": "三、pydoll 优缺点"
+        }
+      ]
     }
   ]
 }

@@ -219,3 +219,47 @@ def test_router_prefers_pure_protocol_then_falls_back():
     out = be.BackendRouter([pure, browser]).solve("https://e.com/", 10)
     assert out["backend"] == "camoufox"
     assert out["attempts"][0]["error_code"] == "unsolved"
+
+
+# ── pydoll 后端（零 WebDriver 的 CDP 直连）────────────────
+import pydoll_backend as pdb  # noqa: E402
+
+
+def test_pydoll_not_configured_without_chrome():
+    b = pdb.PydollBackend(str("Z:/no/such/chrome.exe"))
+    assert b.is_configured() is False
+    with pytest.raises(SolveError) as ei:
+        b.solve("https://e.com/", 30)
+    assert ei.value.code is ErrorCode.NOT_CONFIGURED
+
+
+def test_pydoll_rejects_token_wants():
+    """pydoll 后端只拿 cookie 类产物；一次性 token 要交给浏览器引擎。"""
+    b = pdb.PydollBackend()
+    b.chrome_path = "C:/x/chrome.exe"      # 绕过 is_configured 的前置检查
+    with pytest.raises(SolveError) as ei:
+        b.solve("https://e.com/", 30, want="turnstile", sitekey="k")
+    assert ei.value.code is ErrorCode.NOT_CONFIGURED
+    assert "cookie" in ei.value.message
+
+
+def test_cookie_kv_handles_dict_and_object():
+    d = {"name": "cf_clearance", "value": "V", "domain": ".e.com", "httpOnly": True}
+    assert pdb._cookie_kv(d)["name"] == "cf_clearance"
+
+    class Obj:
+        name = "n"; value = "v"; domain = ".e.com"; path = "/"
+        expires = -1; http_only = True; secure = True; same_site = "None"
+
+    kv = pdb._cookie_kv(Obj())
+    assert kv["name"] == "n" and kv["httpOnly"] is True
+
+
+def test_find_chrome_explicit_invalid_returns_empty(tmp_path):
+    assert pdb.find_chrome(str(tmp_path / "nope.exe")) == ""
+
+
+def test_find_chrome_uses_explicit_when_present(tmp_path):
+    fake = tmp_path / "chrome.exe"
+    fake.write_text("x", encoding="utf-8")
+    assert pdb.find_chrome(str(fake)) == str(fake)

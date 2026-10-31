@@ -61,6 +61,7 @@ try:  # 作为包导入（tests / 未来 solver 包）
     from .prewarm import Prewarmer, parse_targets
     from .engines import Engine, build_factory as build_engine_factory, preflight as engine_preflight
     from .cfsolve_backend import CfsolveBackend
+    from .pydoll_backend import PydollBackend, find_chrome
     from .challenges import (
         COOKIE_FIELD,
         READ_TURNSTILE_TOKEN,
@@ -82,6 +83,7 @@ except ImportError:  # 直接以脚本运行：python solver/service.py
     from prewarm import Prewarmer, parse_targets  # type: ignore[no-redef]
     from engines import Engine, build_factory as build_engine_factory, preflight as engine_preflight  # type: ignore[no-redef]
     from cfsolve_backend import CfsolveBackend  # type: ignore[no-redef]
+    from pydoll_backend import PydollBackend, find_chrome  # type: ignore[no-redef]
     from challenges import (  # type: ignore[no-redef]
         COOKIE_FIELD,
         READ_TURNSTILE_TOKEN,
@@ -1465,6 +1467,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cfsolve-profile", default=os.environ.get("CFSOLVE_PROFILE", ""),
                     help="纯协议后端：浏览器 profile 文件路径（cfsolve profiles/*.json）")
     ap.add_argument("--cfsolve-timeout", type=float, default=120.0, help="纯协议后端单次超时（秒）")
+    ap.add_argument("--pydoll", action="store_true",
+                    help="启用 pydoll 后端（零 WebDriver 的 CDP 直连 Chrome，自带 CF 求解器）")
+    ap.add_argument("--chrome-path", default=os.environ.get("CHROME_PATH", ""),
+                    help="Chrome 可执行文件路径（空=自动探测常见位置）")
+    ap.add_argument("--pydoll-headless", action="store_true",
+                    help="pydoll 用 headless（注意：headless 下 UA 会带 HeadlessChrome，成功率通常更低）")
+    ap.add_argument("--pydoll-wait", type=float, default=45.0, help="pydoll 单次等待上限（秒）")
     ap.add_argument("--flaresolverr", default=os.environ.get("FLARESOLVERR_URL", ""),
                     help="可选兜底后端：自托管 FlareSolverr 兼容服务的地址（例如 http://127.0.0.1:8191）")
     args = ap.parse_args(argv)
@@ -1515,6 +1524,14 @@ def main(argv: list[str] | None = None) -> int:
         backends.append(CfsolveBackend(
             args.cfsolve_bin, args.cfsolve_profile, timeout=args.cfsolve_timeout
         ))
+    if args.pydoll:
+        pyd = PydollBackend(
+            args.chrome_path, headless=args.pydoll_headless, wait=args.pydoll_wait
+        )
+        if not pyd.is_configured():
+            print(f"[cfsolve] 警告：--pydoll 已开启但不可用（chrome={find_chrome(args.chrome_path) or '未找到'}；"
+                  f"或缺 pydoll-python）。它会在后端链里被 skip。", flush=True)
+        backends.append(pyd)
     backends.append(CamoufoxBackend(solver))
     if args.flaresolverr:
         backends.append(FlareSolverrBackend(args.flaresolverr))
