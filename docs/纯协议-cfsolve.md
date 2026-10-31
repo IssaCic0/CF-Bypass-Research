@@ -80,24 +80,39 @@ cargo build --release --bin capture-proxy # 产物：target/release/capture-prox
 > 出口环境"——一旦出口 IP 与它差异大，成功率就会掉。这是它最容易踩的坑，也是它必须
 > 要求"回放同 IP + 同 UA"的原因。
 
-## 二点五、本机尝试自录 profile（失败，记录在此避免重复劳动）
+## 二点五、本机自录 profile：两轮尝试均失败，根因已定位
 
-已构建 `capture-proxy.exe`（48MB，同上补丁），并尝试用 **CDP 驱动本机 Chrome** 走它的 MITM 代理录 profile：
+**尝试 1：CDP 驱动 Chrome 走 MITM（glassdoor）** → 120s 未过、captures 0 字节。
+**尝试 2：改成"优雅停止"（关键）后重试** → glassdoor **15s 就过了**（cf_clearance=true），
+代理也正确收到了 CTRL_BREAK 并进入收尾（退出码 `0xC000013A` = Ctrl-C），
+但 **captures 仍然为空**，代理日志给出了明确原因：
 
-```bash
-capture-proxy --fingerprint profiles/safari-26-ios.json   --site https://www.glassdoor.com/ --listen 127.0.0.1:<free>   --out ./captures --ca-dir ./proxy-ca
-# Chrome: --proxy-server=http://127.0.0.1:<free> --ignore-certificate-errors
+```
+https://www.glassdoor.com:443/: forwarding the original iframe:
+  expected one custom base64 alphabet, found 0        ← 致命
+https://challenges.cloudflare.com/.../turnstile/f/...: rewrote the modulus (session 0)
+127.0.0.1:...: connecting to brunhild.challenges.cloudflare.com:443: 不知道这样的主机 (10001)
+127.0.0.1:...: connecting to www.google.com:443: 连接尝试失败 (10060)
 ```
 
-结果：Chrome 在 **120 秒内始终停在挑战页**（title 一直是"请稍候"），`captures/` **0 字节** → 没录到任何质询应答。
+三条结论：
 
-原因（两条叠加）：
-1. **glassdoor 对本机 IP 很硬**：同一台机器上 pydoll（Chrome 直连）也过不了它（48.99s 无 clearance）；
-2. **MITM 会改变指纹链路**：Chrome 客户端 ↔ capture-proxy 之间是 Chrome 的 TLS，而 capture-proxy ↔ CF 之间用它 profile 里的 transport（Safari）重新发起 —— 客户端自称 Safari 但实际是 Chrome 的 JS 环境，**自相矛盾**，比直连更难通过。
+1. **`expected one custom base64 alphabet, found 0`** —— capture-proxy 需要从挑战 iframe 里
+   找到**静态 custom base64 码表**来做提取，但当前 CF **已经没有静态码表**（改为运行时由
+   `charCodeAt/fromCharCode/atob` 拼出）。这与我们 2026-10 的侦察结论**完全一致**
+   （见 `docs/challenges/jsd.md` §实测证据）。
+   → **不是操作问题，是录制工具与当前 CF 版本不匹配。**
+2. `brunhild.challenges.cloudflare.com` 在本机 DNS 解析失败、`google.com` 不可达 ——
+   本机网络对这两个依赖不友好，进一步降低成功率。
+3. 但**浏览器侧是通的**：Chrome 走 MITM 代理 15 秒就拿到了 `cf_clearance`。
 
-**结论**：本机无法自录 profile。要拿到可用的 profile，最现实的是
-**在真实手机 Safari / 真实桌面 Chrome 上人工过一次盾**（用作者说的手动流程），或在一台
-"Chrome 能过盾"的机器上录。
+**因此**：
+- 用 `capture-proxy` 自录 profile 这条路，在当前 CF 版本下**不可用**；
+- 这也解释了为什么作者自带的 safari-26-ios profile 在本机是 **0/3** —— 那份 profile
+  很可能录制于 CF 改版（码表运行时构造）之前。
+
+**建议**：纯协议路线先**降级为研究/观察用途**，不要作为生产依赖；
+关注 cfsolve 上游是否跟进新版 CF（它最后提交 2026-10-29，但录制工具显然还没适配）。
 
 ## 三、本仓库怎么接
 

@@ -403,6 +403,22 @@
           "locator": "二点五、本机尝试自录 profile"
         }
       ]
+    },
+    {
+      "id": "F-026",
+      "claim": "cfsolve 的 profile 录制工具（capture-proxy）对当前 CF 版本失效：提取时报 `expected one custom base64 alphabet, found 0`，即 CF 已不再下发静态码表（运行时构造）。因此纯协议路线当前不可用，作者自带 profile 0/3 也可由此解释。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "docs/纯协议-cfsolve.md",
+          "locator": "二点五、本机自录 profile"
+        },
+        {
+          "path": "docs/challenges/jsd.md",
+          "locator": "实测证据（码表已运行时构造）"
+        }
+      ]
     }
   ]
 }
