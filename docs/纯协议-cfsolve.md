@@ -4,8 +4,50 @@
 > `challenge` 可执行文件完成求解。它跑得动 CF 的挑战脚本，靠的是**重放一份从真实浏览器录下来的
 > 环境快照**（profile），而不是现场编造指纹。
 >
-> ⚠️ 本仓库**没有**内置它的二进制（也**不能**内置：体积 + 构建产物），也没有在本机验证过
-> ——因为构建需要 `libclang`，本机没有。下面是完整步骤，以及接入后我们这一侧的行为。
+> ✅ **本机已成功构建并跑通**（Windows，见下方"本机构建实录"）。
+> ⚠️ 但用**作者自带的 safari profile** 成功率是 **0/4**（挑战页），因为那份 profile 是
+> 作者那台 iPhone 的环境；要真正可用**必须自录 profile**，而自录需要一台能过盾的
+> **Safari/Chromium**（cfsolve 不支持 Firefox profile）。
+>
+> 本仓库**不内置**二进制（体积 + 构建产物）。
+
+## 零、本机构建实录（Windows，2026-11）
+
+| 步骤 | 结果 |
+|---|---|
+| libclang | 缺 → 用 PyPI 包 `libclang`(18.1.1) 自带的 `libclang.dll`，设 `LIBCLANG_PATH` 指向 `site-packages/clang/native` |
+| cmake | 3.28 不认识 “Visual Studio 18 2026” 生成器；升到 4.4.4 仍不认 → **改用 MSVC 开发环境 + Ninja**（`vcvars64.bat` + `CMAKE_GENERATOR=Ninja`） |
+| NASM | BoringSSL 汇编必需 → `choco install nasm` |
+| **源码 Unix-only** | `tokio::signal::unix`、`libc::clock_gettime` → **cfsolve 不支持 Windows**；本地打 2 处条件编译补丁后通过 |
+| 结果 | `challenge.exe` 49.6 MB，构建 1m37s |
+
+本地补丁（**仅本机副本，非上游支持**）：
+1. `Cargo.toml` 加 `[target."cfg(windows)".dependencies] windows-sys(Win32_System_Performance)`
+2. `src/performance_clock.rs`：`monotonic_us()` 拆成 `#[cfg(unix)]` 原实现 + `#[cfg(windows)]` 用 `QueryPerformanceCounter`
+3. `src/capture/proxy.rs`：`shutdown_requested()` 的 unix 分支加 cfg，Windows 只等 `ctrl_c`
+
+## 零点五、真机数据（自带 profile）
+
+| 站点 | 耗时 | 结果 |
+|---|---|---|
+| steamdb.info | **3.2s** | 直接拿到**正常页 204KB**（无挑战）→ 无事可做 |
+| glassdoor.com | **23.7s** | 跑了完整挑战流程，但 `clearance form set no cf_clearance cookie` |
+| epicgames.com | 15.7s | 页面里没有 `.cf-turnstile` 容器 |
+| quora.com | 6.7s | 同上 |
+| udemy.com | 4.9s | 同上 |
+
+**结论**：纯协议栈在 TLS/HTTP 层是通的（能拿到真实页面），但**自带 profile 与本机出口不匹配 → 挑战页 0/4**。
+
+## 零点六、接进服务后的真机端到端（回落链）
+
+```
+POST /solve {"url":"https://steamdb.info/"}
+→ attempts: [{"backend":"cfsolve","ok":false,"error_code":"unsolved"},
+             {"backend":"camoufox","ok":true}]
+→ backend=camoufox, elapsed=20.58s, clearance=463 字节
+```
+
+即：**纯协议先试 → 失败 → 浏览器接管并成功**，这条链在真机上跑通了。
 
 ## 一、构建（一次性，约 10–30 分钟）
 

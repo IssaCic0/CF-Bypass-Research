@@ -327,6 +327,38 @@
           "locator": "踩的坑"
         }
       ]
+    },
+    {
+      "id": "F-021",
+      "claim": "cfsolve 不支持 Windows：源码含 Unix-only 调用（tokio::signal::unix、libc::clock_gettime）；本地打 2 处条件编译补丁后可构建并运行，但这不是上游支持的平台。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "docs/纯协议-cfsolve.md",
+          "locator": "零、本机构建实录"
+        },
+        {
+          "path": "plans/证据/pure-protocol-cfsolve-round1.json",
+          "locator": "build.patch_notes"
+        }
+      ]
+    },
+    {
+      "id": "F-022",
+      "claim": "用作者自带的 safari-iOS profile，纯协议在挑战页上 0/4；但在本机出口处能直接拿到 steamdb 正常页，说明 TLS/HTTP 层可用、瓶颈是 profile 与出口环境不匹配。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "plans/证据/pure-protocol-cfsolve-round1.json",
+          "locator": "cli_trials_with_bundled_profile"
+        },
+        {
+          "path": "docs/纯协议-cfsolve.md",
+          "locator": "零点五、真机数据"
+        }
+      ]
     }
   ]
 }
