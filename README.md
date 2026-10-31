@@ -6,6 +6,49 @@
 
 ---
 
+## ✅ 最终方案（已实现，已端到端跑通）
+
+**Camoufox 求解 sidecar + Go 原生 HTTP 回放。**
+
+```
+Go 网关(gocfsolve.Client) ──POST /solve──► solver/service.py (:8878, Camoufox)
+          ◄── cf_clearance + user_agent ──┘
+          │
+          └─ net/http + 同 UA + 同 Cookie + 同出口 IP ──► 目标站 200
+```
+
+| 组件 | 路径 | 状态 |
+|---|---|---|
+| 求解服务（Camoufox，按域缓存，`/solve` `/health` `/stats`） | `solver/service.py` | ✅ 已实现并运行 |
+| Go 客户端（缓存 + 提前续期 + `Do()` 自动回放） | `gocfsolve/cfsolve.go` | ✅ 已实现 |
+| 端到端验证程序 | `gocfsolve/examples/endtoend/main.go` | ✅ 跑通 |
+
+**真机实测结果**：
+
+```
+✅ 取得 cf_clearance（463 字节, UA=Firefox/156.0…, 求解 18.12s, cached=false）
+📄 回放结果：status=200 长度=202117 挑战页=false 耗时=1.34s
+🔁 二次调用：cached=true（不再启动浏览器）
+
+跨进程命中服务端缓存：总耗时 0.00s
+```
+
+```bash
+# 1) 起服务
+pip install camoufox && python -m camoufox fetch
+python solver/service.py --port 8878
+
+# 2) 跑端到端
+cd gocfsolve && go run ./examples/endtoend -target https://steamdb.info/
+```
+
+详细选型理由、部署方式、已知限制、踩坑记录 → **[docs/最终方案与实现结果.md](docs/最终方案与实现结果.md)**
+
+---
+
+
+---
+
 ## 📌 核心结论
 
 | 路线 | 能否拿到 cf_clearance | 实测证据 | 成本 |
@@ -110,7 +153,13 @@ https://steamdb.info/  →  status=200  len=201391  challenge_page=false  elapse
 ## 📁 目录结构
 
 ```
+solver/
+  service.py            # ★ 最终方案：Camoufox 求解服务（POST /solve，按域缓存）
+gocfsolve/
+  cfsolve.go            # ★ 最终方案：Go 客户端（缓存 + 提前续期 + Do() 自动回放）
+  examples/endtoend/    # 端到端验证程序（求解 → 回放 → 校验 200）
 docs/
+  最终方案与实现结果.md                 # ★ 选型理由 / 实测数据 / 部署 / 踩坑
   Cloudflare过盾方案可行性侦察报告.md   # 完整侦察报告（15 节，含全部原始输出）
 scripts/
   analyze.py            # 静态分析 jsd main.js：字符串字面量 / 码表 / 关键字命中
