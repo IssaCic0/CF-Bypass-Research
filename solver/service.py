@@ -55,6 +55,7 @@ from urllib.parse import urlsplit
 
 try:  # 作为包导入（tests / 未来 solver 包）
     from .errors import ErrorCode, SolveError
+    from .detect import summarize as detect_summarize
     from .cache import build_store
     from .proxypool import ProxyPool, parse_proxy_url
     from .backends import BackendRouter, CamoufoxBackend, FlareSolverrBackend
@@ -77,6 +78,7 @@ try:  # 作为包导入（tests / 未来 solver 包）
     )
 except ImportError:  # 直接以脚本运行：python solver/service.py
     from errors import ErrorCode, SolveError  # type: ignore[no-redef]
+    from detect import summarize as detect_summarize  # type: ignore[no-redef]
     from cache import build_store  # type: ignore[no-redef]
     from proxypool import ProxyPool, parse_proxy_url  # type: ignore[no-redef]
     from backends import BackendRouter, CamoufoxBackend, FlareSolverrBackend  # type: ignore[no-redef]
@@ -171,6 +173,53 @@ def _default_browser_factory(*, headless: bool, os_persona: str = ""):
     if os_persona:
         kwargs["os"] = [os_persona]
     return Camoufox(**kwargs)
+
+
+def probe_protection(url: str, timeout: float = 15.0) -> dict:
+    """发一次普通 GET（跟随最多 3 次跳转），把状态码/头/cookie/body 交给探测器。"""
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101 Firefox/156.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        },
+    )
+    status = 0
+    headers: dict = {}
+    body = ""
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            status = response.status
+            headers = dict(response.headers.items())
+            body = response.read(500_000).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        status = e.code
+        headers = dict(e.headers.items()) if e.headers else {}
+        try:
+            body = e.read(500_000).decode("utf-8", "replace")
+        except Exception:  # noqa: BLE001
+            body = ""
+    except Exception as e:  # noqa: BLE001
+        raise SolveError(
+            ErrorCode.TRANSPORT, f"探测失败：{type(e).__name__}: {str(e)[:120]}", stage="navigate",
+            hint="检查目标可达性；探测只发一次普通 GET，不需要浏览器",
+        ) from e
+
+    cookies = {}
+    # urllib 会把多条 Set-Cookie 合并，这里按分号粗切出 cookie 名即可（只用于识别）
+    set_cookie = headers.get("Set-Cookie") or ""
+    for part in set_cookie.split(","):
+        name = part.split("=", 1)[0].strip()
+        if name and " " not in name:
+            cookies[name] = "1"
+
+    result = detect_summarize(url=url, status=status, headers=headers, body=body, cookies=cookies)
+    result["backend"] = "detect"
+    return result
 
 
 def _same_document(candidate: str, target: str) -> bool:
@@ -1300,7 +1349,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._deny()
             return
-        if path == "/stats":
+        if path == "/detect":
+            self._handle_detect_from_query()
+        elif path == "/stats":
             self._send(200, self.solver.stats())
         elif path == "/metrics":
             text = self.solver.metrics_text().encode()
@@ -1318,6 +1369,9 @@ class Handler(BaseHTTPRequestHandler):
         raw, body_error = self._read_body_raw()
         if not self._authorized():
             self._deny()
+            return
+        if path == "/detect":
+            self._handle_detect(raw, body_error)
             return
         if path != "/solve":
             self._send(404, {"ok": False, "error_code": "not-found", "error": "not found", "stage": "admit"})
@@ -1392,6 +1446,49 @@ class Handler(BaseHTTPRequestHandler):
             self._send(err.http_status, err.payload())
             self._log(event="solve", req_id=req_id, ok=False, error_code=err.code.value,
                       stage="internal", ms=round((time.monotonic() - started) * 1000))
+
+    # -- 防护识别 ----------------------------------
+    def _handle_detect_from_query(self) -> None:
+        from urllib.parse import parse_qs, urlsplit as _split
+
+        query = parse_qs(_split(self.path).query)
+        self._run_detect((query.get("url") or [""])[0])
+
+    def _handle_detect(self, raw: bytes, body_error: str) -> None:
+        """探测目标站用的是什么防护；**不做求解**，只发一次普通 GET。
+
+        用途：先知道对面是什么（有没有盾、是哪种挑战），再决定走纯协议还是浏览器，
+        避免把 16–20s 的求解浪费在"其实没盾/Akamai/DataDome"的站上。
+        """
+        try:
+            if body_error:
+                raise SolveError(ErrorCode.INVALID_REQUEST, body_error, stage="validate")
+            payload = Handler._parse_json(raw) if raw else {}
+            self._run_detect(str(payload.get("url") or ""))
+            return
+        except SolveError as e:
+            self._send(e.http_status, e.payload())
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            err = SolveError(ErrorCode.INTERNAL, f"{type(e).__name__}: {str(e)[:160]}", stage="internal")
+            self._send(err.http_status, err.payload())
+
+    def _run_detect(self, url: str) -> None:
+        """两种入口（GET 查询串 / POST JSON）共用的探测实现。"""
+        try:
+            if not url:
+                raise SolveError(ErrorCode.INVALID_REQUEST, "缺少 url", stage="validate")
+            if not url.startswith(("http://", "https://")):
+                raise SolveError(ErrorCode.INVALID_REQUEST, "url 必须是 http(s)", stage="validate")
+            host = _host_of(url)
+            self.solver._check_target(host)          # 复用 SSRF 守卫
+            self._send(200, probe_protection(url))
+        except SolveError as e:
+            self._send(e.http_status, e.payload())
+        except Exception as e:  # noqa: BLE001
+            traceback.print_exc()
+            err = SolveError(ErrorCode.INTERNAL, f"{type(e).__name__}: {str(e)[:160]}", stage="internal")
+            self._send(err.http_status, err.payload())
 
     def _read_body_raw(self) -> tuple[bytes, str]:
         """读请求体。返回 (bytes, 错误说明)；错误不抛异常，交由调用方决定状态码。"""

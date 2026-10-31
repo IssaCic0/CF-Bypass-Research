@@ -221,6 +221,24 @@ UA **不在缓存键里**，所以两个进程这个值不同**照样共享缓�
 
 ---
 
+## POST /detect、GET /detect?url= — 需要 token
+
+**只发一次普通 GET，不启浏览器、不求解**，回答"这个站有没有盾、是什么盾、我该走哪条路"。
+规格见 `docs/检测-防护识别.md`。
+
+```http
+POST /detect  {"url":"https://target/"}
+GET  /detect?url=https://target/
+→ 200 {"url":…, "status":403, "protected":true,
+       "providers":[{"name":"Cloudflare","confidence":100,"hits":[…]}, …],
+       "cloudflare_challenge_type":"managed",
+       "recommendation":{"route":"browser","reason":"…","hint":"…"},
+       "backend":"detect"}
+```
+
+`recommendation.route` 取值：`direct` / `direct_unless_blocked` / `browser` / `pure_protocol_may_work`
+/ `browser_token` / `browser_cookie` / `unsupported_or_browser`。
+
 ## GET /stats — 需要 token
 
 `/health` 的同义别名（字段一致）。**注意**：它现在要求 token（v2 起除 `/health` 外全部需要鉴权），
