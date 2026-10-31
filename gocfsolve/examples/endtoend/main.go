@@ -1,8 +1,8 @@
 // 端到端验证：Go 网关 → cf_clearance 求解服务 → 回放目标站。
 //
 // 用法：
-//   1) 先起求解服务：python solver/service.py --port 8878   （首启自动写 ./.env）
-//   2) go run ./examples/endtoend -target https://steamdb.info/
+//  1. 先起求解服务：python solver/service.py --port 8878   （首启自动写 ./.env）
+//  2. go run ./examples/endtoend -target https://steamdb.info/
 //
 // token 的来源优先级：-token 参数 → 环境变量 CF_SOLVE_TOKEN → 仓库根目录 ./.env
 package main

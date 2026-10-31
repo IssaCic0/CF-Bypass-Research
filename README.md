@@ -231,6 +231,33 @@ python -m camoufox fetch                # 必需：拉 Camoufox 的 Firefox 二�
 cd node-shim && npm i jsdom canvas
 ```
 
+### 多进程部署（要吞吐就看这一节）
+
+单进程只**串行**求解（Playwright sync API 绑定线程），所以「加吞吐」= 「加进程」。
+关键是**共用同一个落盘缓存目录**，否则每个进程会各解一次同一个域，扩容等于白扩：
+
+```powershell
+# 起 4 个 worker（端口 8878..8881），共用一个缓存目录与同一个 token
+pwsh scripts/run-pool.ps1 -Count 4 -CacheDir "$env:LOCALAPPDATA\cfsolve\cache"
+
+# 可选：保活（在过期前主动续期，把贵操作挪出请求路径）
+pwsh scripts/run-pool.ps1 -Count 4 -Prewarm "steamdb.info,glassdoor.com" -RenewBefore 300
+```
+
+Go 侧用 `cfsolve.NewPool` 接（按域一致性哈希 + 失败摘除/自动回归）：
+
+```go
+pool, err := cfsolve.NewPool(
+    []string{"http://127.0.0.1:8878", "http://127.0.0.1:8879",
+             "http://127.0.0.1:8880", "http://127.0.0.1:8881"},
+    cfsolve.WithPoolToken(token),
+    cfsolve.WithPoolMaxFailures(2),
+    cfsolve.WithPoolDownDuration(30*time.Second),
+)
+defer pool.Close()
+cl, err := pool.Get(ctx, target)      // 同域永远打到同一个 worker
+```
+
 ### 跑测试（离线，不联网、不起浏览器）
 
 ```bash

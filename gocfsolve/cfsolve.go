@@ -165,12 +165,12 @@ type solveReq struct {
 }
 
 type solveResp struct {
-	Ok        bool   `json:"ok"`
-	Solved    bool   `json:"solved"`
-	Error     string `json:"error"`
-	ErrorCode string `json:"error_code"`
-	Stage     string `json:"stage"`
-	Hint      string `json:"hint"`
+	Ok        bool    `json:"ok"`
+	Solved    bool    `json:"solved"`
+	Error     string  `json:"error"`
+	ErrorCode string  `json:"error_code"`
+	Stage     string  `json:"stage"`
+	Hint      string  `json:"hint"`
 	Elapsed   float64 `json:"elapsed"`
 	Clearance
 }
@@ -194,11 +194,11 @@ func (e *APIError) Error() string {
 
 // Client 求解服务客户端（并发安全）。
 type Client struct {
-	baseURL string
-	hc      *http.Client // 调求解服务用
-	replay  *http.Client // 回放目标站用（独立连接池与超时策略）
-	token   string       // 求解服务的 Bearer token
-	egressID string      // 本客户端出口标识，参与缓存键
+	baseURL  string
+	hc       *http.Client // 调求解服务用
+	replay   *http.Client // 回放目标站用（独立连接池与超时策略）
+	token    string       // 求解服务的 Bearer token
+	egressID string       // 本客户端出口标识，参与缓存键
 
 	// renewBefore 提前续期窗口：到期前多久主动刷新（避免请求打到过期 cookie）。
 	renewBefore time.Duration
@@ -230,7 +230,7 @@ func WithReplayClient(hc *http.Client) Option { return func(c *Client) { c.repla
 // New 创建客户端。baseURL 形如 http://127.0.0.1:8878。
 func New(baseURL string, opts ...Option) *Client {
 	c := &Client{
-		baseURL:      strings.TrimSuffix(baseURL, "/"),
+		baseURL: strings.TrimSuffix(baseURL, "/"),
 		// 必须覆盖服务端最坏耗时：(solveTimeout+5s 排队) + 兜底后端 90s ≈ 155s，
 		// 否则客户端会先超时，拿到的是原始 net 错误而不是结构化 *APIError。
 		hc:           &http.Client{Timeout: 240 * time.Second},

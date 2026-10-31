@@ -188,6 +188,19 @@ UA **不在缓存键里**，所以两个进程这个值不同**照样共享缓�
 
 `browser_os` 表示是否固定了 OS persona（`--browser-os`）；`random` 表示每次启动随机（Camoufox 默认）。
 
+配置了 `--prewarm` 时还会多一个 `prewarm` 字段：
+
+```json
+"prewarm": {
+  "enabled": true, "targets": 10, "runs": 42, "renewed": 7, "skipped": 410,
+  "failures": 1, "last_run_at": 1761000000.0, "last_error": "",
+  "hosts": {"https://steamdb.info/": {"failures": 0, "last_error": "", "last_renewed_at": 1761000000.0}}
+}
+```
+
+语义：`skipped` 是"剩余寿命还够、无需续期"的次数；单个域连续失败会进入指数退避
+（`next_attempt_in_sec` 可见），**不会原速重试**（对已提分的域连续求解只会更糟）。
+
 ---
 
 ## GET /stats — 需要 token
@@ -232,6 +245,10 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8878/metrics
 | `--proxy` | 空 | 代理出口，可重复。按域一致性哈希做粘性 |
 | `--proxy-egress-ip` | 空 | `http://host:port=1.2.3.4`，登记实测出口 IP（改 IP 自动失效旧缓存） |
 | `--browser-os` | 空（随机） | 固定 Camoufox 的 OS persona（`windows`/`macos`/`linux`）。默认随机，**每次启动会变**；生产建议固定并与出口 IP 地理一致 |
+| `--prewarm` | 空 | 保活目标，逗号分隔（可只写域名）。空=不启用 |
+| `--prewarm-file` | 空 | 保活目标文件，一行一个，允许 `#` 注释 |
+| `--prewarm-interval` | `60` | 保活扫描间隔（秒） |
+| `--renew-before` | `300` | 剩余寿命低于该值时提前续期（秒），应大于单次求解耗时 |
 | `--flaresolverr` | 空 | 可选兜底后端地址（自托管 FlareSolverr 兼容服务） |
 | `--token-file` | `.env` | token 文件；首启自动生成 `CF_SOLVE_TOKEN=` |
 | `--no-auth` | 关 | 关闭鉴权，**仅限本机调试** |

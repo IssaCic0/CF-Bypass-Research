@@ -278,7 +278,6 @@ func asAPIError(err error, target **APIError) bool {
 	return false
 }
 
-
 // 同名 cookie 只能发一个，且保留更具体的 domain（Critic 抓到的 ⑤）。
 func TestCookieHeaderDeduplicatesSameNameKeepingMostSpecific(t *testing.T) {
 	cl := &Clearance{

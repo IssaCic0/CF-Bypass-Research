@@ -19,6 +19,9 @@ challenge_screenshot.png
 # 求解服务自动生成的鉴权 token（首启写入，绝不入库）
 .env
 
+# 运行日志（scripts/run-pool.ps1 会写这里）
+/logs/
+
 # 构建产物（go build 会在源码目录留下 exe）
 *.exe
 

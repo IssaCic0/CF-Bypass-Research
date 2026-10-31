@@ -58,11 +58,13 @@ try:  # 作为包导入（tests / 未来 solver 包）
     from .cache import build_store
     from .proxypool import ProxyPool, parse_proxy_url
     from .backends import BackendRouter, CamoufoxBackend, FlareSolverrBackend
+    from .prewarm import Prewarmer, parse_targets
 except ImportError:  # 直接以脚本运行：python solver/service.py
     from errors import ErrorCode, SolveError  # type: ignore[no-redef]
     from cache import build_store  # type: ignore[no-redef]
     from proxypool import ProxyPool, parse_proxy_url  # type: ignore[no-redef]
     from backends import BackendRouter, CamoufoxBackend, FlareSolverrBackend  # type: ignore[no-redef]
+    from prewarm import Prewarmer, parse_targets  # type: ignore[no-redef]
 
 # ── 常量 ───────────────────────────────────────────
 DEFAULT_TTL = 1500          # cf_clearance 通常 30 分钟量级；cookie 带 expires 时以 cookie 为准
@@ -254,6 +256,7 @@ class Solver:
         self._allow_private_hosts = allow_private_hosts
         self._warm_retry_max = warm_retry_max
         self._pool = proxy_pool
+        self.prewarmer = None            # 由 main 注入（配置了 --prewarm 才启动）
 
         self._started_at = _now()
         if store is not None:
@@ -517,6 +520,26 @@ class Solver:
             )
         self._dns_cache[host] = (_now() + 60.0, host)
 
+    def _entry_for(self, host: str):
+        """该域粘住的代理出口；没有代理池时返回 None。"""
+        return self._pool.for_host(host) if self._pool is not None else None
+
+    def cache_remaining(self, url: str) -> float:
+        """这条凭证还能用多久（秒）；没有缓存或出口都在冷却时返回 -1。
+
+        保活线程用它判断"要不要现在续期"，避免做无意义求解。
+        """
+        host = _host_of(url)
+        if not host:
+            return -1.0
+        entry = self._entry_for(host)
+        if self._pool is not None and entry is None:
+            return -1.0
+        cached = self._store.get(self.cache_key(host, entry))
+        if not cached:
+            return -1.0
+        return max(0.0, float(cached.get("expires_at", 0)) - _now())
+
     # -- 缓存键 ---------------------------------------
     def cache_key(self, host: str, entry=None) -> str:
         """缓存键 = 域名 + 出口标识。
@@ -756,7 +779,7 @@ class Solver:
         self._check_target(host)
 
         # 先定出口（粘性），缓存键随出口变化
-        proxy_entry = self._pool.for_host(host) if self._pool is not None else None
+        proxy_entry = self._entry_for(host)
         if self._pool is not None and proxy_entry is None:
             raise SolveError(
                 ErrorCode.BUSY,
@@ -955,6 +978,8 @@ class Solver:
             body["avg_elapsed_sec"] = avg
             if self._pool is not None:
                 body["proxies"] = self._pool.snapshot()   # 已脱敏，不含凭据
+            if self.prewarmer is not None:
+                body["prewarm"] = self.prewarmer.stats.as_dict()
         return (200 if alive else 503), body
 
     def stats(self) -> dict:
@@ -1194,6 +1219,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--browser-os", default=os.environ.get("CF_BROWSER_OS", ""),
                     choices=["", "windows", "macos", "linux"],
                     help="固定 Camoufox 的 OS persona（windows/macos/linux）；空=随机（Camoufox 默认，每次启动会变）")
+    ap.add_argument("--prewarm", default=os.environ.get("CF_PREWARM", ""),
+                    help="保活目标，逗号分隔（可只写域名）。空=不启用保活")
+    ap.add_argument("--prewarm-file", default=os.environ.get("CF_PREWARM_FILE", ""),
+                    help="保活目标文件：一行一个，允许 # 注释")
+    ap.add_argument("--prewarm-interval", type=float, default=60.0, help="保活扫描间隔（秒）")
+    ap.add_argument("--renew-before", type=float, default=300.0,
+                    help="剩余寿命低于该值时提前续期（秒）；应大于单次求解耗时")
     ap.add_argument("--flaresolverr", default=os.environ.get("FLARESOLVERR_URL", ""),
                     help="可选兜底后端：自托管 FlareSolverr 兼容服务的地址（例如 http://127.0.0.1:8191）")
     args = ap.parse_args(argv)
@@ -1263,9 +1295,34 @@ def main(argv: list[str] | None = None) -> int:
         except (ValueError, OSError):
             pass    # 非主线程/平台不支持时忽略
 
+    prewarmer = None
+    targets: list[str] = []
+    if args.prewarm or args.prewarm_file:
+        try:
+            targets = parse_targets(args.prewarm, args.prewarm_file)
+        except ValueError as e:
+            print(f"[cfsolve] 保活配置错误：{e}", flush=True)
+            solver.close()
+            return 2
+        if targets:
+            prewarmer = Prewarmer(
+                solver,
+                targets,
+                renew_before=args.renew_before,
+                interval=args.prewarm_interval,
+            )
+            solver.prewarmer = prewarmer
+            prewarmer.start()
+            print(f"[cfsolve] 保活已启用：{len(targets)} 个域，提前 {args.renew_before:.0f}s 续期，"
+                  f"扫描间隔 {args.prewarm_interval:.0f}s", flush=True)
+        else:
+            print("[cfsolve] --prewarm/--prewarm-file 为空，保活未启用", flush=True)
+
     try:
         srv.serve_forever(poll_interval=0.5)
     finally:
+        if prewarmer is not None:
+            prewarmer.stop()
         srv.server_close()
         solver.close()
     print("[cfsolve] 已退出", flush=True)
