@@ -3,8 +3,9 @@
 // 判据：HTTP 200 且返回真实页面（不是 "Just a moment..." 挑战页）。
 //
 // 用法（不依赖任何硬编码绝对路径）：
-//   CF_COOKIE_DIR=/path/to/dir go run ./go-replay          # 目录内需 cookie.txt / ua.txt
-//   go run ./go-replay -dir ./samples -target https://steamdb.info/
+//
+//	CF_COOKIE_DIR=/path/to/dir go run ./go-replay          # 目录内需 cookie.txt / ua.txt
+//	go run ./go-replay -dir ./samples -target https://steamdb.info/
 package main
 
 import (

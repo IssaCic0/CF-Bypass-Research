@@ -5,12 +5,13 @@
 // 下面注入的 DOM/浏览器对象是最小假体，大量分支会因为 `querySelector` 返回 null 而走假路径。
 //
 // 用法（不依赖任何硬编码绝对路径）：
-//   CF_SCRIPT_PATH=/path/to/orchestrate_chl_page.js \
-//   CF_OPT_PATH=/path/to/chl_opt.js \
-//   go run ./go-jseng
 //
-//   或显式传参：
-//   go run ./go-jseng -script ./samples/orchestrate_chl_page.js -opt ./samples/chl_opt.js
+//	CF_SCRIPT_PATH=/path/to/orchestrate_chl_page.js \
+//	CF_OPT_PATH=/path/to/chl_opt.js \
+//	go run ./go-jseng
+//
+//	或显式传参：
+//	go run ./go-jseng -script ./samples/orchestrate_chl_page.js -opt ./samples/chl_opt.js
 package main
 
 import (
