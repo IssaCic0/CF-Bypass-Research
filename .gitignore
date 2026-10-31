@@ -1,0 +1,23 @@
+# 依赖
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+
+# 抓取的 CF 混淆脚本样本（体积大且随请求变化，不入库）
+main_*.js
+orchestrate_chl_page.js
+challenge_page.html
+chl_opt.js
+
+# 求解过程中产生的凭证与截图（含真实 cf_clearance，绝不入库）
+cookie.txt
+ua.txt
+*_cookie.txt
+challenge_screenshot.png
+
+# 编辑器/系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
