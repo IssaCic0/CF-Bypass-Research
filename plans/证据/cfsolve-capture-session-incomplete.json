@@ -1,0 +1,16 @@
+{
+  "iframeUrl": "https://www.glassdoor.com:443/",
+  "realModulus": "e9d3dca1328a49ad3403e4badda37a6a13610b608b5099839e1074e720f5a33b2ebd8c2ffd12c09be0015a4635aa9d2022d8f72f90ed11610c3742b0baef5b7da73d7e79aff6cdbdeab72492ce0a858e4c1f4c27a14ebbb4ce3beacfda982fe74463e76f654aab0c597d5e73686ea149023e8f60ae6365a30055fe2c5eb2ebfb",
+  "upstreamEncodedBytes": 5789,
+  "upstreamDecodedBytes": 11992,
+  "observedEncodedBytes": 6220,
+  "observedDecodedBytes": 11992,
+  "proxyModulus": "b98b1092253600ddb90e2523657058e07874acc5a2e007de6fb086e3112ea264d28e98c81f48898c766ad22d2eb7784b7f2da7b70f9a9da0cc98d2f71edf33192661475f993ee0bf30878c5c9d06a0ca08f99f111aa1418afe3cce70032cfc9e54276db1a7c04c3682137a63d23857047dd865751a5f28a9425bcc0f9cff18d7",
+  "alphabet": null,
+  "secret": null,
+  "complete": false,
+  "notes": [
+    "extracting the session params: expected one cf-chl token, found 0"
+  ],
+  "posts": []
+}

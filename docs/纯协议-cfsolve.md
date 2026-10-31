@@ -114,6 +114,28 @@ https://challenges.cloudflare.com/.../turnstile/f/...: rewrote the modulus (sess
 **建议**：纯协议路线先**降级为研究/观察用途**，不要作为生产依赖；
 关注 cfsolve 上游是否跟进新版 CF（它最后提交 2026-10-29，但录制工具显然还没适配）。
 
+## 二点七、补工具链实录：3 个卡点，修好 2 个（附补丁）
+
+既然要用纯协议，就得把 capture-proxy 修到能用。已把补丁整理成
+**`tools/cfsolve-patches/cfsolve-windows-and-capture-fixes.patch`**（7 文件 312 行，可直接 `git apply`）。
+
+| # | 卡点（报错原文） | 原因 | 处理 | 结果 |
+|---|---|---|---|---|
+| 1 | `expected one custom base64 alphabet, found 0` | 新版 CF 用 `String.fromCharCode` **运行时**拼码表，静态扫描找不到 | 浏览器 hook `String.fromCharCode`/`Array.join` 捞码表（跨 3 次加载**完全一致**）+ 补丁加 `--alphabet` 覆盖 | ✅ |
+| 2 | `expected one 128-byte modulus in the iframe, found 0` | RSA modulus 同样运行时构造 | hook `BigInt` 捞 modulus（稳定）+ 补丁加 `--modulus`，并在 iframe 里**注入 BigInt shim** 把真实 modulus 换成代理 key | ✅ 日志出现 `injecting a BigInt shim` → `rewrote the modulus (session 0)`，浏览器 15–20s 过盾 |
+| 3 | `extracting the session params: expected one cf-chl token, found 0` | 会话参数（`cf-chl` token / secret）也是运行时生成 | 未修：要补就得把 CF 挑战协议一部分在 capture 侧重做一遍（等于把 `challenge` 那套再写一份） | ❌ 阻塞 |
+| — | Windows 上 Ctrl-C 投递不可靠 → session 日志写不出 | 上游只在收到信号时落盘 | 补丁改成**每 5 秒周期性 flush** | ✅ 3 个 session 目录都成功落盘 |
+
+当前状态（`plans/证据/cfsolve-capture-session-incomplete.json`）：
+
+```json
+{"alphabet": null, "secret": null, "complete": false, "posts": [],
+ "notes": ["extracting the session params: expected one cf-chl token, found 0"]}
+```
+
+**结论**：工具链补齐了 2/3（构建 + 码表 + modulus + 落盘都通了，浏览器也确实过盾），
+但**最后一步"提取会话参数"仍需上游适配**——这不是几行补丁能解决的。
+
 ## 三、本仓库怎么接
 
 ```bash

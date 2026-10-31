@@ -419,6 +419,26 @@
           "locator": "实测证据（码表已运行时构造）"
         }
       ]
+    },
+    {
+      "id": "F-027",
+      "claim": "cfsolve 的 capture 工具链依赖三个静态特征（base64 码表 / RSA modulus / cf-chl token+secret），新版 CF 全部改为运行时生成。本地已修好前两个（浏览器 hook + --alphabet / --modulus + BigInt 注入，验证到浏览器过盾并成功 open session），第三个需重做挑战协议的一部分，属上游工作量。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "tools/cfsolve-patches/README.md",
+          "locator": "实测效果与还差什么"
+        },
+        {
+          "path": "docs/纯协议-cfsolve.md",
+          "locator": "二点七、补工具链实录"
+        },
+        {
+          "path": "plans/证据/cfsolve-capture-session-incomplete.json",
+          "locator": "notes"
+        }
+      ]
     }
   ]
 }

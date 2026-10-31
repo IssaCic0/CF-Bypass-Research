@@ -1,0 +1,312 @@
+--- cfs_up/Cargo.toml	2026-11-01 03:56:32.429115100 +0800
++++ D:/cfsolve/src-patched/Cargo.toml	2026-11-01 02:28:14.168029200 +0800
+@@ -89,3 +89,6 @@
+ 
+ [profile.dev.package."*"]
+ debug = false
++
++[target."cfg(windows)".dependencies]
++windows-sys = { version = "0.61", features = ["Win32_System_Performance"] }
+--- cfs_up/src/bin/capture-proxy/cli.rs	2026-11-01 03:56:32.437701400 +0800
++++ D:/cfsolve/src-patched/src/bin/capture-proxy/cli.rs	2026-11-01 03:39:14.865534100 +0800
+@@ -28,6 +28,14 @@
+   --upstream-proxy <url>
+                      Reach the internet through an http://, https://,
+                      socks5:// or socks5h:// proxy.
++  --modulus <hex>
++                     Override the challenge script's RSA modulus (128-byte BigInt).
++                     Same reason as --alphabet: newer builds build it at runtime.
++  --alphabet <string>
++                     Override the challenge script's base64 alphabet. Newer CF
++                     builds construct it at runtime, so the static scan finds
++                     none; supply the 64 characters observed in a real browser
++                     (see docs in the local README).
+ 
+ Point a browser at this proxy and open http://proxy.ca/ssl to
+ download its CA certificate.";
+@@ -47,6 +55,10 @@
+     pub out_dir: PathBuf,
+     /// The `--upstream-proxy` value used for tunnels and forwarded requests.
+     pub upstream_proxy: Option<String>,
++    /// The `--alphabet` override for challenge scripts that build it at runtime.
++    pub alphabet: Option<String>,
++    /// The `--modulus` override (hex, 128 bytes) for the same reason.
++    pub modulus: Option<String>,
+ }
+ 
+ /// Parses options after the program name, or returns `None` for `--help`.
+@@ -54,6 +66,8 @@
+     let mut arguments = arguments.into_iter();
+     let (mut fingerprint, mut listen, mut ca_dir, mut out_dir) = (None, None, None, None);
+     let mut upstream_proxy = None;
++    let mut alphabet = None;
++    let mut modulus = None;
+     let mut mitm_hosts = vec![CHALLENGE_HOST.to_owned()];
+     while let Some(argument) = arguments.next() {
+         let Some(name) = argument.to_str().filter(|text| text.starts_with('-')) else {
+@@ -84,6 +98,35 @@
+             "--ca-dir" => once(&mut ca_dir, name, value(&mut arguments, name)?)?,
+             "--out" => once(&mut out_dir, name, value(&mut arguments, name)?)?,
+             "--upstream-proxy" => once(&mut upstream_proxy, name, text(&mut arguments, name)?)?,
++            "--alphabet" => {
++                let value = text(&mut arguments, name)?;
++                ensure!(
++                    value.is_ascii(),
++                    "{name} must be ASCII, got {value:?}"
++                );
++                ensure!(
++                    (64..=66).contains(&value.len()),
++                    "{name} must be 64 ASCII characters (optionally + padding), got {} bytes",
++                    value.len()
++                );
++                let distinct: std::collections::BTreeSet<&u8> = value.as_bytes()[..64].iter().collect();
++                ensure!(
++                    distinct.len() == 64,
++                    "{name} must have 64 distinct characters, found {}",
++                    distinct.len()
++                );
++                once(&mut alphabet, name, value)?;
++            }
++            "--modulus" => {
++                let value = text(&mut arguments, name)?;
++                let digits = value.trim_start_matches("0x");
++                ensure!(
++                    (256..=258).contains(&digits.len()) && digits.chars().all(|c| c.is_ascii_hexdigit()),
++                    "{name} must be 128 bytes of hex (256 digits, optional 0x with leading zeros), got {} digits",
++                    digits.len()
++                );
++                once(&mut modulus, name, value)?;
++            }
+             _ => bail!("unknown option {name}\n\n{USAGE}"),
+         }
+     }
+@@ -96,6 +139,8 @@
+         ca_dir: ca_dir.unwrap_or_else(|| CA_DIR.into()).into(),
+         out_dir: out_dir.unwrap_or_else(|| OUT_DIR.into()).into(),
+         upstream_proxy,
++        alphabet,
++        modulus,
+     }))
+ }
+ 
+--- cfs_up/src/bin/capture-proxy/main.rs	2026-11-01 03:56:32.437701400 +0800
++++ D:/cfsolve/src-patched/src/bin/capture-proxy/main.rs	2026-11-01 03:42:36.393780200 +0800
+@@ -34,6 +34,9 @@
+         Some(url) => url.parse()?,
+         None => UpstreamProxy::Direct,
+     };
++    if let Some(modulus) = &arguments.modulus {
++        cfsolve::challenge::program::set_modulus_override(modulus.clone());
++    }
+     let config = Config {
+         listen: arguments.listen,
+         mitm_hosts: arguments.mitm_hosts,
+@@ -41,6 +44,8 @@
+         upstream_tls: true,
+         upstream_proxy,
+         out_dir: arguments.out_dir,
++        alphabet_override: arguments.alphabet,
++        modulus_override: arguments.modulus.clone(),
+     };
+     // Check that logs can be written before starting the proxy.
+     io::create_dir(&config.out_dir)?;
+--- cfs_up/src/capture/proxy.rs	2026-11-01 03:56:32.441699400 +0800
++++ D:/cfsolve/src-patched/src/capture/proxy.rs	2026-11-01 03:51:52.911872300 +0800
+@@ -64,6 +64,13 @@
+     pub upstream_proxy: UpstreamProxy,
+     /// Parent directory for session captures.
+     pub out_dir: PathBuf,
++    /// Overrides the statically scanned base64 alphabet. Newer CF builds construct the
++    /// alphabet at runtime, so the scan finds no candidate; a browser-observed value can be
++    /// supplied here instead.
++    pub alphabet_override: Option<String>,
++    /// Overrides the statically scanned RSA modulus, enabling a runtime `BigInt` shim when the
++    /// modulus is built at runtime (local patch).
++    pub modulus_override: Option<String>,
+ }
+ 
+ /// A running proxy with its sessions and capture logs.
+@@ -111,6 +118,9 @@
+             .with_context(|| format!("binding {}", proxy.config.listen))?;
+         eprintln!("capture-proxy listening on {}", proxy.config.listen);
+         let mut shutdown = pin!(shutdown_requested());
++        // 本地补丁：Windows 上不可靠地投递 Ctrl-C，改成周期性落盘，
++        // 这样每个 session 一完成就写出去，不必等到进程退出。
++        let mut flush = tokio::time::interval(std::time::Duration::from_secs(5));
+         loop {
+             tokio::select! {
+                 accepted = listener.accept() => match accepted {
+@@ -125,6 +135,9 @@
+                     Err(error) => eprintln!("accepting a client: {error}"),
+                 },
+                 () = &mut shutdown => break,
++                _ = flush.tick() => {
++                    proxy.sessions.write_all(&proxy.config.out_dir);
++                }
+             }
+         }
+         eprintln!("shutting down; finishing the session extractions (Ctrl-C again to skip)");
+@@ -427,8 +440,16 @@
+         let scanned = challenge::inline_javascript(&html).and_then(|javascript| {
+             let parsed = ast::parse_javascript("iframe.js", &javascript)?;
+             let strings = deobfuscate::inline_strings(&parsed.script);
+-            let alphabet = sessions::scan_alphabet(&parsed.script, &strings)?;
+-            let swapped = rsa::swap_modulus(&html, &strings, &self.sessions.proxy_key.modulus)?;
++            let alphabet = match &self.config.alphabet_override {
++                Some(overridden) => overridden.clone(),
++                None => sessions::scan_alphabet(&parsed.script, &strings)?,
++            };
++            let swapped = rsa::swap_modulus(
++                &html,
++                &strings,
++                &self.sessions.proxy_key.modulus,
++                self.config.modulus_override.as_deref(),
++            )?;
+             anyhow::Ok((alphabet, swapped))
+         });
+         let (alphabet, (rewritten, real_modulus)) = scanned
+@@ -479,12 +500,19 @@
+ 
+ /// Waits for Ctrl-C or SIGTERM so the proxy can write logs before exiting.
+ async fn shutdown_requested() {
+-    use tokio::signal::unix::{self, SignalKind};
+-
+-    let mut terminate = unix::signal(SignalKind::terminate()).expect("watching for SIGTERM");
+-    tokio::select! {
+-        _ = tokio::signal::ctrl_c() => {}
+-        _ = terminate.recv() => {}
++    #[cfg(unix)]
++    {
++        use tokio::signal::unix::{self, SignalKind};
++        let mut terminate = unix::signal(SignalKind::terminate()).expect("watching for SIGTERM");
++        tokio::select! {
++            _ = tokio::signal::ctrl_c() => {}
++            _ = terminate.recv() => {}
++        }
++    }
++    #[cfg(not(unix))]
++    {
++        // Windows 上没有 SIGTERM；Ctrl-C 足够（capture-proxy 是前台工具）
++        let _ = tokio::signal::ctrl_c().await;
+     }
+ }
+ 
+--- cfs_up/src/capture/rsa.rs	2026-11-01 03:56:32.443699200 +0800
++++ D:/cfsolve/src-patched/src/capture/rsa.rs	2026-11-01 03:42:36.393780200 +0800
+@@ -101,6 +101,7 @@
+     html: &str,
+     strings: &[Encoded],
+     proxy: &BigUint,
++    modulus_override: Option<&str>,
+ ) -> Result<(String, BigUint)> {
+     let wide = |modulus: &BigUint| modulus.bits().div_ceil(8) == SEED_LENGTH as u64;
+     let literals: Vec<_> = MODULUS
+@@ -124,8 +125,38 @@
+         let modulus = BigUint::parse_bytes(digits.as_bytes(), 16)?;
+         wide(&modulus).then_some((string, digits.len(), modulus))
+     });
++    // 第三路径（本地补丁）：新版 CF 把 modulus 在运行时用 BigInt(...) 拼出来，
++    // 上面两条文本扫描都找不到。此时若调用方给了 --modulus，就改成**运行时注入**：
++    // 在 iframe 里包一层 BigInt，凡是用真实 modulus 构造的调用都返回代理的 modulus，
++    // 效果与文本替换等价（浏览器用我们的 key 加密种子，代理解密后再用真实 modulus 转发）。
++    let encoded_candidates: Vec<_> = encoded.collect();
++    if encoded_candidates.is_empty() {
++        if let Some(hex) = modulus_override {
++            let digits = hex.trim_start_matches("0x");
++            let real = BigUint::parse_bytes(digits.as_bytes(), 16)
++                .with_context(|| format!("--modulus is not valid hex: {hex}"))?;
++            let real_hex = format!("0x{}", real.to_str_radix(16));
++            let proxy_hex = format!("0x{}", proxy.to_str_radix(16));
++            let script = format!(
++                "<script>(function(){{var o=BigInt;var P=o(\"{proxy_hex}\");var R=o(\"{real_hex}\");function w(v){{try{{if(o(v)===R)return P;}}catch(e){{}}return o(v);}}w.asIntN=o.asIntN;w.asUintN=o.asUintN;window.BigInt=w;}})();</script>",
++                proxy_hex = proxy_hex,
++                real_hex = real_hex,
++            );
++            let injected = if let Some(position) = html.find("<head>") {
++                let at = position + "<head>".len();
++                format!("{}{}{}", &html[..at], script, &html[at..])
++            } else if let Some(position) = html.find("<html") {
++                let at = html[position..].find('>').map(|i| position + i + 1).unwrap_or(html.len());
++                format!("{}{}{}", &html[..at], script, &html[at..])
++            } else {
++                format!("{script}{html}")
++            };
++            eprintln!("injecting a BigInt shim (modulus built at runtime)");
++            return Ok((injected, real));
++        }
++    }
+     let what = format!("{SEED_LENGTH}-byte modulus in the iframe");
+-    let (string, width, real) = candidates::exactly_one(encoded, &what)?;
++    let (string, width, real) = candidates::exactly_one(encoded_candidates.into_iter(), &what)?;
+     let replacement =
+         deobfuscate::encode_string(&format!("0x{}", padded(proxy, width)?), string.key);
+     ensure!(
+--- cfs_up/src/challenge/program.rs	2026-11-01 03:56:32.448703500 +0800
++++ D:/cfsolve/src-patched/src/challenge/program.rs	2026-11-01 03:32:38.785539200 +0800
+@@ -312,13 +312,35 @@
+     Ok(alphabet)
+ }
+ 
++/// Process-wide override for the RSA modulus, for builds that construct it at runtime.
++///
++/// Newer Cloudflare builds no longer contain a static `BigInt("0x...")` literal, so
++/// [`rsa_modulus`] finds no candidate. A value observed in a real browser can be supplied
++/// through this instead (see `capture-proxy --modulus`).
++static MODULUS_OVERRIDE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
++
++/// Sets the modulus override. Only the first call takes effect.
++pub fn set_modulus_override(hex: String) {
++    let _ = MODULUS_OVERRIDE.set(hex);
++}
++
+ /// Finds the `BigInt("0x...")` modulus wide enough to encrypt the seed.
+ fn rsa_modulus(root: &BlockStmt) -> Result<BigUint> {
+     let moduli = expression::assignments(root)
+         .filter_map(|assignment| big_int(&assignment.right))
+         .filter_map(|literal| BigUint::parse_bytes(literal.strip_prefix("0x")?.as_bytes(), 16))
+         .filter(|modulus| modulus.bits().div_ceil(8) == SEED_LENGTH as u64);
+-    candidates::exactly_one(moduli, "RSA modulus")
++    match candidates::exactly_one(moduli, "RSA modulus") {
++        Ok(modulus) => Ok(modulus),
++        Err(error) => match MODULUS_OVERRIDE.get() {
++            Some(hex) => {
++                let digits = hex.trim_start_matches("0x");
++                BigUint::parse_bytes(digits.as_bytes(), 16)
++                    .with_context(|| format!("--modulus is not valid hex: {hex}"))
++            }
++            None => Err(error),
++        },
++    }
+ }
+ 
+ /// The string `BigInt` is called with.
+--- cfs_up/src/performance_clock.rs	2026-11-01 03:56:32.474805800 +0800
++++ D:/cfsolve/src-patched/src/performance_clock.rs	2026-11-01 02:27:53.421538600 +0800
+@@ -152,6 +152,27 @@
+     value ^ (value >> 33)
+ }
+ 
++#[cfg(windows)]
++fn monotonic_us() -> i64 {
++    // Windows 没有 CLOCK_MONOTONIC。用 QPC —— 它同样是"开机以来"的单调计数，语义最接近。
++    use std::sync::OnceLock;
++    use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
++    static FREQ: OnceLock<i64> = OnceLock::new();
++    let freq = *FREQ.get_or_init(|| {
++        let mut f: i64 = 0;
++        // SAFETY: 传入有效指针；QPC 频率在进程生命周期内不变。
++        let ok = unsafe { QueryPerformanceFrequency(&mut f) };
++        assert!(ok != 0 && f > 0, "QueryPerformanceFrequency failed");
++        f
++    });
++    let mut c: i64 = 0;
++    // SAFETY: 同上，写入我们自己的栈变量。
++    let ok = unsafe { QueryPerformanceCounter(&mut c) };
++    assert!(ok != 0, "QueryPerformanceCounter failed");
++    ((c as i128 * 1_000_000) / freq as i128) as i64
++}
++
++#[cfg(unix)]
+ fn monotonic_us() -> i64 {
+     let mut time = libc::timespec {
+         tv_sec: 0,
