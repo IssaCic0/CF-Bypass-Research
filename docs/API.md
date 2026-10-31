@@ -1,0 +1,264 @@
+# 求解服务 API 参考
+
+> 本文是 `/solve` 契约的**权威来源**；`solver/service.py` 顶部的 docstring 与之一致。
+> 改接口时**两边都要改**（或用 `node scripts/validate-findings.mjs` 之后的手工复核兜住）。
+
+- Base URL：`http://127.0.0.1:8878`（默认只监听回环）
+- 认证：除 `GET /health` 外，全部端点要求 `Authorization: Bearer <token>`
+- 内容类型：`application/json; charset=utf-8`
+- 协议：HTTP/1.1，支持 keep-alive
+
+## 认证
+
+token 的装载优先级：环境变量 `CF_SOLVE_TOKEN` → token 文件（默认 `./.env`）→ **首次启动自动生成**并写入 `./.env`（`CF_SOLVE_TOKEN=<token>`，权限 0600）。
+
+```bash
+# 取 token（Linux/macOS）
+TOKEN=$(grep '^CF_SOLVE_TOKEN=' .env | cut -d= -f2)
+# PowerShell
+$TOKEN = (Select-String -Path .env -Pattern '^CF_SOLVE_TOKEN=(.+)$').Matches[0].Groups[1].Value
+```
+
+服务启动日志会打印 token 的**指纹**（sha256 前 12 位）而不是 token 本体。
+
+---
+
+## POST /solve
+
+求解一个受 Cloudflare 保护页面的 `cf_clearance`。
+
+### Parameters
+
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `url` | string | 是 | — | 目标绝对地址，必须 `http://` 或 `https://`，≤ 2048 字符 |
+| `timeout` | number | 否 | `45` | 本次求解预算（秒），会被收敛到 **[5, 120]** |
+| `force` | boolean | 否 | `false` | `true` = 忽略服务端域名缓存，强制重新求解 |
+
+### Response（成功）
+
+```json
+{
+  "ok": true,
+  "solved": true,
+  "cf_clearance": "……463 字节……",
+  "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101 Firefox/156.0",
+  "cookies": { "cf_clearance": "…", "__cf_bm": "…" },
+  "cookie_list": [
+    {
+      "name": "cf_clearance",
+      "value": "…",
+      "domain": ".example.com",
+      "path": "/",
+      "expires": 1761000000.0,
+      "http_only": true,
+      "secure": true,
+      "same_site": "None"
+    }
+  ],
+  "expires_in": 1800,
+  "expires_at": 1761000000.0,
+  "elapsed": 18.12,
+  "cached": false,
+  "egress_id": "default"
+}
+```
+
+字段语义（四条容易踩的）：
+
+- `cookies` 是**兼容字段**（name→value，丢了 domain/path/expires）。新代码请用 `cookie_list`。
+- `expires_in` / `expires_at` 取 `cf_clearance` 自带的 `expires`（真实 TTL），并受 `--ttl` **上限**约束；
+  剩余寿命短于 30 秒的凭证**不会被返回**（会直接报 `unsolved`），避免客户端拿到静默 403 的死凭证。
+- `cached: true` 时 `elapsed` 恒为 `0.0`（表示本次没有求解动作）；不要把它当成"上次求解耗时"。
+- `egress_id` 是本次求解用的**出口标识**（有代理池时是"该域粘住的那个出口"），也是缓存键的一部分。
+  缓存键 = 域名 + 出口标识（**UA 不进键**）。理由：缓存里存的是成对的「cookie + 当时的 UA」，
+  回放时客户端用的就是这对值，所以旧 UA 的凭证配旧 UA 依然自洽；把 UA 放进键反而会让
+  跨进程共享归零。真错了（站点也校验 UA）会以 403 暴露给客户端，由自愈逻辑重解。
+
+配置了兜底后端（`--flaresolverr`）时，还会多两个字段：
+
+| 字段 | 说明 |
+|---|---|
+| `backend` | 实际解出凭证的后端（`camoufox` / `flaresolverr`） |
+| `attempts` | 尝试轨迹：`[{backend, ok:true}]` 或 `[{backend, ok:false, error_code, stage}]`，未配置的后端记 `{skipped:true}` |
+
+### Response（求解失败 —— 注意是 HTTP 200）
+
+```json
+{
+  "ok": false,
+  "solved": false,
+  "error_code": "unsolved",
+  "error": "45s 内未取得 cf_clearance（页面标题：'Just a moment...'）",
+  "stage": "wait",
+  "hint": "该域可能已升级到 Turnstile 或更严的 managed challenge；也可能是出口 IP 被提分。…"
+}
+```
+
+**两分法契约（客户端只需看一处）**：
+
+- `2xx` → 读 `ok` / `solved`
+- 非 `2xx` → 读 `error_code` / `error` / `stage` / `hint`
+- 两者**永不**同时出现
+
+### 错误码表
+
+| `error_code` | HTTP | `stage` | 含义与建议动作 |
+|---|---|---|---|
+| `invalid-request` | 400 | `validate` | url/timeout/force/body 不合法，**或页面重定向/子资源请求了私网地址被拦**；按 `hint` 修参数 |
+| `unauthorized` | 401 | `admit` | 缺 token 或 token 错；检查 `.env` |
+| `busy` | 429 | `admit` | 队列满 / inflight 满；降低并发或加进程 |
+| `rate-limited` | 429 | `admit` | 同域求解过频（预留，默认未启用） |
+| `unsolved` | **200** | `wait` | 浏览器跑完但没拿到 clearance；换站验证服务本身、或该域已升级 |
+| `timeout` | 504 | `wait` | 超过预算；调大 `timeout`（≤120）或降并发 |
+| `transport` | 502 | `navigate` | 网络层失败（DNS/连接/TLS） |
+| `browser-unavailable` | 503 | `admit` | 浏览器启动失败或中途断开；看 `/health` 的 `last_error` |
+| `not-configured` | 503 | `admit` | 未安装 camoufox；`pip install camoufox && python -m camoufox fetch` |
+| `internal` | 500 | `internal` | 未预期异常；看服务端 traceback |
+
+### Example
+
+```bash
+curl -s -X POST http://127.0.0.1:8878/solve \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"https://steamdb.info/","timeout":45}' | jq .
+```
+
+---
+
+## GET /health — 公开，不需要 token
+
+用于容器健康检查与运维判断。**语义是三态**，不是恒 200：
+
+- `200` + `state: ready` —— 浏览器在线、worker 线程活着
+- `503` + `state: starting` —— 首次启动中（浏览器还没起来）
+- `503` + `state: degraded` —— 曾经好过，现在挂了；`last_error` 说明原因。worker 会指数退避自愈
+
+```json
+{
+  "ok": true,
+  "browser": "camoufox",
+  "state": "ready",
+  "browser_alive": true,
+  "worker_alive": true,
+  "egress_id": "default",
+  "cache_backend": "file:/var/lib/cfsolve/cache",
+  "browser_os": "windows",
+  "ua_fingerprint": "64898c51c64b",
+  "cached_domains": 1,
+  "queue_depth": 0,
+  "solves": 2,
+  "cache_hits": 1,
+  "failures": 0,
+  "timeouts": 0,
+  "rejected_busy": 0,
+  "browser_restarts": 0,
+  "last_success_at": 1761000000.0,
+  "last_error": "",
+  "last_error_at": 0.0,
+  "uptime_sec": 120.5,
+  "avg_elapsed_sec": 16.18,
+  "proxies": {
+    "size": 2,
+    "healthy": 1,
+    "entries": [
+      {
+        "proxy": "http://gw1.example.net:8080",
+        "egress_id": "ip:203.0.113.9",
+        "egress_ip_known": true,
+        "score": 100,
+        "weight": 1,
+        "consecutive_failures": 0,
+        "cooldown_left_sec": 0.0,
+        "success": 12,
+        "failure": 0
+      }
+    ]
+  }
+}
+```
+
+`proxies` 只在配置了代理池时出现，且**永远不含用户名/密码**（只给脱敏后的 `scheme://host:port`）。
+
+`ua_fingerprint` 是**当前浏览器 UA 的 sha256 前 12 位**（不是 UA 本体），纯观测字段：
+UA **不在缓存键里**，所以两个进程这个值不同**照样共享缓存**（键是 `host|egress`）。
+它不同只说明两边的浏览器指纹不同 —— 若目标站严格校验 UA，命中旧凭证会以 403 暴露，
+此时用 `GetFresh` 强制重解即可。
+
+`browser_os` 表示是否固定了 OS persona（`--browser-os`）；`random` 表示每次启动随机（Camoufox 默认）。
+
+---
+
+## GET /stats — 需要 token
+
+`/health` 的同义别名（字段一致）。**注意**：它现在要求 token（v2 起除 `/health` 外全部需要鉴权），
+所以"旧客户端不带 token 直接调"会得到 401 —— 如果你有这种客户端，改成用公开的 `/health`。
+
+## GET /metrics — 需要 token
+
+Prometheus 文本格式。暴露的指标：
+
+| 指标 | 类型 | 用途 |
+|---|---|---|
+| `cfsolve_solves_total` | counter | 真实求解次数（含失败） |
+| `cfsolve_cache_hits_total` | counter | 缓存命中 |
+| `cfsolve_failures_total` | counter | 求解失败 |
+| `cfsolve_timeouts_total` | counter | 超时 |
+| `cfsolve_rejected_total` | counter | 准入拒绝（队列满/inflight 满） |
+| `cfsolve_browser_restarts_total` | counter | 浏览器重启 |
+| `cfsolve_browser_alive` | gauge | 浏览器存活（0/1） |
+| `cfsolve_queue_depth` | gauge | 队列深度 |
+| `cfsolve_solve_seconds` | histogram | 求解耗时分布 |
+
+不暴露任何域名、cookie 或 token。
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8878/metrics
+```
+
+---
+
+## 启动参数（与契约相关的部分）
+
+| 参数 | 默认 | 作用 |
+|---|---|---|
+| `--port` / `--host` | `8878` / `127.0.0.1` | 监听地址。默认只回环；对外暴露前必须先配好 token 与反代 |
+| `--ttl` | `1500` | 缓存有效期**上限**（秒）；真实值取 cookie 的 `expires`，且不超过该值 |
+| `--max-queue` | `16` | 有界队列容量。满了立刻 429 `busy`，**不排队等** |
+| `--max-inflight` | `8` | 并发求解闸门。单进程仍串行求解，这个值限制的是"允许多少请求进来等" |
+| `--egress-id` | `default` | 无代理池时本进程的出口标识。**换出口必须换它** |
+| `--cache-dir` | 空（内存） | 落盘缓存目录（多进程共享）。落盘失败会降级为内存并在启动日志与 `/health` 里写明原因 |
+| `--proxy` | 空 | 代理出口，可重复。按域一致性哈希做粘性 |
+| `--proxy-egress-ip` | 空 | `http://host:port=1.2.3.4`，登记实测出口 IP（改 IP 自动失效旧缓存） |
+| `--browser-os` | 空（随机） | 固定 Camoufox 的 OS persona（`windows`/`macos`/`linux`）。默认随机，**每次启动会变**；生产建议固定并与出口 IP 地理一致 |
+| `--flaresolverr` | 空 | 可选兜底后端地址（自托管 FlareSolverr 兼容服务） |
+| `--token-file` | `.env` | token 文件；首启自动生成 `CF_SOLVE_TOKEN=` |
+| `--no-auth` | 关 | 关闭鉴权，**仅限本机调试** |
+| `--allow-private-hosts` | 关 | 允许访问私网/回环目标，**仅限本机联调** |
+| `--headed` | 关 | 有头模式，调试用 |
+
+### SSRF 防护的范围与残留风险（诚实披露）
+
+- ✅ 覆盖：调用方给的 URL、**浏览器跟随的所有重定向**、页面加载的全部子资源、
+  以及 WebSocket 握手（`route_web_socket`，Playwright ≥1.48）。
+- ✅ 判定是三态：解析到私网/回环/链路本地/多播/保留地址 → `blocked`（abort + 整次 `invalid-request`）；
+  **解析不出来（NXDOMAIN）→ 放行**，让浏览器自然失败（真实页面大量引用这类广告/统计域名，
+  拦了会把主链路打成 400）；**`0.0.0.0` / `::` → 仍然拦截**，因为在 Linux 上
+  `connect(0.0.0.0)` 等价于连 localhost，放行等于留一条打本机端口的 SSRF 通道。
+  若你的环境用 pihole 之类把广告域名 sinkhole 到 `0.0.0.0`，请让求解机 DNS 返回 NXDOMAIN，
+  或显式 `--allow-private-hosts`（后者会关掉整个守卫）。
+- ✅ 守卫**装不上就拒绝求解**（fail closed），不会静默裸奔。
+- ⚠️ **残留风险（未消除）**：守卫是"先解析再放行"，浏览器随后会**再解析一次**，
+  存在 DNS rebinding / TOCTOU 窗口（攻击者控制的域名先解析到公网、再解析到内网）。
+  当前缓解手段：默认只监听回环 + 强制 Bearer token + 目标白名单在部署侧收窄。
+  若要把这一层也堵死，需要把浏览器出口固定到代理（`--proxy`），或用 egress 防火墙按目标 IP 过滤。
+- 这也意味着：**不要把本服务直接暴露到公网**。它设计成"内网 sidecar + 网关调用"。
+
+### 关于落盘缓存的加密与权限
+
+- 内容用 Fernet 加密，密钥由 token + 随机盐（`salt.bin`）经 PBKDF2 派生；**换 token 自动作废旧缓存**。
+- 读取失败 / 解密失败 / schema 不符 → 视为未命中并删文件，不会打断服务。
+- 写入用"同目录临时文件 + 原子替换"，多进程共享目录时读者不会看到半截文件。
+- ⚠️ **Windows 上无法用 chmod 落实 0600/0700**（NTFS ACL 另算）。所以 Windows 部署时
+  "文件权限"这一层保护实际是弱的，真正的保护来自加密 + 目录本身不对外。Linux 上会生效。

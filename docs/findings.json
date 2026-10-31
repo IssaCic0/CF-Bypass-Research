@@ -1,0 +1,230 @@
+{
+  "schema_version": "cf-findings/1",
+  "description": "本仓库研究结论的机器可读清单。每条结论必须给出可定位的证据路径；用 `node scripts/validate-findings.mjs` 校验。verdict 三态：confirmed=有完整证据链且已定级 / needs_validation=有确切但未解决的事实、不定级 / rejected=已证伪的候选路线。",
+  "findings": [
+    {
+      "id": "F-001",
+      "claim": "纯算（离线生成 token）路线拿不到 cf_clearance：挑战 VM 每轮重新混淆下发、绑运行时、在隐藏 realm 采集。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "docs/Cloudflare过盾方案可行性侦察报告.md",
+          "locator": "§14–16"
+        },
+        {
+          "path": "docs/challenges/managed-challenge.md",
+          "locator": "实测证据表"
+        }
+      ]
+    },
+    {
+      "id": "F-002",
+      "claim": "纯 JS 引擎（Node+jsdom、Go+goja）能执行 575 KB 的 CF 编排脚本（语法层），但拿不到 cf_clearance。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "node-shim/shims.js",
+          "locator": "12 项伪造层"
+        },
+        {
+          "path": "go-jseng/main.go",
+          "locator": "假体与执行上限"
+        },
+        {
+          "path": "docs/Cloudflare过盾方案可行性侦察报告.md",
+          "locator": "§9 A1/A2 输出"
+        }
+      ]
+    },
+    {
+      "id": "F-003",
+      "claim": "Camoufox（C++ 层篡改指纹）是唯一实测能拿到 cf_clearance 的路线（2/2 站点）；vanilla Playwright 0/4。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "docs/最终方案与实现结果.md",
+          "locator": "三、实现结果"
+        },
+        {
+          "path": "docs/Cloudflare过盾方案可行性侦察报告.md",
+          "locator": "§8 真实浏览器过盾实测"
+        }
+      ]
+    },
+    {
+      "id": "F-004",
+      "claim": "旧 jsd 纯协议路线已结构性失效：main.js 302 到 /h/g/、码表改运行时构造、oneshot 返回 400/405、53 站采样 jsd 命中 0。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "docs/challenges/jsd.md",
+          "locator": "实测证据"
+        },
+        {
+          "path": "docs/Cloudflare过盾方案可行性侦察报告.md",
+          "locator": "§2.1–2.4"
+        }
+      ]
+    },
+    {
+      "id": "F-005",
+      "claim": "Go 标准库 net/http 可直接回放 cf_clearance（200）；但该证据只覆盖 1 个站点（steamdb），不能外推为「这批站点都不查 JA3」。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "docs/Cloudflare过盾方案可行性侦察报告.md",
+          "locator": "§11（glassdoor 403 为 cookie 不匹配，非对照组）"
+        },
+        {
+          "path": "docs/challenges/turnstile.md",
+          "locator": "回放层判断顺序"
+        }
+      ]
+    },
+    {
+      "id": "F-006",
+      "claim": "求解服务的缓存键必须包含出口标识：cf_clearance 绑「域+出口 IP+UA」，仅用 host 做键会在接代理池时把 A 出口的凭证发给 B 出口。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "cache_key()"
+        },
+        {
+          "path": "gocfsolve/cfsolve.go",
+          "locator": "cacheKey()"
+        },
+        {
+          "path": "tests/test_service.py",
+          "locator": "test_cache_key_includes_egress_id"
+        }
+      ]
+    },
+    {
+      "id": "F-007",
+      "claim": "浏览器 worker 若在 try 之外初始化，启动失败会让线程静默死亡、所有请求等满超时，而 /health 仍报 ok。",
+      "verdict": "confirmed",
+      "severity": "critical",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "_worker() 自愈与三态 health"
+        },
+        {
+          "path": "tests/test_service.py",
+          "locator": "test_launch_failure_reports_unhealthy_then_recovers"
+        }
+      ]
+    },
+    {
+      "id": "F-008",
+      "claim": "求解失败必须用 HTTP 200 + solved:false 表达（而非 4xx/5xx），否则客户端无法区分「请求写错」与「这次没解出来」。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "solver/errors.py",
+          "locator": "STATUS_BY_CODE / UNSOLVED=200"
+        },
+        {
+          "path": "docs/API.md",
+          "locator": "错误码表"
+        },
+        {
+          "path": "gocfsolve/cfsolve_test.go",
+          "locator": "TestUnsolvedIsHTTP200WithErrorCode"
+        }
+      ]
+    },
+    {
+      "id": "F-009",
+      "claim": "求解服务默认只监听回环不足以保证安全：必须带鉴权，否则任意本机进程可把它当 SSRF 跳板与算力免费池。",
+      "verdict": "confirmed",
+      "severity": "critical",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "_authorized() 与 load_or_create_token()"
+        },
+        {
+          "path": "tests/test_service.py",
+          "locator": "test_solve_requires_token / test_token_generated_and_persisted"
+        }
+      ]
+    },
+    {
+      "id": "F-010",
+      "claim": "「厂商验的是可计算谜题还是环境真实性」才是纯协议能否成立的分水岭；不存在「纯协议一律不行」或「一律可行」。",
+      "verdict": "needs_validation",
+      "evidence": [
+        {
+          "path": "docs/challenges/jsd.md",
+          "locator": "结论段"
+        },
+        {
+          "path": "docs/challenges/managed-challenge.md",
+          "locator": "不可行的分支"
+        }
+      ]
+    },
+    {
+      "id": "F-011",
+      "claim": "多出口部署下的真实命中率与失败率、以及 geoip/locale 与出口 IP 对齐后的成功率提升幅度。",
+      "verdict": "needs_validation",
+      "evidence": [
+        {
+          "path": "docs/最终方案与实现结果.md",
+          "locator": "六、已知限制"
+        }
+      ]
+    },
+    {
+      "id": "F-012",
+      "claim": "「只抹 navigator.webdriver 的 stealth 补丁（patchright/undetected 系）在当前 managed challenge 上可行」——本仓库实测 0/4，作为候选路线被证伪。",
+      "verdict": "rejected",
+      "evidence": [
+        {
+          "path": "docs/Cloudflare过盾方案可行性侦察报告.md",
+          "locator": "§8 失败明细"
+        }
+      ]
+    },
+    {
+      "id": "F-013",
+      "claim": "Camoufox 0.5.8 默认每次启动随机挑选 OS persona（实测同一脚本三次分别得到 X11/Linux、Macintosh、Windows 三种 UA），因此 UA 不构成跨进程的稳定标识。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "_default_browser_factory / --browser-os"
+        },
+        {
+          "path": "docs/challenges/managed-challenge.md",
+          "locator": "踩的坑 6"
+        }
+      ]
+    },
+    {
+      "id": "F-014",
+      "claim": "固定 --browser-os windows 后 UA 在多次启动间保持稳定（实测两次均为 Windows NT 10.0 / Firefox 156.0），可作为环境自洽的前置条件；但其对过盾成功率的实际收益未经真机 A/B 验证。",
+      "verdict": "needs_validation",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "--browser-os"
+        },
+        {
+          "path": "docs/API.md",
+          "locator": "启动参数表"
+        }
+      ]
+    }
+  ]
+}
