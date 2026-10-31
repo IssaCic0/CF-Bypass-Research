@@ -34,6 +34,10 @@ $TOKEN = (Select-String -Path .env -Pattern '^CF_SOLVE_TOKEN=(.+)$').Matches[0].
 | `url` | string | 是 | — | 目标绝对地址，必须 `http://` 或 `https://`，≤ 2048 字符 |
 | `timeout` | number | 否 | `45` | 本次求解预算（秒），会被收敛到 **[5, 120]** |
 | `force` | boolean | 否 | `false` | `true` = 忽略服务端域名缓存，强制重新求解 |
+| `want` | string | 否 | `clearance` | 要哪种产物：`clearance`（CF WAF，默认）/ `awswaf` / `turnstile` / `recaptcha_v3` |
+| `sitekey` | string | `turnstile`/`recaptcha_v3` 必填 | — | 从页面取：`data-sitekey`，或 reCAPTCHA 的 `api.js?render=<sitekey>` |
+| `action` | string | 否 | — | Turnstile / reCAPTCHA v3 的 action，要**与目标站一致**（不一致拿到的 token 会被判无效） |
+| `cdata` | string | 否 | — | Turnstile 的 customer data（目标站用了就且要一致） |
 
 ### Response（成功）
 
@@ -74,6 +78,17 @@ $TOKEN = (Select-String -Path .env -Pattern '^CF_SOLVE_TOKEN=(.+)$').Matches[0].
   缓存键 = 域名 + 出口标识（**UA 不进键**）。理由：缓存里存的是成对的「cookie + 当时的 UA」，
   回放时客户端用的就是这对值，所以旧 UA 的凭证配旧 UA 依然自洽；把 UA 放进键反而会让
   跨进程共享归零。真错了（站点也校验 UA）会以 403 暴露给客户端，由自愈逻辑重解。
+
+按 `want` 区分产物（`want` 字段会回显）：
+
+| `want` | 产物字段 | 是否可缓存 | 说明 |
+|---|---|---|---|
+| `clearance`（默认） | `cf_clearance` | ✅ 按域缓存 | CF WAF 站点级 cookie，绑域+出口 IP+UA，约 30 分钟 |
+| `awswaf` | `aws_waf_token` | ✅ 按域缓存 | AWS WAF 的 `aws-waf-token` cookie |
+| `turnstile` | `token` + `token_field=cf-turnstile-response` | ❌ 一次性 | 300s 名义寿命，绑页面会话；本服务用官方 widget 在**目标 origin** 下渲染取得 |
+| `recaptcha_v3` | `token` + `token_field=g-recaptcha-response` | ❌ 一次性 | 120s 名义寿命，绑 action |
+
+一次性 token 的 `cacheable` 恒为 `false`、`cached` 恒为 `false`（复用必然失败，所以设计上不缓存）。
 
 配置了兜底后端（`--flaresolverr`）时，还会多两个字段：
 

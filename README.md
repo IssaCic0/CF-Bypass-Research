@@ -77,6 +77,15 @@ cd gocfsolve && go run ./examples/endtoend -target https://steamdb.info/
 | 纯 JS 引擎 + 自写 shim | ❌ | 脚本执行到运行时注入阶段，但仍报错、无 cookie | 自建浏览器 |
 | **浏览器收割（Camoufox）** | ✅ **2/2 站点** | steamdb 19.6s / glassdoor 14.5s | ≈700 MB/实例 |
 
+**当前支持四类产物**（同一个浏览器求解路径，`want` 参数区分）：
+
+| `want` | 产物 | 真机验证 |
+|---|---|---|
+| `clearance`（默认） | `cf_clearance` cookie | ✅ A 组 24/25 |
+| `turnstile` | Turnstile 一次性 token | ✅ 官方测试 sitekey 通过（dummy token，6–8s） |
+| `recaptcha_v3` | reCAPTCHA v3 一次性 token | ✅ Google 官方 demo 页通过（2297 字节 token，18.5s） |
+| `awswaf` | `aws-waf-token` cookie | ⚠️ 仅离线测试（无 AWS-WAF 目标站） |
+
 **能纯算的部分我们已经在用，而且有效**：cookie 回放、TLS 指纹、加密链计算。
 （注意：**header 顺序不在其中**——Go 标准库按字段名字典序写 header，无法复现浏览器的顺序；
 `gocfsolve` 只保证补齐 Firefox 侧必有的头，不保证顺序。）

@@ -225,6 +225,57 @@
           "locator": "启动参数表"
         }
       ]
+    },
+    {
+      "id": "F-015",
+      "claim": "Turnstile token 可在目标 origin 下用官方 widget 取得：stock 页经 route.fulfill 注入目标文档，且必须用 render=explicit 主动 turnstile.render()（仅放 .cf-turnstile div 不会自动渲染）。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "solver/challenges.py",
+          "locator": "TURNSTILE_STUB_TEMPLATE / build_turnstile_stub"
+        },
+        {
+          "path": "docs/challenges/turnstile.md",
+          "locator": "实现要点"
+        },
+        {
+          "path": "tests/test_challenges.py",
+          "locator": "test_turnstile_*"
+        }
+      ]
+    },
+    {
+      "id": "F-016",
+      "claim": "reCAPTCHA v3 必须先确认 script 存在并等 grecaptcha 就绪，且用『点火 + 轮询全局变量』而不是 await execute —— 后者在真实页面上会久不 resolve，把 5s 拖成 58s。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "solver/challenges.py",
+          "locator": "START_RECAPTCHA / READ_RECAPTCHA"
+        },
+        {
+          "path": "tests/test_challenges.py",
+          "locator": "test_recaptcha_v3_*"
+        }
+      ]
+    },
+    {
+      "id": "F-017",
+      "claim": "AWS WAF（aws-waf-token）走与 cf_clearance 相同的『等 cookie』路径即可，但尚未对真实 WAF 目标站做真机验证。",
+      "verdict": "needs_validation",
+      "evidence": [
+        {
+          "path": "solver/challenges.py",
+          "locator": "COOKIE_FIELD"
+        },
+        {
+          "path": "docs/challenges/awswaf.md",
+          "locator": "实测证据表"
+        }
+      ]
     }
   ]
 }

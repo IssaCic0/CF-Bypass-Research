@@ -65,12 +65,20 @@ class FakeRoute:
         })()
         self.aborted = False
         self.continued = False
+        self.fulfilled = False
+        self.body = None
 
     def abort(self):
         self.aborted = True
 
     def continue_(self):
         self.continued = True
+
+    def fulfill(self, status=200, content_type=None, body=None):
+        self.fulfilled = True
+        self.status = status
+        self.content_type = content_type
+        self.body = body
 
 
 class FakePage:
@@ -82,8 +90,32 @@ class FakePage:
         if self.ctx.goto_error or getattr(self.ctx.browser, "goto_error", False):
             raise RuntimeError("navigation failed")
 
-    def evaluate(self, _expr):
+    def evaluate(self, expr, arg=None):
+        hook = getattr(self.ctx.browser, "evaluate_hook", None)
+        if hook is not None:
+            result = hook(expr, arg)
+            if result is not None:
+                return result
+        # 模拟 reCAPTCHA 的"点火"脚本
+        if "grecaptcha.ready" in expr:
+            return "started"
+        # 模拟 reCAPTCHA 的轮询脚本：全局 → DOM
+        if "__rc_token" in expr:
+            if getattr(self.ctx.browser, "rc_token", ""):
+                return self.ctx.browser.rc_token
+            values = getattr(self.ctx.browser, "input_values", {})
+            return values.get("[name=g-recaptcha-response]", "") or ""
+        # 模拟 Turnstile 的取 token 脚本：读 callback 全局 / 隐藏 input
+        if "__cf_token" in expr and "cf-turnstile-response" in expr:
+            values = getattr(self.ctx.browser, "input_values", {})
+            return values.get("[name=cf-turnstile-response]", "") or ""
         return self.ctx.browser.ua
+
+    def input_value(self, selector, timeout=None):
+        values = getattr(self.ctx.browser, "input_values", {})
+        if selector in values and values[selector] is not None:
+            return values[selector]
+        raise RuntimeError(f"no element for {selector}")
 
     def title(self):
         return "Example"
@@ -118,6 +150,8 @@ class FakeBrowser:
         self.contexts: list[FakeContext] = []
         self.alive = True
         self.goto_error = False
+        self.input_values: dict = {}
+        self.evaluate_hook = None
 
     def new_context(self, proxy=None):
         ctx = FakeContext(self, proxy=proxy)
@@ -653,7 +687,7 @@ def test_guard_fails_closed_when_install_fails():
         with pytest.raises(SolveError) as ei:
             s.solve(HOST, timeout=10)
         assert ei.value.code is ErrorCode.BROWSER_UNAVAILABLE
-        assert "守卫安装失败" in ei.value.message
+        assert "安装失败" in ei.value.message
     finally:
         s.close()
 

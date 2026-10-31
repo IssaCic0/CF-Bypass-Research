@@ -1,14 +1,24 @@
 # 挑战类型：`Turnstile`（以及一个常见混淆）
 
-> 一句话：**Turnstile 不是 `cf_clearance`。** 本仓库**没有**实现 Turnstile 求解，也不建议在没有明确需求时加。
+> 一句话：**Turnstile 不是 `cf_clearance`。** 本仓库已在 v2.2 实现 Turnstile token 求解
+> （`want=turnstile`），并有真机验证；但它产出的是一次性 token，**不能**当 clearance 缓存复用。
 
 ## 最短可行解法
 
-无（本仓库不提供）。如果目标只需要过 Turnstile widget，正确的最小做法是：
+```bash
+curl -s -X POST http://127.0.0.1:8878/solve -H "Authorization: Bearer $TOKEN"   -H 'Content-Type: application/json'   -d '{"url":"https://target/","want":"turnstile","sitekey":"0xAAAA...","action":"login"}'
+# → {"ok":true,"solved":true,"want":"turnstile","token":"...","token_field":"cf-turnstile-response",
+#    "cacheable":false,"expires_in":300,...}
+```
 
-1. 先确认你要的到底是哪个产物——见下面的对照表；
-2. 若是 `cf_clearance`（页面级豁免），走 `docs/challenges/managed-challenge.md`；
-3. 若是 widget token（`cf-turnstile-response`），需要一个**能解 widget 的真浏览器流程**，且 token 通常只在同一次提交里有效——和"拿到 cookie 之后随便回放"是两种东西。
+把 `token` 塞进目标页面的 `cf-turnstile-response` 字段（或目标站自己的回调）提交。
+
+**实现要点（两条都是真机踩出来的）**
+1. **必须在目标 origin 下渲染 widget**：token 绑 origin，换个域拿到的交上去会被拒。
+   做法是 `route.fulfill` 拦截目标文档 URL、直接返回本地存根页。
+2. **必须显式 `turnstile.render()`**：用 `api.js?render=explicit` 时**不会**自动渲染
+   `.cf-turnstile` 元素；只放个 div 会白等到超时（第一版就是这么错的，真机 60s 拿不到 token）。
+   现在用 `render=explicit` + 主动 render + callback 写全局变量，再轮询读取。
 
 ## 实测证据
 

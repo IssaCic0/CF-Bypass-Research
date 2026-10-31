@@ -59,12 +59,38 @@ try:  # 作为包导入（tests / 未来 solver 包）
     from .proxypool import ProxyPool, parse_proxy_url
     from .backends import BackendRouter, CamoufoxBackend, FlareSolverrBackend
     from .prewarm import Prewarmer, parse_targets
+    from .challenges import (
+        COOKIE_FIELD,
+        READ_TURNSTILE_TOKEN,
+        TURNSTILE_SELECTOR,
+        ENSURE_RECAPTCHA_JS,
+        START_RECAPTCHA,
+        READ_RECAPTCHA,
+        NOMINAL_TTL,
+        RESULT_FIELD,
+        TOKEN_WANTS,
+        Want,
+        build_turnstile_stub,
+    )
 except ImportError:  # 直接以脚本运行：python solver/service.py
     from errors import ErrorCode, SolveError  # type: ignore[no-redef]
     from cache import build_store  # type: ignore[no-redef]
     from proxypool import ProxyPool, parse_proxy_url  # type: ignore[no-redef]
     from backends import BackendRouter, CamoufoxBackend, FlareSolverrBackend  # type: ignore[no-redef]
     from prewarm import Prewarmer, parse_targets  # type: ignore[no-redef]
+    from challenges import (  # type: ignore[no-redef]
+        COOKIE_FIELD,
+        READ_TURNSTILE_TOKEN,
+        TURNSTILE_SELECTOR,
+        ENSURE_RECAPTCHA_JS,
+        START_RECAPTCHA,
+        READ_RECAPTCHA,
+        NOMINAL_TTL,
+        RESULT_FIELD,
+        TOKEN_WANTS,
+        Want,
+        build_turnstile_stub,
+    )
 
 # ── 常量 ───────────────────────────────────────────
 DEFAULT_TTL = 1500          # cf_clearance 通常 30 分钟量级；cookie 带 expires 时以 cookie 为准
@@ -139,6 +165,14 @@ def _default_browser_factory(*, headless: bool, os_persona: str = ""):
     if os_persona:
         kwargs["os"] = [os_persona]
     return Camoufox(**kwargs)
+
+
+def _same_document(candidate: str, target: str) -> bool:
+    """判断两个 URL 是否指向"同一个文档"（忽略 fragment 与末尾斜杠差异）。"""
+    def norm(u: str) -> str:
+        base = u.split("#", 1)[0]
+        return base.rstrip("/")
+    return bool(candidate) and bool(target) and norm(candidate) == norm(target)
 
 
 def _is_connected(browser) -> bool:
@@ -561,12 +595,26 @@ class Solver:
         return hashlib.sha256(raw).hexdigest()[:32]
 
     # -- 单次求解（在 worker 线程里执行）--------------
-    def _do_solve(self, browser, url: str, budget: float, proxy: dict | None = None) -> dict:
+    def _do_solve(
+        self,
+        browser,
+        url: str,
+        budget: float,
+        proxy: dict | None = None,
+        *,
+        want: "Want" = Want.CLEARANCE,
+        sitekey: str = "",
+        action: str = "",
+        cdata: str = "",
+    ) -> dict:
         t_end = time.monotonic() + budget
         ctx = browser.new_context(proxy=proxy)
+        # Turnstile 用"在目标 origin 下渲染官方 widget"的方式拿 token：
+        # 拦截目标 URL 直接返回存根页（token 绑 origin，换个域拿到也没用）。
+        stub_html = build_turnstile_stub(sitekey, action, cdata) if want is Want.TURNSTILE else ""
         # 每条真实发出的请求都要过守卫：只校验首个 URL 是可以被 302 / 子资源绕过的
         violation: dict = {}
-        self._install_request_guard(ctx, violation)
+        self._install_request_guard(ctx, violation, stub_url=url if stub_html else "", stub_html=stub_html)
         goto_error = None
         try:
             page = ctx.new_page()
@@ -580,15 +628,25 @@ class Solver:
 
             cookies: dict[str, str] = {}
             cookie_list: list[dict] = []
-            while True:
-                if violation.get("top_level"):
-                    break
-                cookies, cookie_list = self._read_cookies(ctx)
-                if "cf_clearance" in cookies:
-                    break
-                if time.monotonic() >= t_end:
-                    break
-                time.sleep(POLL_INTERVAL)
+            token = ""
+            token_field = ""
+
+            if want in TOKEN_WANTS:
+                token, token_field = self._collect_token(
+                    page, want, sitekey=sitekey, action=action, deadline=t_end
+                )
+            else:
+                cookie_name = COOKIE_FIELD[want]
+                while True:
+                    if violation.get("top_level"):
+                        break
+                    cookies, cookie_list = self._read_cookies(ctx)
+                    if cookie_name in cookies:
+                        break
+                    if time.monotonic() >= t_end:
+                        break
+                    time.sleep(POLL_INTERVAL)
+                token = cookies.get(cookie_name, "")
 
             if violation and violation.get("top_level"):
                 raise SolveError(
@@ -612,6 +670,8 @@ class Solver:
                 "cookies": cookies,
                 "cookie_list": cookie_list,
                 "ua": ua,
+                "token": token,
+                "token_field": token_field,
                 "goto_error": goto_error,
                 "budget_left": max(0.0, t_end - time.monotonic()),
             }
@@ -621,7 +681,81 @@ class Solver:
             except Exception:
                 pass
 
-    def _install_request_guard(self, ctx, violation: dict) -> None:
+    def _collect_token(self, page, want, *, sitekey: str, action: str, deadline: float) -> tuple[str, str]:
+        """一次性 token 的收集器（Turnstile / reCAPTCHA v3）。
+
+        两者机制不同但同构：
+          · Turnstile：widget 自己算完会把 token 写进隐藏 input，轮询即可；
+          · reCAPTCHA v3：需要主动调 `grecaptcha.execute`，拿它的返回值（也兼容 DOM 回填）。
+        都不缓存 —— 一次性 token 复用必然失败。
+        """
+        if not sitekey:
+            raise SolveError(
+                ErrorCode.INVALID_REQUEST, f"{want.value} 需要 sitekey", stage="validate",
+                hint="从页面里的 data-sitekey / render= 参数取值",
+            )
+
+        if want is Want.TURNSTILE:
+            widget_error = ""
+            while time.monotonic() < deadline:
+                try:
+                    value = page.evaluate(READ_TURNSTILE_TOKEN) or ""
+                except Exception:  # noqa: BLE001 —— 页面/全局还没就绪是正常过程
+                    value = ""
+                if value.startswith("ERR:"):
+                    widget_error = value[4:]
+                elif value:
+                    return value, "cf-turnstile-response"
+                time.sleep(POLL_INTERVAL)
+            if widget_error:
+                raise SolveError(
+                    ErrorCode.UNSOLVED,
+                    f"Turnstile widget 渲染失败：{widget_error[:160]}",
+                    stage="wait",
+                    hint="确认 sitekey 与目标域匹配；测试可用官方测试 sitekey 1x00000000000000000000AA",
+                )
+            return "", "cf-turnstile-response"
+
+        # reCAPTCHA v3：确保脚本 → 等 grecaptcha 就绪 → **点火** execute → 轮询全局变量。
+        try:
+            page.evaluate(ENSURE_RECAPTCHA_JS, sitekey)
+        except Exception:  # noqa: BLE001
+            pass
+        waiter = getattr(page, "wait_for_function", None)
+        if waiter is not None:
+            try:
+                waiter(
+                    "() => typeof grecaptcha !== 'undefined' && typeof grecaptcha.execute === 'function'",
+                    timeout=min(15000, max(1000, int((deadline - time.monotonic()) * 1000 * 0.4))),
+                )
+            except Exception:  # noqa: BLE001 —— 超时也继续，下面还会重试点火
+                pass
+        fired = False
+        widget_error = ""
+        while time.monotonic() < deadline:
+            if not fired:
+                try:
+                    page.evaluate(START_RECAPTCHA, {"key": sitekey, "action": action})
+                    fired = True
+                except Exception:  # noqa: BLE001
+                    pass
+            try:
+                value = page.evaluate(READ_RECAPTCHA) or ""
+            except Exception:  # noqa: BLE001
+                value = ""
+            if value.startswith("ERR:"):
+                widget_error = value[4:]
+            elif value:
+                return value, "g-recaptcha-response"
+            time.sleep(POLL_INTERVAL)
+        if widget_error:
+            raise SolveError(
+                ErrorCode.UNSOLVED, f"reCAPTCHA 执行失败：{widget_error[:160]}", stage="wait",
+                hint="确认 sitekey 与页面匹配；v3 需要站点已启用该 action",
+            )
+        return "", "g-recaptcha-response"
+
+    def _install_request_guard(self, ctx, violation: dict, *, stub_url: str = "", stub_html: str = "") -> None:
         """在 context 上挂请求拦截：每个真实请求的 host 都复核 SSRF 守卫。
 
         为什么必须这么做：`_check_target` 只看调用方给的那一个 URL，
@@ -639,13 +773,15 @@ class Solver:
 
         安装失败时**fail closed**：安全控制不能静默失效。
         """
-        if self._allow_private_hosts:
-            return
-
+        # 注意：即使 --allow-private-hosts 关掉了 SSRF 校验，**存根页拦截也必须装上**，
+        # 否则 Turnstile 永远拿不到 token（token 绑 origin，必须由本地页面在目标 origin 下渲染）。
+        guard_enabled = not self._allow_private_hosts
         allow_cache: dict[str, bool] = {}
 
         def check(url: str, *, top_level: bool) -> bool:
             """返回 True=允许，False=拦截。"""
+            if not guard_enabled:
+                return True
             try:
                 host = urlsplit(url).hostname or ""
             except Exception:  # noqa: BLE001
@@ -681,7 +817,16 @@ class Solver:
 
         def handler(route):
             req = route.request
-            if not check(req.url or "", top_level=is_top_level(req)):
+            target = req.url or ""
+            if stub_html and _same_document(target, stub_url):
+                # 目标文档直接返回本地存根页：Turnstile token 绑 origin，
+                # 只有在目标 origins 下渲染出来的 token 才可用。
+                try:
+                    route.fulfill(status=200, content_type="text/html; charset=utf-8", body=stub_html)
+                    return
+                except Exception:  # noqa: BLE001
+                    pass
+            if not check(target, top_level=is_top_level(req)):
                 try:
                     route.abort()
                 except Exception:  # noqa: BLE001
@@ -695,12 +840,17 @@ class Solver:
         try:
             ctx.route("**/*", handler)
         except Exception as e:  # noqa: BLE001
-            raise SolveError(
-                ErrorCode.BROWSER_UNAVAILABLE,
-                f"SSRF 守卫安装失败（{type(e).__name__}: {str(e)[:100]}），已拒绝求解",
-                stage="admit",
-                hint="安全控制不允许静默失效：升级 playwright，或明确用 --allow-private-hosts 关闭防护",
-            ) from e
+            if guard_enabled or stub_html:
+                raise SolveError(
+                    ErrorCode.BROWSER_UNAVAILABLE,
+                    f"请求拦截安装失败（{type(e).__name__}: {str(e)[:100]}），已拒绝求解",
+                    stage="admit",
+                    hint="安全控制不允许静默失效：升级 playwright，或明确用 --allow-private-hosts 关闭防护",
+                ) from e
+            return
+
+        if not guard_enabled:
+            return
 
         # WebSocket 握手不在 route("**/*") 的覆盖范围内（Playwright 有独立 API）。
         route_ws = getattr(ctx, "route_web_socket", None)
@@ -762,7 +912,21 @@ class Solver:
         return cookies, cookie_list
 
     # -- 对外入口 -----------------------------------
-    def solve(self, url: str, timeout: float = DEFAULT_TIMEOUT, force: bool = False) -> dict:
+    def solve(
+        self,
+        url: str,
+        timeout: float = DEFAULT_TIMEOUT,
+        force: bool = False,
+        *,
+        want: str = "clearance",
+        sitekey: str = "",
+        action: str = "",
+        cdata: str = "",
+    ) -> dict:
+        try:
+            want_enum = Want.parse(want)
+        except ValueError as e:
+            raise SolveError(ErrorCode.INVALID_REQUEST, str(e), stage="validate") from e
         if self._stopping.is_set():
             raise SolveError(
                 ErrorCode.BROWSER_UNAVAILABLE, "服务正在关闭，不再受理新请求", stage="admit",
@@ -774,6 +938,11 @@ class Solver:
             raise SolveError(
                 ErrorCode.INVALID_REQUEST, "url 必须是 http(s)", stage="validate",
                 hint="需要带 scheme 的绝对地址，例如 https://example.com/",
+            )
+        if want_enum in TOKEN_WANTS and not sitekey:
+            raise SolveError(
+                ErrorCode.INVALID_REQUEST, f"want={want_enum.value} 需要 sitekey", stage="validate",
+                hint="从页面源码里取 data-sitekey，或 reCAPTCHA 的 api.js?render=<sitekey>",
             )
         host = _host_of(url)
         if not host:
@@ -792,7 +961,9 @@ class Solver:
             )
 
         key = self.cache_key(host, proxy_entry)
-        if not force:
+        # 一次性 token 绝不进缓存（复用必然失败）；cookie 类才按域复用
+        cacheable = want_enum in COOKIE_FIELD
+        if not force and cacheable:
             cached = self._store.get(key)
             if cached and cached.get("expires_at", 0) > _now():
                 with self._lock:
@@ -826,7 +997,13 @@ class Solver:
 
         t0 = time.monotonic()
         try:
-            r = self._submit(lambda b: self._do_solve(b, url, budget, proxy), budget)
+            r = self._submit(
+                lambda b: self._do_solve(
+                    b, url, budget, proxy,
+                    want=want_enum, sitekey=sitekey, action=action, cdata=cdata,
+                ),
+                budget,
+            )
         except SolveError as e:
             # 只有"可能是出口的锅"的失败才记在代理头上；
             # 参数错误/队列满/自身在关闭，与出口无关，记进去会误伤（把好代理冷却掉）。
@@ -851,12 +1028,15 @@ class Solver:
 
         cookies = r["cookies"]
         ua = r.get("ua") or self._browser_ua
-        if "cf_clearance" not in cookies:
+        token = r.get("token") or ""
+        token_field = r.get("token_field") or ""
+
+        if not token:
             with self._lock:
                 self._failures += 1
             if self._pool is not None and proxy_entry is not None:
                 self._pool.record_failure(proxy_entry, "unsolved")
-            # 一个 cookie 都没拿到 + 导航报错 ⇒ 是网络/传输层失败，不是"被盾拒"
+            # 一个 cookie 都没拿到 + 导航报错 ⇒ 网络/传输层失败，不是"被盾拒"
             if not cookies and r.get("goto_error"):
                 raise SolveError(
                     ErrorCode.TRANSPORT,
@@ -864,29 +1044,40 @@ class Solver:
                     stage="navigate",
                     hint="检查 DNS/出口连通性；若开了代理，确认代理可用且没被目标封",
                 )
+            wanted = COOKIE_FIELD.get(want_enum, want_enum.value)
             raise SolveError(
                 ErrorCode.UNSOLVED,
-                f"{budget:.0f}s 内未取得 cf_clearance",
+                f"{budget:.0f}s 内未取得 {wanted}",
                 stage="wait",
-                hint="该域可能已升级到 Turnstile 或更严的 managed challenge；也可能是出口 IP 被提分。"
-                     "先换站点验证服务本身可用，再考虑 CAMOUFOX 升级。",
+                hint=(
+                    "该域可能已升级到更严的挑战；也可能是出口 IP 被提分。"
+                    "先把 want 说清楚（clearance / awswaf / turnstile / recaptcha_v3），"
+                    "再换站点验证服务本身可用。"
+                ),
             )
 
-        ttl = self._ttl_from_cookie_list(r["cookie_list"])
-        if ttl <= 0:
-            with self._lock:
-                self._failures += 1
-            raise SolveError(
-                ErrorCode.UNSOLVED,
-                "拿到的 cf_clearance 已过期或有效期过短，不返回（否则客户端只会拿到静默 403）",
-                stage="wait",
-                hint="重试一次；若持续出现，检查本机时钟是否准确、出口 IP 是否已被提分",
-            )
+        if want_enum in COOKIE_FIELD:
+            ttl = self._ttl_from_cookie_list(r["cookie_list"], cookie_name=COOKIE_FIELD[want_enum])
+            if ttl <= 0:
+                with self._lock:
+                    self._failures += 1
+                raise SolveError(
+                    ErrorCode.UNSOLVED,
+                    f"拿到的 {COOKIE_FIELD[want_enum]} 已过期或有效期过短，不返回"
+                    "（否则客户端只会拿到静默 403）",
+                    stage="wait",
+                    hint="重试一次；若持续出现，检查本机时钟是否准确、出口 IP 是否已被提分",
+                )
+        else:
+            # 一次性 token：给个名义寿命提示调用方尽快用，但不缓存
+            ttl = NOMINAL_TTL.get(want_enum, 120)
+
         expires_at = _now() + ttl
         result = {
             "ok": True,
             "solved": True,
-            "cf_clearance": cookies["cf_clearance"],
+            "want": want_enum.value,
+            RESULT_FIELD[want_enum]: token,
             "user_agent": ua,
             "cookies": cookies,                 # deprecated：保留兼容老客户端
             "cookie_list": r["cookie_list"],    # 结构化：含 domain/path/expires
@@ -894,9 +1085,13 @@ class Solver:
             "expires_at": expires_at,
             "elapsed": elapsed,
             "cached": False,
+            "cacheable": want_enum in COOKIE_FIELD,
             "egress_id": proxy_entry.egress_id if proxy_entry is not None else self.egress_id,
         }
-        self._store.set(key, result)        # 落盘 IO 不持锁
+        if want_enum in TOKEN_WANTS:
+            result["token_field"] = token_field     # 告诉调用方塞进哪个表单字段
+        else:
+            self._store.set(key, result)            # 只有 cookie 类落盘（IO 不持锁）
         if self._pool is not None and proxy_entry is not None:
             self._pool.record_success(proxy_entry, elapsed)
         with self._lock:
@@ -919,14 +1114,14 @@ class Solver:
         except TypeError:
             return sum(1 for _ in self._store.items())
 
-    def _ttl_from_cookie_list(self, cookie_list: list[dict]) -> int:
+    def _ttl_from_cookie_list(self, cookie_list: list[dict], cookie_name: str = "cf_clearance") -> int:
         """返回这条 clearance 还能用多久（秒）；**已过期或过短时返回 0**（调用方据此拒发）。
 
         语义（与 `--ttl` 帮助文本一致）：`--ttl` 是**上限**，真实值取 cookie 自带的 `expires`。
         不用 `max(MIN_TTL, ...)` 兜底——那会把只剩 5 秒的死凭证当成还能用 60 秒。
         """
         for c in cookie_list:
-            if c.get("name") != "cf_clearance":
+            if c.get("name") != cookie_name:
                 continue
             exp = c.get("expires", -1)
             if isinstance(exp, (int, float)) and exp > 0:
@@ -1142,11 +1337,36 @@ class Handler(BaseHTTPRequestHandler):
             force_raw = req.get("force", False)
             if not isinstance(force_raw, (bool, int)):
                 raise SolveError(ErrorCode.INVALID_REQUEST, "force 必须是布尔值", stage="validate")
+
+            # 要哪种产物：clearance（默认）/ awswaf / turnstile / recaptcha_v3
+            want_raw = req.get("want", "")
+            if not isinstance(want_raw, str):
+                raise SolveError(ErrorCode.INVALID_REQUEST, "want 必须是字符串", stage="validate")
+            try:
+                want_enum = Want.parse(want_raw)
+            except ValueError as e:
+                raise SolveError(ErrorCode.INVALID_REQUEST, str(e), stage="validate") from e
+
+            sitekey = req.get("sitekey", "") or ""
+            action = req.get("action", "") or ""
+            cdata = req.get("cdata", "") or ""
+            for name, value in (("sitekey", sitekey), ("action", action), ("cdata", cdata)):
+                if not isinstance(value, str) or len(value) > 256:
+                    raise SolveError(ErrorCode.INVALID_REQUEST, f"{name} 必须是不超过 256 字符的字符串",
+                                     stage="validate")
+            if want_enum in TOKEN_WANTS and not sitekey:
+                raise SolveError(
+                    ErrorCode.INVALID_REQUEST, f"want={want_enum.value} 需要 sitekey", stage="validate",
+                    hint="从页面源码里取 data-sitekey，或 reCAPTCHA 的 api.js?render=<sitekey>",
+                )
             if self.router is not None:
                 # 配了兜底后端：按优先级路由（未配置的后端会被 skip 并记录 attempts）
                 result = self.router.solve(url, timeout=_clamp_timeout(timeout), force=bool(force_raw))
             else:
-                result = self.solver.solve(url, timeout=timeout, force=bool(force_raw))
+                result = self.solver.solve(
+                    url, timeout=timeout, force=bool(force_raw),
+                    want=want_enum.value, sitekey=sitekey, action=action, cdata=cdata,
+                )
             self._send(200, result)
             self._log(event="solve", req_id=req_id, host=_host_of(url), ok=True,
                       cached=result.get("cached"), elapsed=result.get("elapsed"),
