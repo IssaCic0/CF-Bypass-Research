@@ -52,7 +52,7 @@ class SolverBackend(Protocol):
 
     def name(self) -> str: ...
     def is_configured(self) -> bool: ...
-    def solve(self, url: str, timeout: float, force: bool = False) -> dict: ...
+    def solve(self, url: str, timeout: float, force: bool = False, **kwargs) -> dict: ...
 
 
 class CamoufoxBackend:
@@ -67,8 +67,8 @@ class CamoufoxBackend:
     def is_configured(self) -> bool:
         return True
 
-    def solve(self, url: str, timeout: float, force: bool = False) -> dict:
-        out = self._solver.solve(url, timeout=timeout, force=force)
+    def solve(self, url: str, timeout: float, force: bool = False, **kwargs) -> dict:
+        out = self._solver.solve(url, timeout=timeout, force=force, **kwargs)
         out.setdefault("backend", self.name())
         return out
 
@@ -118,7 +118,8 @@ class FlareSolverrBackend:
             self._client = urllib.request  # 零依赖：只用标准库
         return self._client
 
-    def solve(self, url: str, timeout: float, force: bool = False) -> dict:
+    def solve(self, url: str, timeout: float, force: bool = False, **kwargs) -> dict:
+        # 这个后端只发 GET、只回收 cookie，不支持 want=token 之类的语义（未知参数忽略）
         import urllib.error
         import urllib.request
 
@@ -260,7 +261,7 @@ class BackendRouter:
     def backends(self) -> list[str]:
         return [b.name() for b in self._backends]
 
-    def solve(self, url: str, timeout: float, force: bool = False) -> dict:
+    def solve(self, url: str, timeout: float, force: bool = False, **kwargs) -> dict:
         attempts: list[dict] = []
         last_error: SolveError | None = None
 
@@ -270,7 +271,7 @@ class BackendRouter:
                 attempts.append({"backend": name, "skipped": True, "reason": "not-configured"})
                 continue
             try:
-                out = backend.solve(url, timeout=timeout, force=force)
+                out = backend.solve(url, timeout=timeout, force=force, **kwargs)
                 out.setdefault("backend", name)
                 out["attempts"] = attempts + [{"backend": name, "ok": True}]
                 return out

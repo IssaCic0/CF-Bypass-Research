@@ -90,6 +90,9 @@ $TOKEN = (Select-String -Path .env -Pattern '^CF_SOLVE_TOKEN=(.+)$').Matches[0].
 
 一次性 token 的 `cacheable` 恒为 `false`、`cached` 恒为 `false`（复用必然失败，所以设计上不缓存）。
 
+后端优先级（配置了多个时）：**`cfsolve`（纯协议）→ 本地浏览器 → `flaresolverr`**，
+失败会自动回落并在 `attempts` 里留下每一跳的原因。
+
 配置了兜底后端（`--flaresolverr`）时，还会多两个字段：
 
 | 字段 | 说明 |
@@ -264,6 +267,10 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8878/metrics
 | `--prewarm-file` | 空 | 保活目标文件，一行一个，允许 `#` 注释 |
 | `--prewarm-interval` | `60` | 保活扫描间隔（秒） |
 | `--renew-before` | `300` | 剩余寿命低于该值时提前续期（秒），应大于单次求解耗时 |
+| `--engine` | `camoufox` | 浏览器引擎：`camoufox` / `cloakbrowser` / `patchright`。缺失依赖会**启动即失败**并打印安装命令 |
+| `--cfsolve-bin` | 空 | 纯协议后端：cfsolve 的 `challenge` 可执行文件（见 `docs/纯协议-cfsolve.md`） |
+| `--cfsolve-profile` | 空 | 纯协议后端：浏览器 profile（`profiles/*.json`） |
+| `--cfsolve-timeout` | `120` | 纯协议后端单次超时（秒） |
 | `--flaresolverr` | 空 | 可选兜底后端地址（自托管 FlareSolverr 兼容服务） |
 | `--token-file` | `.env` | token 文件；首启自动生成 `CF_SOLVE_TOKEN=` |
 | `--no-auth` | 关 | 关闭鉴权，**仅限本机调试** |

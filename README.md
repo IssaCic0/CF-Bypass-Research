@@ -77,6 +77,10 @@ cd gocfsolve && go run ./examples/endtoend -target https://steamdb.info/
 | 纯 JS 引擎 + 自写 shim | ❌ | 脚本执行到运行时注入阶段，但仍报错、无 cookie | 自建浏览器 |
 | **浏览器收割（Camoufox）** | ✅ **2/2 站点** | steamdb 19.6s / glassdoor 14.5s | ≈700 MB/实例 |
 
+> **四条路线可切换**：纯协议 `cfsolve` / Camoufox（默认）/ CloakBrowser / patchright。
+> 选型、成本、许可证与实测数据见 **[docs/方案矩阵.md](docs/方案矩阵.md)**；
+> 三个参考仓库的深度调研见 **[docs/参考仓库深度调研.md](docs/参考仓库深度调研.md)**。
+
 **当前支持四类产物**（同一个浏览器求解路径，`want` 参数区分）：
 
 | `want` | 产物 | 真机验证 |

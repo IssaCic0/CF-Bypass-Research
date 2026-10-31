@@ -59,6 +59,8 @@ try:  # 作为包导入（tests / 未来 solver 包）
     from .proxypool import ProxyPool, parse_proxy_url
     from .backends import BackendRouter, CamoufoxBackend, FlareSolverrBackend
     from .prewarm import Prewarmer, parse_targets
+    from .engines import Engine, build_factory as build_engine_factory, preflight as engine_preflight
+    from .cfsolve_backend import CfsolveBackend
     from .challenges import (
         COOKIE_FIELD,
         READ_TURNSTILE_TOKEN,
@@ -78,6 +80,8 @@ except ImportError:  # 直接以脚本运行：python solver/service.py
     from proxypool import ProxyPool, parse_proxy_url  # type: ignore[no-redef]
     from backends import BackendRouter, CamoufoxBackend, FlareSolverrBackend  # type: ignore[no-redef]
     from prewarm import Prewarmer, parse_targets  # type: ignore[no-redef]
+    from engines import Engine, build_factory as build_engine_factory, preflight as engine_preflight  # type: ignore[no-redef]
+    from cfsolve_backend import CfsolveBackend  # type: ignore[no-redef]
     from challenges import (  # type: ignore[no-redef]
         COOKIE_FIELD,
         READ_TURNSTILE_TOKEN,
@@ -1361,7 +1365,10 @@ class Handler(BaseHTTPRequestHandler):
                 )
             if self.router is not None:
                 # 配了兜底后端：按优先级路由（未配置的后端会被 skip 并记录 attempts）
-                result = self.router.solve(url, timeout=_clamp_timeout(timeout), force=bool(force_raw))
+                result = self.router.solve(
+                    url, timeout=_clamp_timeout(timeout), force=bool(force_raw),
+                    want=want_enum.value, sitekey=sitekey, action=action, cdata=cdata,
+                )
             else:
                 result = self.solver.solve(
                     url, timeout=timeout, force=bool(force_raw),
@@ -1449,6 +1456,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--prewarm-interval", type=float, default=60.0, help="保活扫描间隔（秒）")
     ap.add_argument("--renew-before", type=float, default=300.0,
                     help="剩余寿命低于该值时提前续期（秒）；应大于单次求解耗时")
+    ap.add_argument("--engine", default=os.environ.get("CF_ENGINE", "camoufox"),
+                    choices=["camoufox", "cloakbrowser", "patchright"],
+                    help="浏览器引擎：camoufox（默认，C++ 层改指纹）/ cloakbrowser（Chromium 源码层补丁，"
+                         "二进制专有）/ patchright（反检测 Chromium，免费的弱一些）")
+    ap.add_argument("--cfsolve-bin", default=os.environ.get("CFSOLVE_BIN", ""),
+                    help="纯协议后端：cfsolve 的 challenge 可执行文件路径（见 docs/纯协议-cfsolve.md）")
+    ap.add_argument("--cfsolve-profile", default=os.environ.get("CFSOLVE_PROFILE", ""),
+                    help="纯协议后端：浏览器 profile 文件路径（cfsolve profiles/*.json）")
+    ap.add_argument("--cfsolve-timeout", type=float, default=120.0, help="纯协议后端单次超时（秒）")
     ap.add_argument("--flaresolverr", default=os.environ.get("FLARESOLVERR_URL", ""),
                     help="可选兜底后端：自托管 FlareSolverr 兼容服务的地址（例如 http://127.0.0.1:8191）")
     args = ap.parse_args(argv)
@@ -1457,6 +1473,15 @@ def main(argv: list[str] | None = None) -> int:
     source = "disabled"
     if not args.no_auth:
         token, source = load_or_create_token(args.token_file)
+
+    try:
+        engine_enum = Engine.parse(args.engine)
+        engine_preflight(engine_enum)
+    except (ValueError, SolveError) as e:
+        msg = getattr(e, "message", str(e))
+        hint = getattr(e, "hint", "")
+        print(f"[cfsolve] 引擎不可用：{msg}" + (f" | 安装：{hint}" if hint else ""), flush=True)
+        return 2
 
     pool = None
     if args.proxy:
@@ -1478,15 +1503,22 @@ def main(argv: list[str] | None = None) -> int:
         cache_max_files=args.cache_max_files,
         proxy_pool=pool,
         browser_os=args.browser_os,
+        browser_factory=None if engine_enum is Engine.CAMOUFOX else build_engine_factory(
+            engine_enum, os_persona=args.browser_os
+        ),
     )
     Handler.solver = solver
     Handler.token = token
+    # 后端优先级：纯协议（若配置）→ 本地浏览器 → 自托管 FlareSolverr
+    backends = []
+    if args.cfsolve_bin and args.cfsolve_profile:
+        backends.append(CfsolveBackend(
+            args.cfsolve_bin, args.cfsolve_profile, timeout=args.cfsolve_timeout
+        ))
+    backends.append(CamoufoxBackend(solver))
     if args.flaresolverr:
-        Handler.router = BackendRouter(
-            [CamoufoxBackend(solver), FlareSolverrBackend(args.flaresolverr)]
-        )
-    else:
-        Handler.router = None
+        backends.append(FlareSolverrBackend(args.flaresolverr))
+    Handler.router = BackendRouter(backends) if len(backends) > 1 else None
 
     try:
         srv = Server((args.host, args.port), Handler)
@@ -1502,6 +1534,8 @@ def main(argv: list[str] | None = None) -> int:
         f"cache={solver.cache_backend}, proxies={0 if pool is None else len(args.proxy)})",
         flush=True,
     )
+    print(f"[cfsolve] 浏览器引擎：{engine_enum.value}"
+          + (f"（os={args.browser_os}）" if args.browser_os else ""), flush=True)
     if Handler.router is not None:
         print(f"[cfsolve] 后端优先级：{Handler.router.backends}（未配置的会被 skip）", flush=True)
     if token:

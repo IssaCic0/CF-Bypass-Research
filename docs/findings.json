@@ -276,6 +276,57 @@
           "locator": "实测证据表"
         }
       ]
+    },
+    {
+      "id": "F-018",
+      "claim": "存在真正可行的『纯协议』路线，但其形态是『录制回放真实浏览器环境快照』（cfsolve 的 profile），而不是现场编造指纹——这与早期 goja/jsdom 实验失败的结论不矛盾。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "solver/cfsolve_backend.py",
+          "locator": "模块 docstring：原理与硬约束"
+        },
+        {
+          "path": "docs/纯协议-cfsolve.md",
+          "locator": "二、录制 profile"
+        },
+        {
+          "path": "docs/参考仓库深度调研.md",
+          "locator": "一、cfsolve"
+        }
+      ]
+    },
+    {
+      "id": "F-019",
+      "claim": "CloakBrowser 的二进制为专有许可（最新版需订阅）且不可随本仓库分发，因此默认引擎仍为 Camoufox；但已作为可切换引擎接入。",
+      "verdict": "confirmed",
+      "severity": "low",
+      "evidence": [
+        {
+          "path": "solver/engines.py",
+          "locator": "INSTALL_HINT / _cloakbrowser_factory"
+        },
+        {
+          "path": "docs/方案矩阵.md",
+          "locator": "四条路线对照"
+        }
+      ]
+    },
+    {
+      "id": "F-020",
+      "claim": "Scrapling 的挑战类型分类（non-interactive/managed/interactive/embedded）与交互式点击策略可作为我们『只等不点』的补充，但其框架依赖过重，不引入。",
+      "verdict": "needs_validation",
+      "evidence": [
+        {
+          "path": "docs/参考仓库深度调研.md",
+          "locator": "三、Scrapling"
+        },
+        {
+          "path": "docs/challenges/managed-challenge.md",
+          "locator": "踩的坑"
+        }
+      ]
     }
   ]
 }

@@ -36,7 +36,7 @@ class FakeBackend:
     def is_configured(self) -> bool:
         return self._configured
 
-    def solve(self, url: str, timeout: float, force: bool = False) -> dict:
+    def solve(self, url: str, timeout: float, force: bool = False, **kwargs) -> dict:
         self.calls += 1
         if self._error is not None:
             raise self._error
@@ -98,7 +98,7 @@ def test_router_raises_last_error_with_attempt_trail():
 
 def test_router_swallows_unexpected_exceptions():
     class Boom(FakeBackend):
-        def solve(self, url, timeout, force=False):
+        def solve(self, url, timeout, force=False, **kwargs):
             raise RuntimeError("kaboom")
 
     fallback = FakeBackend("flaresolverr", result=OK_RESULT)
