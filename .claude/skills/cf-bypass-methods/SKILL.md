@@ -18,11 +18,18 @@ description: 当需要选择/新增/评估"过 Cloudflare 盾"的方法时使用
 |---|---|---|---|---|---|
 | 1 | **Camoufox** | 浏览器（Firefox，C++ 层） | **3/3** | **18.7s** | 默认首选：最快最稳 |
 | 2 | pydoll | 浏览器（Chromium，CDP 直连） | 2/3 | 74.5s | 用系统 Chrome，慢 4 倍，可作第二引擎 |
-| 3 | cfsolve | **纯协议**（Rust CLI，无浏览器） | 0/3（自带 profile） | — | 潜力最大，但 profile 必须自录 |
+| 3 | **cfsolve** | **纯协议**（Rust CLI，无浏览器） | ✅ **可用（站点相关）** | **18.43s**（同站最快） | 已构建+打补丁跑通；只对"会弹挑战且无国家跳转"的站有效 |
 | — | CloakBrowser | 浏览器（Chromium，87 处 C++ 补丁） | 未测 | — | 二进制专有，最新版需订阅 |
 | — | patchright | 浏览器（Chromium fork） | 未测 | — | 历史同类实测 0/4 |
 
 完整数据与逐站点明细：`docs/AB实测-三种过盾方法.md`。
+
+**同站对比（glassdoor.co.uk）**：cfsolve **18.43s** < Camoufox 19.56s < pydoll 失败(25.72s)。
+纯协议不但能过，还是最快、且不起浏览器进程。
+
+⚠️ **"不弹挑战" ≠ "失败"**：steamdb/udemy/quora 对 Safari-iOS 指纹直接放行，cfsolve 会报
+`page has no .cf-turnstile container` —— 那说明**没有可解的挑战**，不是方案不行。
+选站时要先确认目标站真的会弹挑战（用 Camoufox 访问看是否 403 + `cf-mitigated`）。
 
 ## 二、四条硬约束（任何方法都逃不掉，先检查这个再调参）
 
@@ -82,17 +89,24 @@ python scripts/ab_test.py --sites "https://a/,https://b/,https://c/" --gap 5
 2. **`render=explicit` 不会自动渲染 `.cf-turnstile`** → Turnstile 必须主动 `turnstile.render()`
 3. **`await grecaptcha.execute()` 的 Promise 可能永不 resolve** → 改"点火 + 轮询全局变量"（58s → 18.5s）
 4. **cfsolve 不支持 Windows**（`tokio::signal::unix` / `clock_gettime`）；需 2 处 cfg 补丁
-5. **cfsolve 的 profile 是消耗品**，且只支持 Safari/Chromium 类型；用作者自带 profile ≈ 0% 成功率
-6. **SSRF 守卫只守首跳会被 302 绕过** → 必须在 context 上挂 route 拦每个请求
-7. **子资源解析失败（NXDOMAIN）不能判成越权** → 三态（blocked/unresolvable/allowed），且子资源被拦不该整次失败
-8. **`0.0.0.0` 要拦**：Linux 上 `connect(0.0.0.0)` 等价于连 localhost
+5. **cfsolve 的 profile 是消耗品**，且只支持 Safari/Chromium 类型。**作者自带的 safari profile 在
+   我们出口上是可用的**（glassdoor.co.uk 3/3），但录制新 profile 目前卡在 CF 改版
+   （`cf-chl token` 运行时生成）——详见 `tools/cfsolve-patches/README.md`
+6. **cfsolve 不支持 Windows**（`tokio::signal::unix`、`clock_gettime`）；补丁在
+   `tools/cfsolve-patches/cfsolve-windows-and-capture-fixes.patch`（`git apply` 即用）
+7. **capture-proxy 只在收到 Ctrl-C/SIGTERM 时落盘**，且 Windows 上信号投递不可靠
+   → 补丁改成每 5 秒周期性 flush
+8. **SSRF 守卫只守首跳会被 302 绕过** → 必须在 context 上挂 route 拦每个请求
+9. **子资源解析失败（NXDOMAIN）不能判成越权** → 三态（blocked/unresolvable/allowed），且子资源被拦不该整次失败
+10. **`0.0.0.0` 要拦**：Linux 上 `connect(0.0.0.0)` 等价于连 localhost
 
 ## 七、相关文档
 
 | 文档 | 内容 |
 |---|---|
 | `docs/方案矩阵.md` | 五条路线对照 + 决策树 + 全部实测数据 |
-| `docs/AB实测-三种过盾方法.md` | 本次 A/B 的完整结果与逐站点明细 |
+| `docs/00-索引.md` | **总索引**：能力清单 / 参考仓库→取用→落地 / 文档地图 / 证据 |
+| `docs/AB实测-三种过盾方法.md` | 本次 A/B 的完整结果与逐站点明细（含同站对比） |
 | `docs/参考仓库深度调研.md` | cfsolve / CloakBrowser / Scrapling 深度调研 |
 | `docs/纯协议-cfsolve.md` | 纯协议构建（含 Windows 补丁）、profile 录制、契约 |
 | `docs/API.md` | `/solve` 契约与错误码 |
