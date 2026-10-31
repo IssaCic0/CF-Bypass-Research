@@ -1,0 +1,20 @@
+# 求解服务与实验脚本的运行期依赖（精确锁版本）。
+#
+# 为什么必须锁：Camoufox 是跟 CF 对抗的项目，指纹面随版本漂。
+# 不锁版本 = 某天 `pip install` 之后成功率静默归零，且无从回溯是哪个版本变的。
+#
+# 安装：
+#   pip install -r requirements.txt
+#   python -m camoufox fetch        # 拉取 Camoufox 的 Firefox 二进制（必需）
+
+camoufox==0.5.8
+playwright==1.62.0       # camoufox 的运行期依赖，单独钉死以免被顺带升级
+httpx==0.28.1            # scripts/analyze.py、scripts/scan_ctype.py
+curl_cffi==0.16.0        # TLS 指纹对照实验（可选，缺省不影响主链路）
+
+# 落盘加密缓存（solver/cache.py）依赖：**不给 --cache-dir 时不会用到**，
+# 但一旦要用就必须装，否则会静默降级成内存缓存（启动日志与 /health 会写明 fallback 原因）。
+cryptography==50.0.1
+
+# —— 测试（README 的"跑测试"一节需要）——
+pytest==9.1.1

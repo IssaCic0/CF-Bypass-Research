@@ -16,8 +16,21 @@ ua.txt
 *_cookie.txt
 challenge_screenshot.png
 
+# 求解服务自动生成的鉴权 token（首启写入，绝不入库）
+.env
+
+# 构建产物（go build 会在源码目录留下 exe）
+*.exe
+
+# Python / 测试
+__pycache__/
+.pytest_cache/
+
 # 编辑器/系统
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
