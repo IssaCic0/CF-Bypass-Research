@@ -80,6 +80,25 @@ cargo build --release --bin capture-proxy # 产物：target/release/capture-prox
 > 出口环境"——一旦出口 IP 与它差异大，成功率就会掉。这是它最容易踩的坑，也是它必须
 > 要求"回放同 IP + 同 UA"的原因。
 
+## 二点五、本机尝试自录 profile（失败，记录在此避免重复劳动）
+
+已构建 `capture-proxy.exe`（48MB，同上补丁），并尝试用 **CDP 驱动本机 Chrome** 走它的 MITM 代理录 profile：
+
+```bash
+capture-proxy --fingerprint profiles/safari-26-ios.json   --site https://www.glassdoor.com/ --listen 127.0.0.1:<free>   --out ./captures --ca-dir ./proxy-ca
+# Chrome: --proxy-server=http://127.0.0.1:<free> --ignore-certificate-errors
+```
+
+结果：Chrome 在 **120 秒内始终停在挑战页**（title 一直是"请稍候"），`captures/` **0 字节** → 没录到任何质询应答。
+
+原因（两条叠加）：
+1. **glassdoor 对本机 IP 很硬**：同一台机器上 pydoll（Chrome 直连）也过不了它（48.99s 无 clearance）；
+2. **MITM 会改变指纹链路**：Chrome 客户端 ↔ capture-proxy 之间是 Chrome 的 TLS，而 capture-proxy ↔ CF 之间用它 profile 里的 transport（Safari）重新发起 —— 客户端自称 Safari 但实际是 Chrome 的 JS 环境，**自相矛盾**，比直连更难通过。
+
+**结论**：本机无法自录 profile。要拿到可用的 profile，最现实的是
+**在真实手机 Safari / 真实桌面 Chrome 上人工过一次盾**（用作者说的手动流程），或在一台
+"Chrome 能过盾"的机器上录。
+
 ## 三、本仓库怎么接
 
 ```bash

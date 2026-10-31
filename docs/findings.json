@@ -391,6 +391,18 @@
           "locator": "三、pydoll 优缺点"
         }
       ]
+    },
+    {
+      "id": "F-025",
+      "claim": "本机尝试用 capture-proxy + CDP 驱动 Chrome 自录 profile 失败：Chrome 120s 未过 glassdoor、captures 0 字节；根因是目标站对本机 IP 很硬 + MITM 后客户端(Chrome)与服务端(Safari transport)指纹自相矛盾。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "docs/纯协议-cfsolve.md",
+          "locator": "二点五、本机尝试自录 profile"
+        }
+      ]
     }
   ]
 }
