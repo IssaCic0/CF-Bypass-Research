@@ -514,9 +514,12 @@ class Solver:
                 hint="求解服务不允许访问私网/回环地址；确需联调请加 --allow-private-hosts",
             )
         if verdict == "unresolvable":
+            # 实测教训：真实站点的 DNS 会**瞬时**失败（g2.com 连续两次 invalid-request 后第三次成功）。
+            # 把它报成 400 "参数错误" 会让调用方以为 URL 写错了、直接放弃且不重试。
+            # 语义上这属于"到不了"，是传输层问题 → 502 + 可重试。
             raise SolveError(
-                ErrorCode.INVALID_REQUEST, f"域名无法解析：{host}", stage="validate",
-                hint="检查 URL 拼写，或确认求解机可访问该域名",
+                ErrorCode.TRANSPORT, f"域名解析失败：{host}", stage="validate",
+                hint="DNS 解析失败可能是瞬时的，可重试；持续失败请检查求解机的 DNS 与网络",
             )
         self._dns_cache[host] = (_now() + 60.0, host)
 

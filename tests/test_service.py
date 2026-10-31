@@ -658,14 +658,19 @@ def test_guard_fails_closed_when_install_fails():
         s.close()
 
 
-def test_entry_url_unresolvable_is_still_rejected():
-    """入口（调用方给的那个 URL）解析不了，仍然是调用方写错了 → 400。"""
+def test_entry_url_unresolvable_is_transport_not_bad_request():
+    """入口解析失败要报 502 transport（可重试），不是 400 参数错误。
+
+    实测依据：真实站点的 DNS 会瞬时失败（g2.com 连续两次失败后第三次成功）。
+    报成 400 会让调用方以为 URL 写错、直接放弃且不重试。
+    """
     s = service.Solver(browser_factory=factory_returning(FakeBrowser()))
     try:
         with pytest.raises(SolveError) as ei:
             s.solve("https://nonexistent-host.invalid/", timeout=10)
-        assert ei.value.code is ErrorCode.INVALID_REQUEST
-        assert "无法解析" in ei.value.message
+        assert ei.value.code is ErrorCode.TRANSPORT
+        assert ei.value.http_status == 502
+        assert "解析失败" in ei.value.message
     finally:
         s.close()
 
