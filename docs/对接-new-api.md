@@ -6,6 +6,22 @@
 - 求解服务：本仓库 `solver/service.py`（HTTP sidecar）
 - new-api：任意版本，只要能配"自定义上游 / 自定义请求头 / 前置脚本"三者之一
 
+> **实测性能（同站对比，2026-11-01）**：纯协议 **18.43s** < Camoufox 19.56s < pydoll 25.72s(失败)。
+> 所以对接后热路径是"缓存命中（<100ms）→ 回放（1.3–1.7s）"，冷路径才有 18–20s。
+
+## 零、30 秒自检（对接前先跑这两条）
+
+```bash
+# 1) 服务活着且浏览器就绪
+curl -s http://127.0.0.1:8878/health | jq '.state'        # 期望 "ready"
+
+# 2) 真解一次（把 <目标> 换成你真的要抓的站）
+TOKEN=$(grep '^CF_SOLVE_TOKEN=' .env | cut -d= -f2)
+curl -s -X POST http://127.0.0.1:8878/solve -H "Authorization: Bearer $TOKEN"   -H 'Content-Type: application/json' -d '{"url":"<目标>","timeout":60}' | jq '.ok,.cf_clearance,.user_agent'
+```
+
+拿到 `ok:true` 再往下接；`ok:false` 就先看 `error_code` 与 `hint`（表在 §4）。
+
 ---
 
 ## 0. 先搞清楚一件事：为什么不能"只在 new-api 里加个 Cookie"
