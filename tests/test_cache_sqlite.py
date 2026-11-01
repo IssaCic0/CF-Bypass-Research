@@ -449,8 +449,79 @@ def test_wal_degradation_is_loud_but_usable(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cache_mod, "WAL_RETRY_DELAY", 0.01)
 
     store = cache_mod.SqliteStore(str(tmp_path), TOKEN)
-    assert store._journal_mode != "wal"
     store.set("k|default", entry())
     assert store.get("k|default") is not None, "降级后缓存仍然必须可用"
-    assert store.stats()["journal_mode"] == store._journal_mode, "stats 里要能看到真实模式"
-    assert "无法切到 WAL" in capsys.readouterr().out, "降级必须打印警告（不许静默）"
+
+    # 断言"stats 报的就是库里真实的模式"，而不是"stats 报的就是那个属性"——
+    # 后者是恒等式（stats() 直接返回 self._journal_mode），什么都证明不了。
+    import sqlite3 as _s
+    real = str(store._conn().execute("PRAGMA journal_mode").fetchone()[0] or "").lower()
+    assert store.stats()["journal_mode"] == real, f"stats 报的模式与库里不一致：{store.stats()} vs {real}"
+    # 降级后必须是**已知**的 rollback 模式（delete/truncate/persist），不能是"未知空串"：
+    # 否则"真降级"和"连模式都读不出来"会被混为一谈。
+    assert real in ("delete", "truncate", "persist", "memory"), f"降级后的模式不可识别：{real!r}"
+    # WAL 下的 NORMAL 在 rollback journal 下会削弱掉电安全，降级后必须回到 FULL
+    assert int(store._conn().execute("PRAGMA synchronous").fetchone()[0]) == 2,         "降级后 synchronous 必须回到 FULL(2)"
+    # 警告走 stderr：本服务的 stdout 是 JSON lines 契约，不许被人类可读文本污染
+    captured = capsys.readouterr()
+    assert "未能启用 WAL" in captured.err, "降级必须打印警告（不许静默）"
+    assert "未能启用 WAL" not in captured.out, "警告不许写进 stdout（会污染 JSON lines 日志）"
+
+
+def test_wal_permanent_error_does_not_retry_from_the_moon(tmp_path, monkeypatch):
+    """永久性错误（不是锁竞争）必须立刻放弃，不能重试 25 次把启动拖 10 秒。
+
+    `file is not a database` / `unable to open database file` / `disk I/O error`
+    这类错误重试一万次也一样；拖 10 秒还会打出一条误导性的"并发下降"警告。
+    """
+    import sqlite3
+
+    calls = {"n": 0}
+
+    def permanent(conn):
+        calls["n"] += 1
+        raise sqlite3.DatabaseError("file is not a database")
+
+    monkeypatch.setattr(cache_mod, "_try_set_wal", permanent)
+    monkeypatch.setattr(cache_mod, "WAL_RETRY_DELAY", 0.01)
+    store = cache_mod.SqliteStore(str(tmp_path), TOKEN)
+    store.close()
+    assert calls["n"] == 1, f"永久错误只该试 1 次，实际 {calls['n']} 次"
+
+
+def test_read_paths_actually_take_the_connection_lock(tmp_path):
+    """确定性机制用例：读路径必须**真的**取锁（不是靠并发跑一遍碰运气）。
+
+    `test_concurrent_reads_and_writes_never_corrupt_rows` 是概率门 —— 线程切换若不落在
+    execute 与 fetchone 之间，它照样绿。这条用例把"取锁"本身钉成断言：
+    任何一条读路径被人把 `with self._conn_lock:` 删掉，这里立刻红。
+    """
+    store = cache_mod.SqliteStore(str(tmp_path), TOKEN)
+    store.set("k|default", entry())
+
+    class SpyLock:
+        """记录进入次数；行为完全委托给真锁。"""
+        def __init__(self, inner):
+            self.inner = inner
+            self.entries = 0
+
+        def __enter__(self):
+            self.entries += 1
+            return self.inner.__enter__()
+
+        def __exit__(self, *exc):
+            return self.inner.__exit__(*exc)
+
+    spy = SpyLock(store._conn_lock)
+    store._conn_lock = spy
+    base = spy.entries
+
+    store.get("k|default")      # 读 + _conn() 各一次
+    store.items()
+    len(store)
+    store.stats()
+    store.host_stats()
+
+    # 每条读路径至少 2 次（自己的 with + _conn() 的 with）→ 5 条 ≥ 10
+    assert spy.entries - base >= 10, (
+        f"读路径没有全部取锁：只进入 {spy.entries - base} 次（期望 ≥10）")

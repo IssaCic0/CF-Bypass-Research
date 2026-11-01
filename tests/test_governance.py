@@ -852,3 +852,21 @@ def test_empty_body_is_rejected_and_still_audited(live_audit):
         "空 body 请求没有留下任何审计行"
     recs = _solve_audits(audit)
     assert recs and recs[-1]["error_code"] == "invalid-request", recs
+
+
+def test_oversized_body_is_rejected_and_still_audited(live_audit):
+    """超大 body 是第三条早退路径（`_read_body_raw` 也在 `url` 赋值之前返回错误）。
+
+    独立审查指出：N-14 自述覆盖"空 body / 畸形 JSON / 超大 body **三**条"，用例却只有前两条。
+    这条补齐第三条 —— 它同时验证审计不丢（`_read_body_raw` 抛错时同样会走 except 分支）。
+    """
+    base, audit = live_audit
+    big = b"{" + b"x" * (70 * 1024) + b"}"          # > MAX_BODY_BYTES(64KB)
+    code, body = _post_raw(base, big)
+    assert code == 400, (code, body)
+    assert body.get("error_code") == "invalid-request", body
+    assert "请求体超过" in str(body.get("error", "")), body
+    assert wait_until(lambda: audit.exists() and "solve" in audit.read_text(encoding="utf-8")), \
+        "超大 body 请求没有留下审计行"
+    recs = _solve_audits(audit)
+    assert recs and recs[-1]["error_code"] == "invalid-request", recs

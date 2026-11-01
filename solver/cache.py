@@ -37,6 +37,7 @@ import base64
 import hashlib
 import json
 import os
+import sys
 import tempfile
 import threading
 import time
@@ -114,7 +115,9 @@ class MemoryStore:
     def stats(self) -> dict:
         now = time.time()
         alive = sum(1 for v in self._data.values() if v.get("expires_at", 0) > now)
-        return {"backend": "memory", "entries": alive, "max_entries": self._max}
+        # journal_mode 对内存后端无意义，但仍给同名的键：消费方可以统一取字段而不用 if。
+        return {"backend": "memory", "entries": alive, "max_entries": self._max,
+                "journal_mode": None}
 
     def __len__(self) -> int:
         return len(self._data)
@@ -236,7 +239,7 @@ class FileStore:
 
     def stats(self) -> dict:
         return {"backend": "file", "entries": len(self._list_files()),
-                "max_entries": self._max_files, "path": self.dir}
+                "max_entries": self._max_files, "path": self.dir, "journal_mode": None}
 
     # -- 内部 --------------------------------------
     def _path(self, key: str) -> str:
@@ -342,14 +345,15 @@ class SqliteStore:
                                        check_same_thread=False)
                 # busy_timeout 要在切 journal_mode **之前**生效（见 _enable_wal 的说明）。
                 conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
-                conn.execute("PRAGMA synchronous=NORMAL")    # WAL 下的合理折中
+                # synchronous 由 _enable_wal 按**最终**落定的 journal 模式设：
+                # NORMAL 只在 WAL 下是安全折中，退回 rollback journal 时必须改回 FULL。
                 self._journal_mode = self._enable_wal(conn)
                 self._conn_obj = conn
                 self._conn_creations += 1
             return self._conn_obj
 
     def _enable_wal(self, conn, attempts: int | None = None, delay: float | None = None) -> str:
-        """把连接切到 WAL，带**有界重试**；仍然失败就退回当前模式（但不静默）。
+        """把连接切到 WAL，带**有界重试**；失败则退回当前模式（不静默）。
 
         为什么需要重试：`PRAGMA journal_mode=WAL` 需要一次短暂独占锁，而它在拿不到锁时
         **不走 busy handler**，直接返回 `database is locked`。实测（v4.7）：
@@ -357,26 +361,51 @@ class SqliteStore:
         约 **1/10** 概率有一个子进程在这一步直接起不来 —— 等价于 compose 3 worker 冷启动。
         WAL 只是并发优化，不该成为"服务起不来"的原因。
 
-        ⚠️ 诚实说明：这条竞态**没有**被用例确定性复现出来（试过同进程持锁、跨进程持锁、
-        90 次裸构造，都没能稳定命中），所以回归用例只覆盖"重试逻辑本身"
+        **只对锁竞争重试**：`database is locked` / `... busy` 才是"等一会儿就好"；
+        `file is not a database`、`unable to open database file`、`disk I/O error` 是**永久**
+        错误，重试 25 次只是把必然的失败延后 10s，还会打出一条误导性的"并发下降"警告 ——
+        那种情况应该让后面的 `_init_schema` 带着真实错误信息立刻失败。
+
+        降级时的两个动作：
+          · `synchronous=FULL`：WAL 下的 `NORMAL` 在 rollback journal 模式下会削弱掉电安全性
+            （SQLite 官方文档对此有明确提示），退回时必须改回；
+          · 警告写 **stderr**：本服务的 stdout 是 JSON lines 契约（`_log` → `print(json.dumps)`），
+            一行人类可读文本会污染日志采集管道。
+
+        ⚠️ 诚实说明：这条竞态**没有**被用例确定性复现出来（同进程持锁、跨进程持锁、
+        90 次裸构造都没稳定命中），所以回归用例只覆盖"重试逻辑本身"
         （`test_wal_switch_retries_when_database_is_locked`）。真实竞态靠降低概率 + 压力观察，
-        见 `workflow_status.md` §7 N-15。
+        见 `workflow_status.md` §7 R13。
         """
         last = ""
         attempts = WAL_RETRY_ATTEMPTS if attempts is None else attempts
         delay = WAL_RETRY_DELAY if delay is None else delay
         for i in range(attempts):
             try:
-                return _try_set_wal(conn)
-            except Exception as e:  # noqa: BLE001 —— 只可能是 busy/locked/只读挂载
+                mode = _try_set_wal(conn)
+                conn.execute("PRAGMA synchronous=NORMAL")   # WAL 下的合理折中
+                return mode
+            except Exception as e:  # noqa: BLE001
                 last = f"{type(e).__name__}: {e}"
+                msg = str(e).lower()
+                if "locked" not in msg and "busy" not in msg:
+                    break                                   # 永久错误：不浪费 10s
                 time.sleep(delay * (1 + i % 3))
-        print(f"[cfsolve] 警告：无法切到 WAL（{last}），已退回默认 journal 模式；"
-              f"并发读性能下降，功能不受影响", flush=True)
+        # 回读真实模式：多进程下别的进程可能已经把库切成 WAL，这时"降级"是假警报，
+        # 文案必须依据回读值而不是固定的"已退回默认模式"。
         try:
-            return str(conn.execute("PRAGMA journal_mode").fetchone()[0] or "").lower()
+            mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0] or "").lower()
         except Exception:  # noqa: BLE001
-            return ""
+            mode = ""
+        if mode != "wal":
+            try:
+                conn.execute("PRAGMA synchronous=FULL")
+            except Exception:  # noqa: BLE001
+                pass
+            print(f"[cfsolve] 警告：未能启用 WAL（{last or '未知原因'}），"
+                  f"当前 journal 模式={mode or '未知'}，synchronous 已退回 FULL；"
+                  f"并发写会退化为串行，功能不受影响", file=sys.stderr, flush=True)
+        return mode
 
     def _init_schema(self) -> None:
         conn = self._conn()
@@ -429,7 +458,14 @@ class SqliteStore:
             return None
         if row is None:
             return None
-        blob, expires_at = row
+        # 解包本身也要防：上面刚论证过"共享连接可能给出畸形行"，
+        # 那么"列数不对的行"同样可能（ValueError 会一路冒到调用方）。
+        # 独立审查抓到这里与自己的论证自相矛盾 —— 锁已经关掉了窗口，但契约要一次写完。
+        try:
+            blob, expires_at = row
+        except (TypeError, ValueError):
+            self.delete(key)
+            return None
         if not isinstance(expires_at, (int, float)):
             # 半行/坏行：NOT NULL 约束理论上挡得住，但既然共享连接能给出畸形行，
             # 这里就不能再假设它是数字（原来直接 float() 会抛 TypeError 冒到调用方）。
@@ -477,8 +513,10 @@ class SqliteStore:
     def delete(self, key: str) -> None:
         """删除一条（**写**操作，走锁）。
 
-        注意 `get()` 在"过期/解密失败"时也会调它 —— 那是无锁读路径里的一次写，
-        所以这里必须自己加锁（RLock 可重入，不会因为调用方恰好持锁而死锁）。
+        注意 `get()` 在"过期/坏行"时也会调它（v4.7 起 `get()` 的读路径已经持锁，
+        所以那条调用现在发生在**锁外**，不是"锁内再取锁"）。
+        这里自己加锁仍然必须：`delete` 是写操作，可能与求解线程的 `set()` 并发；
+        RLock 可重入，将来若有人从持锁路径调用它也不会自锁。
         """
         try:
             with self._conn_lock:
@@ -523,13 +561,17 @@ class SqliteStore:
         try:
             # 读路径同样必须进锁（共享连接 + 并发游标会串行/串数据，见 _conn 的说明）。
             with self._conn_lock:
-                alive = self._conn().execute(
+                conn = self._conn()
+                alive = conn.execute(
                     "SELECT COUNT(*) FROM entries WHERE expires_at > ?", (time.time(),)
                 ).fetchone()[0]
+                # 现读而不是回放建连时的快照：多进程下别的进程可能已经把库切成 WAL，
+                # 报一个陈旧值会让排障时"模式看起来是 delete，实际是 wal"。
+                mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0] or "").lower()
         except Exception:  # noqa: BLE001
-            alive = 0
+            alive, mode = 0, self._journal_mode
         return {"backend": "sqlite", "entries": int(alive), "max_entries": self._max,
-                "path": self.path, "journal_mode": self._journal_mode}
+                "path": self.path, "journal_mode": mode}
 
     def try_claim(self, key: str, ttl: float = 120.0, owner: str = "") -> bool:
         """跨进程抢占"我来解这个域"。**原子**（INSERT OR IGNORE），抢到返回 True。
