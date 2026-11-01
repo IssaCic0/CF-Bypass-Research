@@ -15,12 +15,12 @@ $ docker build --build-arg SLIM_FONTS=1 -t cf-bypass-solver:4.7.0 .
 [exited with code 0]
 
 $ docker images cf-bypass-solver
-cf-bypass-solver:4.7.0   3.54GB   (id 4ff30527317c)
+cf-bypass-solver:4.7.0   3.54GB   (id 1106e2e6ce96)
 
 # 镜像里的代码确实是当前 HEAD（不是上一版缓存）：
-$ docker run --rm --entrypoint sh cf-bypass-solver:4.7.0 -c     'grep -c _journal_mode /app/solver/cache.py; grep -c WAL_RETRY_ATTEMPTS /app/solver/cache.py'
-3
+$ docker run --rm --entrypoint sh cf-bypass-solver:4.7.0 -c     'grep -c _is_lock_error /app/solver/cache.py; grep -c "未能启用 WAL" /app/solver/cache.py'
 2
+1
 ```
 
 v4.4 时代记录是 4.63GB → slim 3.27GB；本次 3.54GB 的差额是**刻意加回来的 18MB 插件**（见 §2）+ 层对齐差异。
@@ -61,12 +61,21 @@ $ docker compose up -d
 3/3 ready after 3s
 ```
 
+补充：容器内确认 WAL **真的**开了（不是"没报错就当成功"）：
+
+```
+$ docker exec cf-solver-1 python -c "...SqliteStore('/data/cache', token).stats()..."
+{'backend': 'sqlite', 'entries': 0, 'max_entries': 4096,
+ 'path': '/data/cache/cache.sqlite3', 'journal_mode': 'wal'}
+```
+
 | 项 | 实测 |
 |---|---|
-| 3 个 worker 全部 `state=ready` | **4s**（修复插件预热前，首次启动要等下载；v4.5 记录 10s） |
+| 3 个 worker 全部 `state=ready` | **3s**（修复插件预热前，首次启动要等下载；v4.5 记录 10s） |
 | 日志里运行期插件下载 | **0 / 0 / 0**（三个容器都是） |
 | 日志里 `Traceback` | **0 / 0 / 0** |
-| 内存（`docker stats`，稳态） | 641.9 + 773.9 + 659.5 MiB ≈ **2.03 GiB** |
+| 日志里 `未能启用 WAL` | **0 / 0 / 0**（说明 WAL 正常启用，没走降级） |
+| 内存（`docker stats`，稳态） | 692.0 + 732.1 + 639.6 MiB ≈ **2.01 GiB** |
 | token 一致性（三个容器共用卷里的 `/data/.env`） | 三个容器 `md5sum` 完全相同 |
 
 ## 4. 端点验收（容器内真跑，`127.0.0.1:8878`）
@@ -79,7 +88,8 @@ $ docker compose up -d
 | 4 | `POST /solve {route:auto}` 同一 URL | `no_challenge=True`，`elapsed=0.0`（**探测结果命中 T-34 的按域缓存**） |
 | 5 | 畸形 JSON body | **400**，`error_code=invalid-request`，且容器日志 `Traceback` 计数 **0** |
 | 6 | SSRF：`POST /solve {url:169.254.169.254}` | **400**，`目标解析到受限地址` |
-| 7 | **并发 200 次 `/health`（20 路并行）** | **200/200 全是 200** —— 每次 `/health` 都会读 `len(store)`，这条以前正是 N-15（读路径不加锁）最容易炸的地方之一 |
+| 7 | **超大 body（70KB > 64KB 上限）** | **400**（第三条早退路径，容器里也验） |
+| 8 | **并发 200 次 `/health`（20 路并行）** | **200/200 全是 200** —— 每次 `/health` 都会读 `len(store)`，这条以前正是 N-15（读路径不加锁）最容易炸的地方之一 |
 
 第 5 项是 v4.7 修的 N-14（早退路径 `url` 未绑定 → `UnboundLocalError` 打穿 `_log`）在**容器里**的复核：
 修复前这条请求不会出现在审计/事件流里、且会打一整段 traceback；现在能看到

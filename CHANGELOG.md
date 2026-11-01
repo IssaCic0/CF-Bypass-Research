@@ -71,11 +71,24 @@ un.ps1 xxx`。
   而这三个目录已在 D-3 决策里 `git rm`。
 - `Dockerfile` / `docker-compose.yml` 顶部"⚠️ 未在本机验证"已过期；compose 的
   `image:` 从 `4.0.0` 对齐到 `4.7.0`。
-- `test_ledger.md`：279 用例 / 81.39% → **304 / 82.06%**；§3 里"F3 CI、E4 内存、E5 崩溃隔离未测"
+- `test_ledger.md`：279 用例 / 81.39% → **311 / 81.95%**；§3 里"F3 CI、E4 内存、E5 崩溃隔离未测"
   三项已闭环，改标实测值。
 - `workflow_status.md` §8 的五条"下一步"其实都已完成，换成真正未做的 N1–N5。
 - `docs/部署-容器.md` §5 新增两条**真踩过**的运维坑：Git Bash(MSYS) 把 `/data/...` 改写成
   Windows 路径（表现是容器起来了但 token 不在 `/data/.env`）、以及运行期插件下载。
+
+### 独立审查（3 轮，`claude -p` 全新上下文，只喂 diff、只读工具）
+
+| 轮次 | Verdict | 说了什么 |
+|---|---|---|
+| 1 | **Request Changes** | 无 P0/P1，6 条：重试不分类（永久错误也重试 25 次 ≈10s）/ 降级没补 `synchronous=FULL` / "只读挂载"举例错（只读挂载下建表也写不了）/ 降级警告写脏 stdout（违反本服务的 JSON-lines 契约）/ 两条测试断言一个恒真一个过弱 / `blob, expires_at` 解包与"共享连接可能给畸形行"的论证自相矛盾。附：并发用例是概率门；自述"三条早退路径"只测了两条 |
+| 2（复验） | **Request Changes** | **唯一阻塞项**：`PRAGMA journal_mode=WAL` 在某些文件系统上**不抛异常、原值返回**，而成功分支没校验返回值 ⇒ 静默降级（rollback journal + `synchronous=NORMAL` + 零告警），把第 1/2/4 条的修复在这条路径上全抵消了。另有 6 条 P3 |
+| 3（复验） | **Approve** | 四种情形逐一走查（返回 `wal` / 返回 `delete` / locked×2 后成功 / 永久错误）全部落到正确分支；6 条全部成立；**无阻塞问题**。4 条 P3（告警文案、`stats()` 误把 entries 抹成 0、最后一次白睡、超大 body 的平台差异）已在本轮收掉 |
+
+前两轮的每一条都改在代码里，并各补了一条回归用例：
+`test_wal_silent_downgrade_is_still_loud_and_safe`、`test_wal_permanent_error_does_not_retry_from_the_moon`、
+`test_read_paths_actually_take_the_connection_lock`（确定性机制门，不是概率门）、
+`test_oversized_body_is_rejected_and_still_audited`。
 
 ### 结论库
 
@@ -87,7 +100,7 @@ un.ps1 xxx`。
 
 | 项 | 结果 |
 |---|---|
-| `pytest tests/ -q --cov=solver --cov-fail-under=80` | **307 passed / 81.95%**（连跑 3 次稳定） |
+| `pytest tests/ -q --cov=solver --cov-fail-under=80` | **311 passed / 81.95%**（连跑 3 次稳定） |
 | `go vet ./... && go test -count=1 -race ./...` | 无输出 / **41 Test 全过（8.3s）** |
 | `node scripts/validate-findings.mjs` | **40 条** exit 0 |
 | `run.ps1 e2e` | **29/29** |

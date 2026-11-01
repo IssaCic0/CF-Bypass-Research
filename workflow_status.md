@@ -72,7 +72,7 @@
 
 | 门禁 | 目标 | 实测 | 结论 |
 |---|---|---|---|
-| Python 全量测试 | 0 failed | **307 passed**（35.5s，连跑 3 次稳定） | ✅ |
+| Python 全量测试 | 0 failed | **311 passed**（36s，连跑 3 次稳定） | ✅ |
 | Python 覆盖率 | ≥80%（service.py ≥70%） | **81.95%**（service.py 76%） | ✅ |
 | Go 测试 | 0 failed 且 `-race` | **41 个 Test 全过，`-count=1 -race` 绿**（8.3s） | ✅ |
 | Go 静态检查 | `go vet` 无输出 | 无输出 | ✅ |
@@ -243,16 +243,27 @@
 | `README.md` | 「跑实验」教人 `cd node-shim` / `go run go-jseng` / `go run go-replay` | 这三个目录已在 D-3 决策里 `git rm` |
 | `Dockerfile` / `docker-compose.yml` | 「⚠️ 未在本机验证（Docker daemon 未运行）」 | 已在本机实测（§9.2） |
 | `docker-compose.yml` | `image: cf-bypass-solver:4.0.0` | 对齐 `4.7.0` |
-| `test_ledger.md` §1 | 279 用例 / 81.39% | **304** / **82.06%** |
+| `test_ledger.md` §1 | 279 用例 / 81.39% | **311** / **81.95%** |
 | `test_ledger.md` §3 | F3 CI / E4 内存 / E5 崩溃隔离"未测" | 三项均已闭环（run 41348212433 / 3.34GB / 摘除 2s 回归 28s） |
 | `workflow_status.md` §8 | 五条"下一步"其实都已完成 | 换成真正未做的 N1–N5 |
-| `docs/00-索引.md` | findings 29 条 | **38 条**（补 F-030…F-038：N-01…N-07 + N-13 + N-14） |
+| `docs/00-索引.md` | findings 29 条 | **40 条**（补 F-030…F-040：N-01…N-07 + N-13 + N-14 + N-15 + N-16） |
 
 ### 9.4 findings 回填（§8 老版第 4 条的遗留）
 
 `docs/findings.json` 29 → **38 条**，把历史上只在 `workflow_status.md` 口口相传的 7 个缺陷
 （N-01 SSRF 绕过 / N-02 TTL 自相矛盾 / N-03 盐并发 / N-04 过期项虚高 / N-05 跨进程重复求解 /
 N-06 覆盖 `Thread._stop` / N-07 假绿用例）正式登记，并加上本轮两条。
+
+### 9.6 独立审查（3 轮，最终 Approve）
+
+| 轮次 | Verdict | 关键内容 |
+|---|---|---|
+| 1 | Request Changes | 6 条（重试不分类 / 降级没补 `synchronous=FULL` / "只读挂载"举例错 / 警告写脏 stdout / 恒真与过弱断言各一条 / 解包无防御）—— 已全部修 |
+| 2 | Request Changes | **唯一阻塞项**：`PRAGMA journal_mode=WAL` 在某些文件系统上不抛异常、原值返回，成功分支没校验 ⇒ 静默降级（rollback journal + NORMAL + 零告警）。已修 |
+| 3 | **Approve** | 四种情形逐一走查全部正确、6 条全部成立、无阻塞问题；4 条 P3 已收 |
+
+审查方式：`claude -p` 独立进程（全新上下文、只读工具、**只喂 diff 不喂我的结论**）。
+详细记录见 `CHANGELOG.md` 4.7.0 的「独立审查」段。
 
 ### 9.5 边界（仍然没做的，别读成"已闭环"）
 
