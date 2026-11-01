@@ -139,9 +139,22 @@ def test_build_store_memory_when_no_dir():
     assert kind == "memory" and isinstance(store, cache_mod.MemoryStore)
 
 
-def test_build_store_file_when_dir_given(tmp_path):
+def test_build_store_defaults_to_sqlite_when_dir_given(tmp_path):
+    """v4.0 起落盘缓存的默认实现是 SQLite（决策 D-2），FileStore 作为降级。"""
     store, kind = cache_mod.build_store(str(tmp_path), TOKEN)
+    assert kind.startswith("sqlite:") and isinstance(store, cache_mod.SqliteStore)
+
+
+def test_build_store_file_backend_is_still_available_as_escape_hatch(tmp_path):
+    """`backend="file"` 必须仍然可用：SQLite 在某些共享盘上锁冲突时要有逃生门。"""
+    store, kind = cache_mod.build_store(str(tmp_path), TOKEN, backend="file")
     assert kind.startswith("file:") and isinstance(store, cache_mod.FileStore)
+
+
+def test_build_store_unknown_backend_is_not_silently_treated_as_auto(tmp_path):
+    store, kind = cache_mod.build_store(str(tmp_path), TOKEN, backend="redis")
+    assert isinstance(store, cache_mod.MemoryStore)
+    assert "未知 cache backend" in kind, "配置写错必须说出来，不能静默当成 auto"
 
 
 def test_build_store_falls_back_loudly_on_bad_dir(tmp_path):
