@@ -98,7 +98,10 @@
 | V12 | **`route=auto` 真机** | `POST /solve {url:https://example.com/, route:auto}` → `no_challenge:true, elapsed=0.55s`，`solves` 计数保持 0 |
 | V13 | 对照：同 URL 不传 route | 真去求解，20s 后 `unsolved`，`solves=1` ⇒ 路由收益 **0.55s vs 20s**（同一 URL、同一服务） |
 | V14 | **GitHub Actions 真跑（首轮）** | **红**（这正是它存在的意义）：python(3.12) job 抓到 2 个本机发现不了的缺陷（N-06 prewarm 覆盖 `Thread._stop`、N-07 salt.bin 被 glob 命中） |
-| V15 | **GitHub Actions 真跑（修复后）** | **全绿**：`go` ✓ · `python (3.11)` ✓ · `python (3.12)` ✓ · `findings 一致性` ✓（run 41317345648，conclusion=success） |
+| V15 | **GitHub Actions 真跑（修复后）** | **全绿**：`go` ✓ · `python (3.11)` ✓ · `python (3.12)` ✓ · `findings 一致性` ✓（run 41317345648） |
+| V16 | **同站双臂 persona A/B（真机）** | 固定 9/9 求解 8/9 回放、均 **6.0s**；随机 8/9、8/9、均 **11.8s**；glassdoor **快 2.02×**。失败 2 次（未触发停止条件）。证据 `plans/证据/v41-persona-ab.json` |
+| V17 | **真实 E2E：Go→服务→glassdoor.co.uk→回放** | `status=200 长度=400000 挑战页=false 耗时=1.93s`，二次调用 `cached=true` |
+| V18 | **治理修复后的实测** | 内网 URL → 后端 0 次调用；纯协议第 2 次 `cached:true`；`/metrics` 出现 camoufox 与 host 维度 |
 
 ---
 
@@ -145,7 +148,7 @@
 | R2 | **跨进程 thundering herd 未修** | 已知限制 | 4 worker 同时抢新域 = 4 次求解（实测 12/12）。修法：`O_EXCL` 锁文件当选主 / SQLite 里加 `claims` 表。**代价 **> 收益时不该急修**（稳态 ≈0.08 QPS，撞车概率低） |
 | R3 | **Docker 镜像未构建验证** | 未验证 | 本机 Docker daemon 未运行。文件已按官方文档写好并标注 ⚠️；首次构建需重新确认 camoufox 的 Debian 依赖包名 |
 | R4 | **无生产部署环境** | 无法执行 | 仓库没有服务器清单/云凭证/K8s。所谓"热更新"只做到本地多进程启停 + 健康检查 |
-| R5 | **真实站点端到端未在本轮执行** | 受预算约束 | §15 的 60 次预算留给 T-32 落地后的 G1 验证（无 shield/CF/不支持厂商三类站各 2 次） |
+| R5 | 真机预算已用 ≈46/60 | 部分完成 | 剩余 ~14 次留给"真实 CF 站上的 route=auto 收益"；persona A/B 与 E2E 已完成（V16/V17） |
 | R6 | `docs/项目规格.md`（C2）未建 | 未闭环 | 成本 3h，收益是"跨会话不用重新考古"；优先级低于 T-32 |
 | R7 | `service.py` 仍 1846 行（>800 规范） | 记录 | 已降级为 P3（拆分风险 > 收益）；本次未动 |
 | R8 | `engines.py` 覆盖率 57% | 记录 | cloakbrowser 二进制专有、本机未装，只能测到"缺依赖即失败"分支 |

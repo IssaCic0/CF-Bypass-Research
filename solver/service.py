@@ -843,6 +843,15 @@ class Solver:
             self._inflight.release()
         except ValueError:               # 释放次数多于获取（调用方写错）：不放大成 500
             pass
+        self._account(ok, elapsed, host=host, backend=backend)
+
+    def _account(self, ok: bool, elapsed: float, host: str = "", backend: str = "") -> None:
+        """统一记账入口：**所有路径都必须走这里**，否则指标就会"只覆盖一半路径"。
+
+        v4.1 之前只有 `Solver.solve`（camoufox）在记账，router 里的其它后端一条都没记；
+        修完 router 才发现主路径（纯 camoufox 部署）反而没有 backend/host 维度——
+        同一个坑踩了两次，所以这里做成**唯一入口**，且由主路径与路由路径共用。
+        """
         with self._lock:
             self._solves += 1            # 统一口径：真实求解次数（含失败）
             self._elapsed_sum += elapsed
@@ -1342,6 +1351,10 @@ class Solver:
                 budget,
             )
         except SolveError as e:
+            # 失败也要记账：HELP 声明"含失败"，而旧实现只在成功路径 +1（指标说谎）。
+            # 参数错误/队列满这类**没真正发起求解**的终止性错误不该算一次求解。
+            if e.code not in (ErrorCode.INVALID_REQUEST, ErrorCode.BUSY, ErrorCode.UNAUTHORIZED):
+                self._account(False, round(time.monotonic() - t0, 2), host=host, backend="camoufox")
             # 只有"可能是出口的锅"的失败才记在代理头上；
             # 参数错误/队列满/自身在关闭，与出口无关，记进去会误伤（把好代理冷却掉）。
             if (
@@ -1355,13 +1368,7 @@ class Solver:
             self._inflight.release()
 
         elapsed = round(time.monotonic() - t0, 2)
-        with self._lock:
-            self._solves += 1
-            self._elapsed_sum += elapsed
-            for i, edge in enumerate(LATENCY_BUCKETS):
-                if elapsed <= edge:
-                    self._hist[i] += 1
-                    break
+        self._account(True, elapsed, host=host, backend="camoufox")
 
         cookies = r["cookies"]
         ua = r.get("ua") or self._browser_ua
@@ -1369,8 +1376,7 @@ class Solver:
         token_field = r.get("token_field") or ""
 
         if not token:
-            with self._lock:
-                self._failures += 1
+            self._account(False, elapsed, host=host, backend="camoufox")
             if self._pool is not None and proxy_entry is not None:
                 self._pool.record_failure(proxy_entry, "unsolved")
             # 一个 cookie 都没拿到 + 导航报错 ⇒ 网络/传输层失败，不是"被盾拒"
@@ -1396,8 +1402,7 @@ class Solver:
         if want_enum in CACHEABLE_WANTS:
             ttl = self._ttl_from_cookie_list(r["cookie_list"], cookie_name=COOKIE_FIELD[want_enum])
             if ttl <= 0:
-                with self._lock:
-                    self._failures += 1
+                self._account(False, elapsed, host=host, backend="camoufox")
                 raise SolveError(
                     ErrorCode.UNSOLVED,
                     f"拿到的 {COOKIE_FIELD[want_enum]} 已过期或有效期过短，不返回"
@@ -1425,6 +1430,9 @@ class Solver:
             "cacheable": want_enum in CACHEABLE_WANTS,
             "egress_id": proxy_entry.egress_id if proxy_entry is not None else self.egress_id,
         }
+        # 标出产出这条凭证的后端：router 路径由 router 填，直连 Solver 的路径在这里补，
+        # 否则同一条链路里"有时有 backend 字段、有时没有"，调用方没法统一处理。
+        result.setdefault("backend", "camoufox")
         if want_enum in TOKEN_WANTS:
             result["token_field"] = token_field     # 告诉调用方塞进哪个表单字段
         else:

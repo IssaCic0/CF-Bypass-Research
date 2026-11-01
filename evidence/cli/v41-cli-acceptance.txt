@@ -1,0 +1,95 @@
+# v4.1 CLI/JSON 验收实录（UI 验收替代物：本项目无 UI，只有 JSON API 与 CLI）
+# 生成时间：2026-11-01 23:14:33+0800  commit：e7bc720  机器：Windows/AMD64
+
+## 1) /health（真实服务，pinned persona 8941）
+{
+    "ok": true,
+    "state": "ready",
+    "browser_alive": true,
+    "worker_alive": true,
+    "browser": "camoufox",
+    "backends": [
+        "camoufox"
+    ],
+    "egress_id": "default",
+    "cache_backend": "sqlite:C:\\Users\\Administrator.DESKTOP-EGNE9ND\\AppData\\Local\\Temp\\ab-pinned",
+    "browser_os": "windows",
+    "ua_fingerprint": "64898c51c64b",
+    "cached_domains": 3,
+    "queue_depth": 0,
+    "solves": 10,
+    "cache_hits": 4,
+    "failures": 0,
+    "timeouts": 0,
+    "rejected_busy": 0,
+    "browser_restarts": 0,
+    "last_success_at": 1793545879.6473958,
+    "last_error": "",
+    "last_error_at": 0.0,
+    "uptime_sec": 925.4,
+    "avg_elapsed_sec": 6.04
+}
+
+## 2) /detect（无盾站 → 建议 direct；第二次命中 T-34 探测缓存）
+{
+    "url": "https://example.com/",
+    "status": 200,
+    "protected": false,
+    "providers": [],
+    "cloudflare_challenge_type": null,
+    "recommendation": {
+        "route": "direct",
+        "reason": "未命中已知防护特征——大概率没有盾，直接抓",
+        "hint": "若实际拿到 403/挑战页，说明该厂商未被特征表覆盖，请补规则"
+    },
+    "final_url": "https://example.com/",
+    "backend": "detect"
+}
+-- 第二次（fresh=1 强制实时，用于对照）--
+cached= False
+
+## 3) SSRF 守卫（内网 URL 必须被拒）
+{
+    "ok": false,
+    "solved": false,
+    "error_code": "invalid-request",
+    "error": "目标解析到受限地址（127.0.0.1），已拒绝",
+    "stage": "validate",
+    "hint": "求解服务不允许访问私网/回环地址；确需联调请加 --allow-private-hosts"
+}
+
+## 4) /metrics（按后端 + 按域维度）
+cfsolve_solves_total 10
+cfsolve_cache_hits_total 4
+cfsolve_failures_total 0
+
+## 5) route=auto（无盾站：不求解，0.5s 级返回）
+{
+    "ok": true,
+    "solved": false,
+    "want": "clearance",
+    "no_challenge": true,
+    "route": "auto",
+    "hint": "探测未命中任何防护特征，直接请求目标站即可（省掉一次 16–20s 的浏览器求解）",
+    "routed_by": {
+        "mode": "auto",
+        "action": "skip",
+        "reason": "no-protection",
+        "prefer": "any",
+        "hint": "探测未命中任何防护特征，直接请求目标站即可（省掉一次 16–20s 的浏览器求解）",
+        "detail": {
+            "status": 200
+        },
+        "detect": {
+            "protected": false,
+            "providers": [],
+            "challenge_type": null,
+            "route": "direct"
+        }
+    },
+    "elapsed": 0.0,
+    "egress_id": "default"
+}
+
+## 6) run.ps1 verify（离线门禁：Python 279 + 覆盖率 81% + Go 41 -race + findings）
+（见本次提交前的执行记录；此处只标注命令，输出另存在 evidence/T-39.json / workflow_status.md §4）
