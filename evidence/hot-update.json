@@ -2,14 +2,14 @@
   "task_id": "hot-update-drill",
   "status": "done",
   "result": "passed",
-  "timestamp": "2026-11-02T06:47:11+0800",
-  "baseline_commit": "297c87c",
-  "duration_sec": 26.4,
+  "timestamp": "2026-11-02T07:04:26+0800",
+  "baseline_commit": "f01c814",
+  "duration_sec": 31.7,
   "commands_executed": [
     {
       "cmd": "python scripts/hot_update_drill.py",
       "exit_code": 0,
-      "raw_output_tail": "[PASS] A06_no_traceback_in_log  — queue_depth_at_shutdown=0\n[PASS] B01_two_workers_ready  — p1=41460 ready=True p2=41461 ready=True\n[PASS] B02_shared_cache_and_token  — token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-cl3_2elt\\cache\n[PASS] B03_restart_shutdown_202_exit0  — http=202 exit=0\n[PASS] B04_restarted_worker_ready  — port=41460\n[PASS] B05_restarted_worker_serves  — /metrics -> 200\n[PASS] B06_other_worker_zero_failures_during_roll  — ok=81 fail=0 errors=[]\n[PASS] C01_spare_worker_ready  — port=41587\n[PASS] C02_old_still_serving_before_cutover  — /health -> 200\n[PASS] C03_old_drained_after_new_ready  — http=202 exit=0\n[PASS] C04_new_serving_after_cutover  — /metrics -> 200\n[PASS] B07_no_traceback_in_logs\n"
+      "raw_output_tail": "[PASS] A06_no_traceback_in_log  — queue_depth_at_shutdown=0\n[PASS] B01_two_workers_ready  — p1=43667 ready=True p2=43668 ready=True\n[PASS] B02_shared_cache_and_token  — token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-mxn697tc\\cache\n[PASS] B03_restart_shutdown_202_exit0  — http=202 exit=0\n[PASS] B04_restarted_worker_ready  — port=43667\n[PASS] B05_restarted_worker_serves  — /metrics -> 200\n[PASS] B06_other_worker_zero_failures_during_roll  — ok=73 fail=0 errors=[]\n[PASS] C01_spare_worker_ready  — port=43820\n[PASS] C02_old_still_serving_before_cutover  — /health -> 200\n[PASS] C03_old_drained_after_new_ready  — http=202 exit=0\n[PASS] C04_new_serving_after_cutover  — /metrics -> 200\n[PASS] B07_no_traceback_in_logs\n"
     }
   ],
   "files_changed": [],
@@ -18,7 +18,7 @@
       "name": "A01_worker_ready",
       "type": "e2e",
       "status": "pass",
-      "evidence": "port=41419"
+      "evidence": "port=43629"
     },
     {
       "name": "A02_shutdown_returns_202",
@@ -36,7 +36,7 @@
       "name": "A04_inflight_request_survived",
       "type": "e2e",
       "status": "pass",
-      "evidence": "status=200 elapsed=6.05s exception=None"
+      "evidence": "status=200 elapsed=6.13s exception=None"
     },
     {
       "name": "A05_inflight_returns_structured_body",
@@ -54,13 +54,13 @@
       "name": "B01_two_workers_ready",
       "type": "e2e",
       "status": "pass",
-      "evidence": "p1=41460 ready=True p2=41461 ready=True"
+      "evidence": "p1=43667 ready=True p2=43668 ready=True"
     },
     {
       "name": "B02_shared_cache_and_token",
       "type": "e2e",
       "status": "pass",
-      "evidence": "token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-cl3_2elt\\cache"
+      "evidence": "token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-mxn697tc\\cache"
     },
     {
       "name": "B03_restart_shutdown_202_exit0",
@@ -72,7 +72,7 @@
       "name": "B04_restarted_worker_ready",
       "type": "e2e",
       "status": "pass",
-      "evidence": "port=41460"
+      "evidence": "port=43667"
     },
     {
       "name": "B05_restarted_worker_serves",
@@ -84,13 +84,13 @@
       "name": "B06_other_worker_zero_failures_during_roll",
       "type": "e2e",
       "status": "pass",
-      "evidence": "ok=81 fail=0 errors=[]"
+      "evidence": "ok=73 fail=0 errors=[]"
     },
     {
       "name": "C01_spare_worker_ready",
       "type": "e2e",
       "status": "pass",
-      "evidence": "port=41587"
+      "evidence": "port=43820"
     },
     {
       "name": "C02_old_still_serving_before_cutover",
@@ -121,7 +121,7 @@
     {
       "name": "A01_worker_ready",
       "ok": true,
-      "detail": "port=41419"
+      "detail": "port=43629"
     },
     {
       "name": "A02_shutdown_returns_202",
@@ -136,7 +136,7 @@
     {
       "name": "A04_inflight_request_survived",
       "ok": true,
-      "detail": "status=200 elapsed=6.05s exception=None"
+      "detail": "status=200 elapsed=6.13s exception=None"
     },
     {
       "name": "A05_inflight_returns_structured_body",
@@ -151,12 +151,12 @@
     {
       "name": "B01_two_workers_ready",
       "ok": true,
-      "detail": "p1=41460 ready=True p2=41461 ready=True"
+      "detail": "p1=43667 ready=True p2=43668 ready=True"
     },
     {
       "name": "B02_shared_cache_and_token",
       "ok": true,
-      "detail": "token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-cl3_2elt\\cache"
+      "detail": "token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-mxn697tc\\cache"
     },
     {
       "name": "B03_restart_shutdown_202_exit0",
@@ -166,7 +166,7 @@
     {
       "name": "B04_restarted_worker_ready",
       "ok": true,
-      "detail": "port=41460"
+      "detail": "port=43667"
     },
     {
       "name": "B05_restarted_worker_serves",
@@ -176,12 +176,12 @@
     {
       "name": "B06_other_worker_zero_failures_during_roll",
       "ok": true,
-      "detail": "ok=81 fail=0 errors=[]"
+      "detail": "ok=73 fail=0 errors=[]"
     },
     {
       "name": "C01_spare_worker_ready",
       "ok": true,
-      "detail": "port=41587"
+      "detail": "port=43820"
     },
     {
       "name": "C02_old_still_serving_before_cutover",

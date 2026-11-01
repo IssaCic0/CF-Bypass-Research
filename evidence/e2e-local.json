@@ -2,9 +2,9 @@
   "task_id": "e2e-local",
   "status": "done",
   "result": "passed",
-  "timestamp": "2026-11-02T06:46:14+0800",
-  "baseline_commit": "297c87c",
-  "duration_sec": 16.9,
+  "timestamp": "2026-11-02T07:03:43+0800",
+  "baseline_commit": "f01c814",
+  "duration_sec": 17.8,
   "commands_executed": [
     {
       "cmd": "python scripts/e2e_local.py --json-out evidence/e2e-local.json",
@@ -18,7 +18,7 @@
       "name": "A01_service_ready",
       "type": "e2e",
       "status": "pass",
-      "evidence": "port=41304 token_file=有"
+      "evidence": "port=43555 token_file=有"
     },
     {
       "name": "A02_token_file_created",
@@ -42,7 +42,7 @@
       "name": "A05_health_auth_full_view",
       "type": "e2e",
       "status": "pass",
-      "evidence": "cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-e2e-uj9j4k6w\\cache solves=0"
+      "evidence": "cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-e2e-pqw_apkp\\cache solves=0"
     },
     {
       "name": "A06_metrics_without_token_401",
@@ -114,7 +114,7 @@
       "name": "B01_service_ready",
       "type": "e2e",
       "status": "pass",
-      "evidence": "port=41329"
+      "evidence": "port=43580"
     },
     {
       "name": "B02_detect_plain_site_is_direct",
@@ -193,7 +193,7 @@
     {
       "name": "A01_service_ready",
       "ok": true,
-      "detail": "port=41304 token_file=有"
+      "detail": "port=43555 token_file=有"
     },
     {
       "name": "A02_token_file_created",
@@ -213,7 +213,7 @@
     {
       "name": "A05_health_auth_full_view",
       "ok": true,
-      "detail": "cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-e2e-uj9j4k6w\\cache solves=0"
+      "detail": "cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-e2e-pqw_apkp\\cache solves=0"
     },
     {
       "name": "A06_metrics_without_token_401",
@@ -273,7 +273,7 @@
     {
       "name": "B01_service_ready",
       "ok": true,
-      "detail": "port=41329"
+      "detail": "port=43580"
     },
     {
       "name": "B02_detect_plain_site_is_direct",
