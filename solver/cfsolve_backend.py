@@ -26,8 +26,10 @@ import tempfile
 import time
 
 try:  # 包导入
+    from .backends import DEFAULT_COOKIE_TTL, BackendId, derive_ttl
     from .errors import ErrorCode, SolveError
 except ImportError:  # 直接以脚本运行
+    from backends import DEFAULT_COOKIE_TTL, BackendId, derive_ttl  # type: ignore[no-redef]
     from errors import ErrorCode, SolveError  # type: ignore[no-redef]
 
 
@@ -42,16 +44,20 @@ class CfsolveBackend:
         work_root: str = "",
         timeout: float = 120.0,
         extra_args: list[str] | None = None,
+        egress_id: str = "cfsolve",
     ) -> None:
         self.binary = binary
         self.profile = profile
         self.work_root = work_root
         self.timeout = timeout
         self.extra_args = list(extra_args or [])
+        # 出口标识：必须与**本进程实际出口**一致（而不是写死 "cfsolve"）。
+        # 它参与缓存键，也是 Go 侧选代理的依据；编一个假的会让出口校验失效。
+        self.egress_id = egress_id or "cfsolve"
         self._ua_cache: str | None = None
 
     def name(self) -> str:
-        return "cfsolve"
+        return BackendId.CFSOLVE.value
 
     def is_configured(self) -> bool:
         return bool(self.binary) and os.path.isfile(self.binary) and os.path.isfile(self.profile)
@@ -140,18 +146,28 @@ class CfsolveBackend:
 
         if first.startswith("cf_clearance="):
             clearance = first.split("=", 1)[1].strip()
+            cookie_list = [{
+                "name": "cf_clearance", "value": clearance, "domain": "", "path": "/",
+                "expires": -1, "http_only": True, "secure": True, "same_site": "",
+            }]
+            # cfsolve 只在 stdout 打印 token，不告诉我们 cookie 的真正到期时间 ⇒ 用名义值。
+            # 但**绝不能返回 0**：0 会让 Go 侧 `expiresAt()` 立刻判过期、服务端缓存也直接删，
+            # 等于把整套缓存关掉 —— 每次回放都要再付一次 18s 纯协议求解。
+            ttl = derive_ttl(cookie_list, "cf_clearance", default=DEFAULT_COOKIE_TTL)
+            if ttl <= 0:
+                raise SolveError(
+                    ErrorCode.UNSOLVED, "cfsolve 拿到的 cf_clearance 已过期，不返回", stage="wait",
+                    hint="检查本机时钟；持续出现说明 profile 与环境不匹配，需重录 profile",
+                )
             return {
                 "ok": True, "solved": True, "want": "clearance",
                 "cf_clearance": clearance,
                 "user_agent": self.user_agent(),
                 "cookies": {"cf_clearance": clearance},
-                "cookie_list": [{
-                    "name": "cf_clearance", "value": clearance, "domain": "", "path": "/",
-                    "expires": -1, "http_only": True, "secure": True, "same_site": "",
-                }],
-                "expires_in": 0, "expires_at": 0.0,
+                "cookie_list": cookie_list,
+                "expires_in": ttl, "expires_at": time.time() + ttl,
                 "elapsed": elapsed, "cached": False, "cacheable": True,
-                "egress_id": "cfsolve", "backend": self.name(),
+                "egress_id": self.egress_id, "backend": self.name(),
             }
 
         return {
@@ -162,7 +178,7 @@ class CfsolveBackend:
             "cookies": {}, "cookie_list": [],
             "expires_in": 300 if want == "turnstile" else 120, "expires_at": 0.0,
             "elapsed": elapsed, "cached": False, "cacheable": False,
-            "egress_id": "cfsolve", "backend": self.name(),
+            "egress_id": self.egress_id, "backend": self.name(),
         }
 
 

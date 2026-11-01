@@ -750,3 +750,88 @@ def test_cgnat_is_blocked():
         assert s._classify_host("100.128.0.1") == "allowed" or True  # 边界外不强断言（依赖 DNS）
     finally:
         s.close()
+
+
+# ── X6：/health 的免鉴权视图最小化 ──────────────────────────────
+def test_health_minimal_without_token_and_full_with_token(live_server):
+    """完整视图含 last_error（可能带主机名）/代理地址/缓存域数/UA 指纹，不该对匿名调用方公开。"""
+    status, body = _get(live_server, "/health")
+    assert status == 200
+    minimal = json.loads(body)
+    assert set(minimal) == {"ok", "state", "browser_alive", "worker_alive"}, \
+        f"免鉴权视图多了字段：{sorted(set(minimal) - {'ok','state','browser_alive','worker_alive'})}"
+
+    status, body = _get(live_server, "/health", token="test-token")
+    full = json.loads(body)
+    for key in ("ua_fingerprint", "cached_domains", "backends", "last_error", "uptime_sec"):
+        assert key in full, f"带 token 的完整视图缺 {key}"
+    assert full["backends"] == ["camoufox"]
+
+
+# ── X6：探测身份与求解身份一致 ────────────────────────────────
+def test_probe_user_agent_uses_real_ua_then_persona():
+    s = service.Solver(browser_factory=factory_returning(FakeBrowser()), browser_os="macos")
+    try:
+        s._browser_ua = ""                          # 模拟浏览器还没起来
+        assert "Macintosh" in s.probe_user_agent(), "无真 UA 时应按 --browser-os persona 推"
+        s._browser_ua = "RealBrowserUA"             # 起来了就用同一个身份去探测
+        assert s.probe_user_agent() == "RealBrowserUA"
+    finally:
+        s.close()
+
+
+def test_probe_protection_sends_the_requested_user_agent():
+    """回归：probe 曾硬编码 Windows Firefox UA，与 --browser-os 固定的 persona 相矛盾。"""
+    import http.server
+    import threading
+
+    seen = {}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            seen["ua"] = self.headers.get("User-Agent")
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"OK")
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/"
+    try:
+        service.probe_protection(url, timeout=5, user_agent="CUSTOM-UA/1.0")
+        assert seen["ua"] == "CUSTOM-UA/1.0"
+        service.probe_protection(url, timeout=5)                    # 不给就用默认 persona
+        assert seen["ua"] == service.DEFAULT_PROBE_UA
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+# ── X6：DNS 正缓存必须有界 ────────────────────────────────────
+def test_dns_cache_is_bounded(monkeypatch):
+    """原实现只增不减：长期运行 + 抓到大量域就是一条慢泄漏。"""
+    s = service.Solver(browser_factory=factory_returning(FakeBrowser()))
+    try:
+        monkeypatch.setattr(service, "DNS_CACHE_MAX", 8)
+        monkeypatch.setattr(service.Solver, "_classify_host", lambda self, host: "allowed")
+        for i in range(200):
+            s._check_target(f"h{i}.example")
+        assert len(s._dns_cache) <= 8, f"DNS 缓存无界：{len(s._dns_cache)}"
+    finally:
+        s.close()
+
+
+# ── X3：代理池与"自己直连"的后端不能同时启用 ────────────────────
+def test_proxy_pool_conflicts_with_direct_egress_backends(capfd):
+    """cfsolve/pydoll 走不了代理池：两者同开必然产生"出口不一致 → 稳定 403"，必须启动即失败。"""
+    base = ["--no-auth", "--port", "0"]
+    rc = service.main(["--proxy", "http://127.0.0.1:9",
+                       "--cfsolve-bin", "/bin/challenge",
+                       "--cfsolve-profile", "/tmp/profile.json"] + base)
+    assert rc == 2
+    out = capfd.readouterr().out
+    assert "配置冲突" in out and "--proxy" in out

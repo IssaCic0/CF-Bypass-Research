@@ -31,6 +31,8 @@ class BackendId(str, Enum):
     """后端白名单。新增后端 = 加一个枚举值 + 一个分支，绝不接受配置里的任意字符串。"""
 
     CAMOUFOX = "camoufox"
+    CFSOLVE = "cfsolve"
+    PYDOLL = "pydoll"
     FLARESOLVERR = "flaresolverr"
 
     @classmethod
@@ -39,6 +41,49 @@ class BackendId(str, Enum):
             if member.value == (raw or "").strip().lower():
                 return member
         raise ValueError(f"未知后端 {raw!r}；可选：{[m.value for m in cls]}")
+
+
+# ── cookie 类产物的有效期（单一实现，禁止各处自己算）──────────────────
+#
+# 为什么必须收敛成一个函数：`expires_at = 0` 会让 Go 侧 `Clearance.expiresAt()`
+# 立刻判过期 ⇒ 每次回放都重新求解；服务端 `FileStore.get` 也会按
+# `expires_at <= now` 直接删文件。这条不变量曾经在 FlareSolverr 后端修过一次，
+# 后来新增的 cfsolve / pydoll 又各漏一次 —— 唯一能防止再漏的办法就是只留一份实现。
+
+#: 剩余寿命低于该值即判定为"等于过期"——发出去只会让客户端吃静默 403
+MIN_CLEARANCE_REMAINING = 30
+
+#: cookie 没带 `expires`（会话级）时的名义有效期；cf_clearance 通常是 30 分钟量级
+DEFAULT_COOKIE_TTL = 1500
+
+
+def derive_ttl(
+    cookie_list,
+    cookie_name: str,
+    *,
+    default: int = DEFAULT_COOKIE_TTL,
+    max_ttl: int | None = None,
+    min_remaining: int = MIN_CLEARANCE_REMAINING,
+) -> int:
+    """从结构化 cookie 列表算这条凭证还能用多久（秒）。
+
+    返回 **0** 表示"已过期或只剩不到 `min_remaining` 秒"——调用方必须据此**拒绝返回**
+    这条凭证，而不是发一个注定 403 的东西出去。
+
+    `max_ttl` 用于把结果压到配置上限（例如 `--ttl`）；`default` 用于 cookie 没带 expires
+    的会话级情形（此时无法判断真实寿命，只能给名义值并在文档里写清是假设）。
+    """
+    for c in cookie_list or ():
+        if c.get("name") != cookie_name:
+            continue
+        exp = c.get("expires", -1)
+        if isinstance(exp, (int, float)) and exp > 0:
+            remaining = int(exp - time.time())
+            if remaining < min_remaining:
+                return 0
+            return min(remaining, max_ttl) if max_ttl else remaining
+        break
+    return min(default, max_ttl) if max_ttl else default
 
 
 class SolverBackend(Protocol):
@@ -198,9 +243,17 @@ class FlareSolverrBackend:
                 stage="wait",
             )
 
-        # TTL 必须给出来：返回 0 会让 Go 侧 `expiresAt()` 立刻判过期，
+        # TTL 必须给出来且必须真实：返回 0 会让 Go 侧 `expiresAt()` 立刻判过期，
         # 于是客户端每次回放都重新求解（Critic 抓到的真实缺陷）。
         ttl = self._ttl(cookie_list)
+        if ttl <= 0:
+            raise SolveError(
+                ErrorCode.UNSOLVED,
+                "FlareSolverr 返回的 cf_clearance 已过期或剩余寿命过短，不返回"
+                "（否则客户端只会拿到静默 403）",
+                stage="wait",
+                hint="重试一次；持续出现请检查该实例的系统时钟与出口 IP 是否与求解时一致",
+            )
         now = time.time()
 
         return {
@@ -219,17 +272,10 @@ class FlareSolverrBackend:
         }
 
     def _ttl(self, cookie_list: list[dict]) -> int:
-        """取 cf_clearance 的剩余寿命；拿不到就用 default_ttl。"""
-        now = time.time()
-        for c in cookie_list:
-            if c.get("name") == "cf_clearance":
-                exp = c.get("expires", -1)
-                if isinstance(exp, (int, float)) and exp > 0:
-                    remaining = int(exp - now)
-                    if remaining > 0:
-                        return min(remaining, self.default_ttl)
-                break
-        return self.default_ttl
+        """取 cf_clearance 的剩余寿命；统一实现见模块级 `derive_ttl`（禁止各处自己算）。"""
+        return derive_ttl(
+            cookie_list, "cf_clearance", default=self.default_ttl, max_ttl=self.default_ttl
+        )
 
 
 #: 终止性错误：这些不是"这个后端不行，换一个试试"，而是"这次请求本身不该发"。
@@ -242,6 +288,12 @@ TERMINAL_CODES = frozenset(
         ErrorCode.RATE_LIMITED,
     }
 )
+
+#: 单后端至少要有这么多预算才值得再试下一个。
+#: 为什么需要：`timeout` 是**整条链**的预算，不是每个后端的预算。
+#: 若每个后端都拿满 timeout，四后端最坏 120+45+120+90≈375s，而 Go 客户端 240s 就先超时
+#: —— 调用方拿到的是裸 net 错误而不是结构化 *APIError（这正是 R5 修过、多后端又打开的问题）。
+MIN_BACKEND_BUDGET = 5.0
 
 
 class BackendRouter:
@@ -264,14 +316,22 @@ class BackendRouter:
     def solve(self, url: str, timeout: float, force: bool = False, **kwargs) -> dict:
         attempts: list[dict] = []
         last_error: SolveError | None = None
+        # `timeout` 是整条链的总预算：按墙钟 deadline 切分给每个后端，而不是每个都给满。
+        # 这样最坏耗时 ≈ timeout（+ 单后端的排队余量），不会把客户端的超时先撞穿。
+        deadline = time.monotonic() + max(MIN_BACKEND_BUDGET, float(timeout or 0))
 
         for backend in self._backends:
             name = backend.name()
             if not backend.is_configured():
                 attempts.append({"backend": name, "skipped": True, "reason": "not-configured"})
                 continue
+            remaining = deadline - time.monotonic()
+            if remaining < MIN_BACKEND_BUDGET:
+                # 预算已经花光：再启动一个后端只会让调用方在客户端侧先超时
+                attempts.append({"backend": name, "skipped": True, "reason": "deadline-exhausted"})
+                continue
             try:
-                out = backend.solve(url, timeout=timeout, force=force, **kwargs)
+                out = backend.solve(url, timeout=remaining, force=force, **kwargs)
                 out.setdefault("backend", name)
                 out["attempts"] = attempts + [{"backend": name, "ok": True}]
                 return out
@@ -294,6 +354,14 @@ class BackendRouter:
         if last_error is not None:
             last_error.extra = {"attempts": attempts}
             raise last_error
+        if any(a.get("reason") == "deadline-exhausted" for a in attempts):
+            raise SolveError(
+                ErrorCode.TIMEOUT,
+                f"{float(timeout or 0):.0f}s 预算内没能把后端链试完",
+                stage="wait",
+                hint="调大请求里的 timeout（上限 120s），或减少同时配置的后端数量",
+                extra={"attempts": attempts},
+            )
         raise SolveError(
             ErrorCode.NOT_CONFIGURED,
             "没有任何可用后端",

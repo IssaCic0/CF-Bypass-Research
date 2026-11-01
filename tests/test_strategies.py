@@ -263,3 +263,109 @@ def test_find_chrome_uses_explicit_when_present(tmp_path):
     fake = tmp_path / "chrome.exe"
     fake.write_text("x", encoding="utf-8")
     assert pdb.find_chrome(str(fake)) == str(fake)
+
+
+# ── X2：凭证 TTL 必须真实（否则 Go 侧每次回放都重解）────────────────
+def test_cfsolve_clearance_has_real_ttl(tmp_path, monkeypatch):
+    """回归：cfsolve 曾返回 expires_in=0/expires_at=0 ⇒ 客户端与服务端缓存同时失效。"""
+    import time
+
+    binp = tmp_path / "challenge"
+    binp.write_text("x", encoding="utf-8")
+    b = cfb.CfsolveBackend(str(binp), str(_profile(tmp_path)))
+    _patch_run(monkeypatch, stdout="cf_clearance=ABC123\n")
+
+    out = b.solve("https://example.com/", timeout=30)
+
+    assert out["expires_in"] > 0, "expires_in=0 会让 Go 侧 expiresAt() 立刻判过期"
+    assert out["expires_at"] > time.time(), "expires_at 必须是绝对时间戳且在未来"
+    assert out["cacheable"] is True
+    # 名义值来自 DEFAULT_COOKIE_TTL（cfsolve 不告诉我们真实到期时间，这是显式假设）
+    assert out["expires_in"] == cfb.DEFAULT_COOKIE_TTL
+
+
+def test_pydoll_clearance_has_real_ttl(monkeypatch, tmp_path):
+    """回归：pydoll 曾返回 expires_in=0/expires_at=0 ⇒ 每次回放都重开一次 Chrome。"""
+    import sys
+    import time
+    import types
+
+    class _CM:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeTab:
+        async def go_to(self, url, timeout=None):
+            return None
+
+        def expect_cloudflare_turnstile(self, **kw):
+            return _CM()
+
+        async def get_cookies(self):
+            return [{"name": "cf_clearance", "value": "PC", "domain": ".e.com", "path": "/",
+                     "expires": time.time() + 900, "httpOnly": True, "secure": True,
+                     "sameSite": "None"}]
+
+        async def execute_script(self, js):
+            return {"result": {"result": {"value": "Firefox/156"}}}
+
+    class FakeChrome:
+        def __init__(self, options=None):
+            self.options = options
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def start(self):
+            return FakeTab()
+
+    class FakeOptions:
+        def __init__(self):
+            self.headless = False
+            self.binary_location = ""
+            self.start_timeout = 0
+            self.webrtc_leak_protection = False
+
+        def add_argument(self, *a):
+            pass
+
+    pkg = types.ModuleType("pydoll")
+    browser_mod = types.ModuleType("pydoll.browser")
+    browser_mod.Chrome = FakeChrome
+    options_mod = types.ModuleType("pydoll.browser.options")
+    options_mod.ChromiumOptions = FakeOptions
+    browser_mod.options = options_mod
+    pkg.browser = browser_mod
+    for name, mod in (("pydoll", pkg), ("pydoll.browser", browser_mod),
+                      ("pydoll.browser.options", options_mod)):
+        monkeypatch.setitem(sys.modules, name, mod)
+
+    chrome = tmp_path / "chrome.exe"
+    chrome.write_text("x", encoding="utf-8")
+    b = pdb.PydollBackend(str(chrome))
+    assert b.is_configured() is True
+
+    out = b.solve("https://e.com/", 30)
+
+    assert out["cf_clearance"] == "PC" and out["user_agent"] == "Firefox/156"
+    assert out["expires_in"] > 0 and out["expires_at"] > time.time(), \
+        "expires_at=0 会让 Go 侧立刻判过期，导致每次回放都重新开一次 Chrome"
+    # 真实 expires 只剩 ~900s，应被如实取用（而不是拍成默认 1500）
+    assert 800 <= out["expires_in"] <= 900
+
+
+# ── X3：后端必须如实回报"本进程的出口标识" ──────────────────
+def test_cfsolve_reports_configured_egress_id(tmp_path, monkeypatch):
+    """写死 "cfsolve" 会让出口校验形同虚设：凭证的 egress_id 必须能被 Go 侧拿去选代理。"""
+    binp = tmp_path / "challenge"
+    binp.write_text("x", encoding="utf-8")
+    b = cfb.CfsolveBackend(str(binp), str(_profile(tmp_path)), egress_id="ip:203.0.113.7")
+    _patch_run(monkeypatch, stdout="cf_clearance=ABC\n")
+    out = b.solve("https://example.com/", timeout=30)
+    assert out["egress_id"] == "ip:203.0.113.7"

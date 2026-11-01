@@ -51,19 +51,33 @@ import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 try:  # 作为包导入（tests / 未来 solver 包）
     from .errors import ErrorCode, SolveError
     from .detect import summarize as detect_summarize
     from .cache import build_store
     from .proxypool import ProxyPool, parse_proxy_url
-    from .backends import BackendRouter, CamoufoxBackend, FlareSolverrBackend
+    from .backends import (
+        MIN_CLEARANCE_REMAINING,
+        BackendRouter,
+        CamoufoxBackend,
+        FlareSolverrBackend,
+        derive_ttl,
+    )
     from .prewarm import Prewarmer, parse_targets
     from .engines import Engine, build_factory as build_engine_factory, preflight as engine_preflight
     from .cfsolve_backend import CfsolveBackend
     from .pydoll_backend import PydollBackend, find_chrome
+    from .route import (
+        ACTION_REJECT as ROUTE_REJECT,
+        ACTION_SKIP as ROUTE_SKIP,
+        ROUTE_MODES,
+        classify_failure as route_classify_failure,
+        decide as route_decide,
+    )
     from .challenges import (
+        CACHEABLE_WANTS,
         COOKIE_FIELD,
         READ_TURNSTILE_TOKEN,
         TURNSTILE_SELECTOR,
@@ -81,12 +95,26 @@ except ImportError:  # 直接以脚本运行：python solver/service.py
     from detect import summarize as detect_summarize  # type: ignore[no-redef]
     from cache import build_store  # type: ignore[no-redef]
     from proxypool import ProxyPool, parse_proxy_url  # type: ignore[no-redef]
-    from backends import BackendRouter, CamoufoxBackend, FlareSolverrBackend  # type: ignore[no-redef]
+    from backends import (  # type: ignore[no-redef]
+        MIN_CLEARANCE_REMAINING,
+        BackendRouter,
+        CamoufoxBackend,
+        FlareSolverrBackend,
+        derive_ttl,
+    )
     from prewarm import Prewarmer, parse_targets  # type: ignore[no-redef]
     from engines import Engine, build_factory as build_engine_factory, preflight as engine_preflight  # type: ignore[no-redef]
     from cfsolve_backend import CfsolveBackend  # type: ignore[no-redef]
     from pydoll_backend import PydollBackend, find_chrome  # type: ignore[no-redef]
+    from route import (  # type: ignore[no-redef]
+        ACTION_REJECT as ROUTE_REJECT,
+        ACTION_SKIP as ROUTE_SKIP,
+        ROUTE_MODES,
+        classify_failure as route_classify_failure,
+        decide as route_decide,
+    )
     from challenges import (  # type: ignore[no-redef]
+        CACHEABLE_WANTS,
         COOKIE_FIELD,
         READ_TURNSTILE_TOKEN,
         TURNSTILE_SELECTOR,
@@ -103,8 +131,6 @@ except ImportError:  # 直接以脚本运行：python solver/service.py
 # ── 常量 ───────────────────────────────────────────
 DEFAULT_TTL = 1500          # cf_clearance 通常 30 分钟量级；cookie 带 expires 时以 cookie 为准
 MIN_TTL = 60
-#: 剩余寿命低于该值就判定为"等于过期"——发出去只会让客户端吃静默 403
-MIN_CLEARANCE_REMAINING = 30
 MAX_URL_LEN = 2048
 MAX_BODY_BYTES = 64 * 1024
 DEFAULT_TIMEOUT = 45.0
@@ -116,10 +142,25 @@ GOTO_BUDGET_RATIO = 0.6     # 导航最多占预算的 60%
 GOTO_BUDGET_CAP = 25.0
 DEFAULT_MAX_QUEUE = 16
 DEFAULT_MAX_INFLIGHT = 8
+#: `/detect` 的并发上限（与求解 inflight **分开**计：探测不许挤占浏览器的额度）
+DEFAULT_MAX_DETECT = 4
+#: `/detect` 跟随重定向的跳数上限
+PROBE_MAX_REDIRECTS = 3
 DEFAULT_WARM_RETRY_MAX = 30.0
 SHUTDOWN_GRACE = 10.0
 TOKEN_ENV = "CF_SOLVE_TOKEN"
 TOKEN_LINE_PREFIX = "CF_SOLVE_TOKEN="
+
+#: 探测用 UA 的 persona 兜底（浏览器还没起来时用；起来了就用它的真实 UA）
+_PROBE_UA_BY_OS = {
+    "windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101 Firefox/156.0",
+    "macos": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:156.0) Gecko/20100101 Firefox/156.0",
+    "linux": "Mozilla/5.0 (X11; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0",
+}
+DEFAULT_PROBE_UA = _PROBE_UA_BY_OS["windows"]
+
+#: DNS 正缓存条目上限（60s 短命缓存，超了直接清空——比引入 LRU 便宜且够用）
+DNS_CACHE_MAX = 2048
 
 #: 延迟直方图分桶（秒），用于 /metrics
 LATENCY_BUCKETS = (1.0, 3.0, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0)
@@ -175,39 +216,91 @@ def _default_browser_factory(*, headless: bool, os_persona: str = ""):
     return Camoufox(**kwargs)
 
 
-def probe_protection(url: str, timeout: float = 15.0) -> dict:
-    """发一次普通 GET（跟随最多 3 次跳转），把状态码/头/cookie/body 交给探测器。"""
+def probe_protection(url: str, timeout: float = 15.0, *, guard=None, user_agent: str = "") -> dict:
+    """发一次普通 GET（**逐跳**校验重定向），把状态码/头/cookie/body 交给探测器。
+
+    `guard(url)` 是 SSRF 守卫，**每一跳都要调一次**。为什么必须逐跳：
+    `urllib.request.urlopen` 默认自动跟随最多 10 次重定向，且**跟随过程中不再回看守卫**
+    —— 一个 302 就能把内部地址塞进来。这是 `/solve` 早就修过（见
+    `_install_request_guard`）、`/detect` 却漏掉的同一个洞。
+
+    这里改成"自己跟随、自己校验"：关闭 urllib 的自动跟随，按 `Location` 逐跳解析，
+    每一跳先问守卫，再发下一跳。跳数上限 `PROBE_MAX_REDIRECTS`，防止重定向环挂死线程。
+    """
     import urllib.error
     import urllib.request
 
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101 Firefox/156.0",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-        },
-    )
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        """不让 urllib 自己跟：重定向由下面的循环逐跳校验后再发。"""
+
+        def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+            return None
+
+    opener = urllib.request.build_opener(_NoRedirect)
+    request_headers = {
+        # UA 必须与求解侧是同一个身份：用另一套身份探出来的"有没有盾/什么盾"，
+        # 与真实求解时看到的不一定一致（CF 的判定就吃这一层）。
+        "User-Agent": user_agent or DEFAULT_PROBE_UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5",
+    }
+
     status = 0
     headers: dict = {}
     body = ""
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            status = response.status
-            headers = dict(response.headers.items())
-            body = response.read(500_000).decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        status = e.code
-        headers = dict(e.headers.items()) if e.headers else {}
+    final_url = url
+    current = url
+    hops = 0
+
+    while True:
+        if guard is not None:
+            guard(current)                 # 每一跳（含首跳）都过守卫
         try:
-            body = e.read(500_000).decode("utf-8", "replace")
-        except Exception:  # noqa: BLE001
-            body = ""
-    except Exception as e:  # noqa: BLE001
-        raise SolveError(
-            ErrorCode.TRANSPORT, f"探测失败：{type(e).__name__}: {str(e)[:120]}", stage="navigate",
-            hint="检查目标可达性；探测只发一次普通 GET，不需要浏览器",
-        ) from e
+            with opener.open(urllib.request.Request(current, headers=request_headers),
+                             timeout=timeout) as response:
+                status = response.status
+                headers = dict(response.headers.items())
+                body = response.read(500_000).decode("utf-8", "replace")
+                final_url = response.geturl() or current
+            break
+        except urllib.error.HTTPError as e:
+            if e.code in (301, 302, 303, 307, 308):
+                location = (e.headers.get("Location") if e.headers else "") or ""
+                try:
+                    e.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                if not location:
+                    status = e.code
+                    headers = dict(e.headers.items()) if e.headers else {}
+                    body = ""
+                    final_url = current
+                    break
+                hops += 1
+                if hops > PROBE_MAX_REDIRECTS:
+                    raise SolveError(
+                        ErrorCode.TRANSPORT,
+                        f"探测重定向超过 {PROBE_MAX_REDIRECTS} 跳，已中止",
+                        stage="navigate",
+                        hint="目标可能在重定向环里；如需探测最终页，请直接用最终 URL",
+                    ) from e
+                current = urljoin(current, location)
+                continue
+            status = e.code
+            headers = dict(e.headers.items()) if e.headers else {}
+            try:
+                body = e.read(500_000).decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                body = ""
+            final_url = current
+            break
+        except SolveError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise SolveError(
+                ErrorCode.TRANSPORT, f"探测失败：{type(e).__name__}: {str(e)[:120]}", stage="navigate",
+                hint="检查目标可达性；探测只发一次普通 GET，不需要浏览器",
+            ) from e
 
     cookies = {}
     # urllib 会把多条 Set-Cookie 合并，这里按分号粗切出 cookie 名即可（只用于识别）
@@ -218,6 +311,7 @@ def probe_protection(url: str, timeout: float = 15.0) -> dict:
             cookies[name] = "1"
 
     result = detect_summarize(url=url, status=status, headers=headers, body=body, cookies=cookies)
+    result["final_url"] = final_url
     result["backend"] = "detect"
     return result
 
@@ -321,6 +415,7 @@ class Solver:
         *,
         max_queue: int = DEFAULT_MAX_QUEUE,
         max_inflight: int = DEFAULT_MAX_INFLIGHT,
+        max_detect: int = DEFAULT_MAX_DETECT,
         egress_id: str = "default",
         browser_factory=None,
         allow_private_hosts: bool = False,
@@ -346,6 +441,8 @@ class Solver:
         self._warm_retry_max = warm_retry_max
         self._pool = proxy_pool
         self.prewarmer = None            # 由 main 注入（配置了 --prewarm 才启动）
+        #: 实际生效的后端链（由 main 在装配路由器后回填），只用于 /health 展示
+        self.backend_chain: list[str] = ["camoufox"]
 
         self._started_at = _now()
         if store is not None:
@@ -357,6 +454,9 @@ class Solver:
         self._lock = threading.Lock()
         self._tasks: queue.Queue = queue.Queue(maxsize=max(1, max_queue))
         self._inflight = threading.BoundedSemaphore(max(1, max_inflight))
+        # 探测走独立闸门：它不发浏览器，但会同步占用 handler 线程去做一次出站请求。
+        # 与求解共用同一个信号量会让"探测"吃掉"求解"的额度（反之亦然）。
+        self.detect_inflight = threading.BoundedSemaphore(max(1, max_detect))
         self._stopping = threading.Event()
 
         # 生命周期 / 健康
@@ -610,7 +710,59 @@ class Solver:
                 ErrorCode.TRANSPORT, f"域名解析失败：{host}", stage="validate",
                 hint="DNS 解析失败可能是瞬时的，可重试；持续失败请检查求解机的 DNS 与网络",
             )
+        if len(self._dns_cache) >= DNS_CACHE_MAX:
+            # 条目太多（长期运行 + 抓到大量域）时清空重来：正缓存只有 60s 寿命，清空代价可忽略。
+            # 不这么做就是一个只增不减的 dict（原实现如此）。
+            self._dns_cache.clear()
         self._dns_cache[host] = (_now() + 60.0, host)
+
+    def probe_user_agent(self) -> str:
+        """探测用 UA：优先用浏览器**真实** UA（与求解同身份），浏览器还没起来时按 persona 推。"""
+        with self._lock:
+            ua = self._browser_ua
+        if ua:
+            return ua
+        return _PROBE_UA_BY_OS.get(self.browser_os, DEFAULT_PROBE_UA)
+
+    def guard_hop(self, url: str) -> None:
+        """重定向跳转的 SSRF 守卫（守卫每一跳，不只是入口 URL）。
+
+        与 `_check_target` 的差别（**故意不同**，两边语义各有出处）：
+          · 入口 URL 用**严格**判定：解析不了 = 调用方写错 → 报错；
+          · 重定向目标用**三态**：`blocked` 才拒绝，`unresolvable` 放行
+            （目标站在重定向里带一条解析不了的统计域，不该让整次探测失败）。
+        这与 `/solve` 的 route 守卫是同一套语义（见 `_install_request_guard`）。
+
+        非 http(s) 的跳转（`file:` / `gopher:` / `ftp:` …）一律拒绝：opener 里装着其它
+        协议处理器，放行等于把协议面交出去。
+        """
+        if self._allow_private_hosts:
+            return
+        try:
+            parts = urlsplit(url)
+        except Exception as e:  # noqa: BLE001
+            raise SolveError(
+                ErrorCode.INVALID_REQUEST, f"重定向目标无法解析：{str(e)[:100]}", stage="validate"
+            ) from e
+        if (parts.scheme or "").lower() not in ("http", "https"):
+            raise SolveError(
+                ErrorCode.INVALID_REQUEST,
+                f"重定向到非 http(s) 协议（{parts.scheme or '空'}），已拒绝",
+                stage="validate",
+                hint="探测只跟随 http/https 跳转",
+            )
+        host = (parts.hostname or "").lower()
+        if not host:
+            raise SolveError(
+                ErrorCode.INVALID_REQUEST, "重定向目标缺少主机名，已拒绝", stage="validate"
+            )
+        if self._classify_host(host) == "blocked":
+            raise SolveError(
+                ErrorCode.INVALID_REQUEST,
+                f"重定向目标解析到受限地址（{host}），已拒绝",
+                stage="validate",
+                hint="求解服务只允许探测公网目标；确需联调请加 --allow-private-hosts",
+            )
 
     def _entry_for(self, host: str):
         """该域粘住的代理出口；没有代理池时返回 None。"""
@@ -1017,7 +1169,7 @@ class Solver:
 
         key = self.cache_key(host, proxy_entry)
         # 一次性 token 绝不进缓存（复用必然失败）；cookie 类才按域复用
-        cacheable = want_enum in COOKIE_FIELD
+        cacheable = want_enum in CACHEABLE_WANTS
         if not force and cacheable:
             cached = self._store.get(key)
             if cached and cached.get("expires_at", 0) > _now():
@@ -1111,7 +1263,7 @@ class Solver:
                 ),
             )
 
-        if want_enum in COOKIE_FIELD:
+        if want_enum in CACHEABLE_WANTS:
             ttl = self._ttl_from_cookie_list(r["cookie_list"], cookie_name=COOKIE_FIELD[want_enum])
             if ttl <= 0:
                 with self._lock:
@@ -1140,7 +1292,7 @@ class Solver:
             "expires_at": expires_at,
             "elapsed": elapsed,
             "cached": False,
-            "cacheable": want_enum in COOKIE_FIELD,
+            "cacheable": want_enum in CACHEABLE_WANTS,
             "egress_id": proxy_entry.egress_id if proxy_entry is not None else self.egress_id,
         }
         if want_enum in TOKEN_WANTS:
@@ -1174,22 +1326,17 @@ class Solver:
 
         语义（与 `--ttl` 帮助文本一致）：`--ttl` 是**上限**，真实值取 cookie 自带的 `expires`。
         不用 `max(MIN_TTL, ...)` 兜底——那会把只剩 5 秒的死凭证当成还能用 60 秒。
+        实现统一在 `backends.derive_ttl`（三个非 Camoufox 后端共用同一份，禁止各自再算一遍）。
         """
-        for c in cookie_list:
-            if c.get("name") != cookie_name:
-                continue
-            exp = c.get("expires", -1)
-            if isinstance(exp, (int, float)) and exp > 0:
-                remaining = int(exp - _now())
-                if remaining < MIN_CLEARANCE_REMAINING:
-                    return 0
-                return min(remaining, self.ttl)
-            break
-        # cookie 没有 expires（会话级）→ 退回配置值
-        return self.ttl
+        return derive_ttl(cookie_list, cookie_name, default=self.ttl, max_ttl=self.ttl)
 
     # -- 健康与指标 -----------------------------------
-    def health(self) -> tuple[int, dict]:
+    def health(self, *, include_internal: bool = True) -> tuple[int, dict]:
+        """健康视图。`include_internal=False` 时只返回"服务是否在服务"的最小集。
+
+        最小集是给**免鉴权**的容器探活用的；完整集含运维信息（last_error 可能带主机名、
+        代理地址、缓存域数、UA 指纹），只给带 token 的调用方。
+        """
         with self._lock:
             alive = self._browser_alive and self._thread.is_alive()
             if alive:
@@ -1198,12 +1345,20 @@ class Solver:
                 state = "starting"
             else:
                 state = "degraded"
-            body = {
+            minimal = {
                 "ok": alive,
-                "browser": "camoufox",
                 "state": state,
                 "browser_alive": self._browser_alive,
                 "worker_alive": self._thread.is_alive(),
+            }
+            if not include_internal:
+                return (200 if alive else 503), minimal
+            body = {
+                **minimal,
+                "browser": "camoufox",
+                # 真正会被调用的后端链。注意：上面的三态只反映**本地 Camoufox worker**，
+                # 不反映链上其它后端（cfsolve 二进制缺失、pydoll 的 Chrome 被挪走）的可用性。
+                "backends": list(self.backend_chain),
                 "egress_id": self.egress_id,
                 "cache_backend": self.cache_backend,
                 # UA 指纹（不是 UA 本体）：它是缓存键的第三维。
@@ -1343,7 +1498,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         path = self.path.split("?", 1)[0]
         if path == "/health":
-            code, body = self.solver.health()
+            # 免鉴权 → 只给"服务是否在服务"的最小视图；带 token 才给完整运维视图。
+            # 理由：完整视图里有 last_error（可能含被拦截子资源的主机名）、代理地址与评分、
+            # 缓存域数、UA 指纹、persona。容器探活只需要状态码 + state。
+            code, body = self.solver.health(include_internal=self._authorized())
             self._send(code, body)
             return
         if not self._authorized():
@@ -1419,6 +1577,51 @@ class Handler(BaseHTTPRequestHandler):
                     ErrorCode.INVALID_REQUEST, f"want={want_enum.value} 需要 sitekey", stage="validate",
                     hint="从页面源码里取 data-sitekey，或 reCAPTCHA 的 api.js?render=<sitekey>",
                 )
+            # ── route：让探测结论驱动决策（v4.0 T-32）──────────────
+            # 不传 route 等价于 fixed，行为与 v3 完全一致（向后兼容的第一优先级）。
+            route_mode = req.get("route", "fixed")
+            if not isinstance(route_mode, str):
+                raise SolveError(ErrorCode.INVALID_REQUEST, "route 必须是字符串", stage="validate")
+            route_mode = route_mode.strip().lower() or "fixed"
+            if route_mode not in ROUTE_MODES:
+                raise SolveError(
+                    ErrorCode.INVALID_REQUEST, f"未知 route={route_mode!r}", stage="validate",
+                    hint=f"可选 {sorted(ROUTE_MODES)}；不传等价于 fixed（v3 行为）",
+                )
+            routed_by = None
+            if route_mode != "fixed":
+                detect_result = self._probe_for_route(url, timeout=timeout) if route_mode == "auto" else None
+                decision = route_decide(detect_result, route_mode)
+                routed_by = decision.as_dict()
+                if isinstance(detect_result, dict):
+                    routed_by["detect"] = {
+                        "protected": bool(detect_result.get("protected")),
+                        "providers": [p.get("name") for p in (detect_result.get("providers") or [])
+                                      if isinstance(p, dict)],
+                        "challenge_type": detect_result.get("cloudflare_challenge_type"),
+                        "route": (detect_result.get("recommendation") or {}).get("route"),
+                    }
+                if decision.action == ROUTE_SKIP:
+                    # 没盾：不求解，直接告诉调用方去请求目标站（省掉 16–20s 与 1.2GB 浏览器）
+                    self._send(200, {
+                        "ok": True, "solved": False, "want": want_enum.value,
+                        "no_challenge": True, "route": decision.mode,
+                        "hint": decision.hint, "routed_by": routed_by,
+                        "elapsed": round(time.monotonic() - started, 2),
+                        "egress_id": self.solver.egress_id,
+                    })
+                    self._log(event="solve", req_id=req_id, host=_host_of(url), ok=True,
+                              cached=False, route=decision.mode, reason=decision.reason,
+                              ms=round((time.monotonic() - started) * 1000))
+                    return
+                if decision.action == ROUTE_REJECT:
+                    # 不会就是不会：白等一个完整超时再报 unsolved 是最坏的用户体验
+                    raise SolveError(
+                        ErrorCode.UNSOLVED,
+                        "该站使用的防护本服务不支持（" + decision.reason + "）",
+                        stage="detect", hint=decision.hint, extra={"routed_by": routed_by},
+                    )
+
             if self.router is not None:
                 # 配了兜底后端：按优先级路由（未配置的后端会被 skip 并记录 attempts）
                 result = self.router.solve(
@@ -1430,6 +1633,9 @@ class Handler(BaseHTTPRequestHandler):
                     url, timeout=timeout, force=bool(force_raw),
                     want=want_enum.value, sitekey=sitekey, action=action, cdata=cdata,
                 )
+            if routed_by is not None:
+                result = dict(result)
+                result["routed_by"] = routed_by
             self._send(200, result)
             self._log(event="solve", req_id=req_id, host=_host_of(url), ok=True,
                       cached=result.get("cached"), elapsed=result.get("elapsed"),
@@ -1473,25 +1679,84 @@ class Handler(BaseHTTPRequestHandler):
             err = SolveError(ErrorCode.INTERNAL, f"{type(e).__name__}: {str(e)[:160]}", stage="internal")
             self._send(err.http_status, err.payload())
 
+    def _probe_for_route(self, url: str, timeout) -> dict | None:
+        """给 `route=auto` 做一次轻量探测；任何异常/闸门满一律返回 None（退回照常求解）。
+
+        三条纪律（每条都对应一个会咬人的失败模式）：
+          · 探测**不许**阻断求解：探测失败只意味着"没有建议"，不是"不能解"；
+          · 探测**不许**绕过闸门：`/detect` 有独立信号量，这里复用它，避免 route=auto
+            变成"每个 solve 都免费多打一次出站请求"的放大器；
+          · 探测**不许**绕过 SSRF 守卫：逐跳 guard 由 probe_protection 负责，这里传同一个守卫。
+        """
+        gate = getattr(self.solver, "detect_inflight", None)
+        got_slot = False
+        if gate is not None:
+            if not gate.acquire(blocking=False):
+                return None            # 探测闸门满：宁可不探测，也不排队拖慢求解
+            got_slot = True
+        try:
+            try:
+                budget = max(2.0, min(8.0, float(timeout)))
+            except (TypeError, ValueError):
+                budget = 8.0
+            return probe_protection(url, timeout=budget, guard=self.solver.guard_hop)
+        except SolveError:
+            return None
+        except Exception:  # noqa: BLE001 —— 探测永远不该让求解路径 500
+            return None
+        finally:
+            if got_slot:
+                gate.release()
+
     def _run_detect(self, url: str) -> None:
-        """两种入口（GET 查询串 / POST JSON）共用的探测实现。"""
+        """两种入口（GET 查询串 / POST JSON）共用的探测实现。
+
+        与 `/solve` 同等的两道治理，缺一不可：
+          · **准入**：独立信号量，满了立刻 429。探测是同步出站请求，
+            没有背压就等于给调用方一个免费的流量放大器；
+          · **SSRF**：入口严格校验 + **每一跳重定向**用 `guard_hop` 复检。
+        """
+        got_slot = False
         try:
             if not url:
                 raise SolveError(ErrorCode.INVALID_REQUEST, "缺少 url", stage="validate")
+            if len(url) > MAX_URL_LEN:
+                raise SolveError(ErrorCode.INVALID_REQUEST, f"url 超过 {MAX_URL_LEN} 字符", stage="validate")
             if not url.startswith(("http://", "https://")):
                 raise SolveError(ErrorCode.INVALID_REQUEST, "url 必须是 http(s)", stage="validate")
             host = _host_of(url)
-            self.solver._check_target(host)          # 复用 SSRF 守卫
-            self._send(200, probe_protection(url))
+            if not host:
+                raise SolveError(ErrorCode.INVALID_REQUEST, f"无法解析域名: {url}", stage="validate")
+            self.solver._check_target(host)          # 入口：严格校验（解析不了=调用方写错）
+            if not self.solver.detect_inflight.acquire(blocking=False):
+                raise SolveError(
+                    ErrorCode.BUSY,
+                    "探测并发已达上限",
+                    stage="admit",
+                    hint="降低 /detect 并发，或调大 --max-detect；探测与求解额度分开计",
+                )
+            got_slot = True
+            self._send(200, probe_protection(
+                url, guard=self.solver.guard_hop, user_agent=self.solver.probe_user_agent()
+            ))
         except SolveError as e:
             self._send(e.http_status, e.payload())
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             err = SolveError(ErrorCode.INTERNAL, f"{type(e).__name__}: {str(e)[:160]}", stage="internal")
             self._send(err.http_status, err.payload())
+        finally:
+            if got_slot:
+                self.solver.detect_inflight.release()
 
     def _read_body_raw(self) -> tuple[bytes, str]:
         """读请求体。返回 (bytes, 错误说明)；错误不抛异常，交由调用方决定状态码。"""
+        # 本服务不解析 chunked 请求体（http.server 本身也不解析）。若只报错而不关连接，
+        # 未读的 chunk 字节会留在 socket 里，在 HTTP/1.1 keep-alive 上被当成**下一个请求**
+        # 的开头 —— 这是请求走私/反序列化的入口，而且本方法在鉴权**之前**就被调用。
+        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+            self.close_connection = True
+            return b"", "不支持 Transfer-Encoding: chunked 请求体，请改用 Content-Length"
         try:
             n = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -1533,6 +1798,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--headed", action="store_true", help="有头模式（调试用）")
     ap.add_argument("--max-queue", type=int, default=DEFAULT_MAX_QUEUE, help="有界队列容量，满即 429")
     ap.add_argument("--max-inflight", type=int, default=DEFAULT_MAX_INFLIGHT, help="并发求解上限，满即 429")
+    ap.add_argument("--max-detect", type=int, default=DEFAULT_MAX_DETECT,
+                    help="并发探测（/detect）上限，满即 429；与求解额度分开计")
     ap.add_argument("--egress-id", default=os.environ.get("CF_EGRESS_ID", "default"),
                     help="本进程的出口标识；换出口必须换 id，否则会复用别处 IP 的凭证")
     ap.add_argument("--token-file", default=".env", help=f"token 文件；首次启动自动生成并写入 {TOKEN_LINE_PREFIX}<token>")
@@ -1589,6 +1856,21 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[cfsolve] 引擎不可用：{msg}" + (f" | 安装：{hint}" if hint else ""), flush=True)
         return 2
 
+    # 代理池 与 cfsolve/pydoll **不能同时启用**（这是启动即失败的硬冲突，不是警告）。
+    # 原因：cfsolve 与 pydoll 都在自己进程里直连（cfsolve 自带 BoringSSL、pydoll 自带 Chrome），
+    # 无法走代理池 ⇒ 它们拿到的 cf_clearance 绑定的是**本机直连 IP**；而 Go 侧回放会按
+    # 凭证的出口标识去走代理 ⇒ 求解与回放出口不一致 ⇒ 稳定的静默 403。
+    # 与其让它上线后表现为"随机 403"，不如启动就说清楚。
+    if args.proxy and (args.cfsolve_bin or args.pydoll):
+        print(
+            "[cfsolve] 配置冲突：--proxy（代理池）与 --cfsolve-bin/--pydoll 不能同时启用。\n"
+            "  原因：cfsolve/pydoll 在各自进程里直连，走不了代理池；它们发出的凭证绑的是直连 IP，\n"
+            "        而 Go 侧回放会按凭证出口走代理 → 出口不一致 → 稳定 403。\n"
+            "  处理：二选一 —— 去掉 --proxy，或去掉 --cfsolve-bin/--pydoll。",
+            flush=True,
+        )
+        return 2
+
     pool = None
     if args.proxy:
         pool = ProxyPool(args.proxy)
@@ -1602,6 +1884,7 @@ def main(argv: list[str] | None = None) -> int:
         ttl=args.ttl,
         max_queue=args.max_queue,
         max_inflight=args.max_inflight,
+        max_detect=args.max_detect,
         egress_id=args.egress_id,
         allow_private_hosts=args.allow_private_hosts,
         cache_dir=args.cache_dir or None,
@@ -1619,11 +1902,13 @@ def main(argv: list[str] | None = None) -> int:
     backends = []
     if args.cfsolve_bin and args.cfsolve_profile:
         backends.append(CfsolveBackend(
-            args.cfsolve_bin, args.cfsolve_profile, timeout=args.cfsolve_timeout
+            args.cfsolve_bin, args.cfsolve_profile, timeout=args.cfsolve_timeout,
+            egress_id=args.egress_id,
         ))
     if args.pydoll:
         pyd = PydollBackend(
-            args.chrome_path, headless=args.pydoll_headless, wait=args.pydoll_wait
+            args.chrome_path, headless=args.pydoll_headless, wait=args.pydoll_wait,
+            egress_id=args.egress_id,
         )
         if not pyd.is_configured():
             print(f"[cfsolve] 警告：--pydoll 已开启但不可用（chrome={find_chrome(args.chrome_path) or '未找到'}；"
@@ -1633,6 +1918,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.flaresolverr:
         backends.append(FlareSolverrBackend(args.flaresolverr))
     Handler.router = BackendRouter(backends) if len(backends) > 1 else None
+    solver.backend_chain = list(Handler.router.backends) if Handler.router else ["camoufox"]
 
     try:
         srv = Server((args.host, args.port), Handler)

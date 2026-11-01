@@ -25,8 +25,10 @@ import os
 import time
 
 try:  # 包导入
+    from .backends import DEFAULT_COOKIE_TTL, BackendId, derive_ttl
     from .errors import ErrorCode, SolveError
 except ImportError:  # 直接以脚本运行
+    from backends import DEFAULT_COOKIE_TTL, BackendId, derive_ttl  # type: ignore[no-redef]
     from errors import ErrorCode, SolveError  # type: ignore[no-redef]
 
 #: Windows / Linux 上 Chrome 的常见安装位置（找不到时让用户显式传 --chrome-path）
@@ -75,14 +77,17 @@ class PydollBackend:
         headless: bool = False,
         wait: float = 45.0,
         keep_browser: bool = False,
+        egress_id: str = "pydoll",
     ) -> None:
         self.chrome_path = find_chrome(chrome_path)
         self.headless = headless
         self.wait = wait
         self.keep_browser = keep_browser
+        # 出口标识：pydoll 在自己的进程里直连（不走代理池），所以它必须是**本机出口**的标识
+        self.egress_id = egress_id or "pydoll"
 
     def name(self) -> str:
-        return "pydoll"
+        return BackendId.PYDOLL.value
 
     def is_configured(self) -> bool:
         if not self.chrome_path:
@@ -185,6 +190,17 @@ class PydollBackend:
                 ),
             )
 
+        # 统一算 TTL（禁止各后端自己拍 0）：0 会让 Go 侧立刻判过期、服务端缓存直接删，
+        # 等于把缓存整个关掉 —— 每次回放都要重新开一次 Chrome。
+        ttl = derive_ttl(cookie_list, want_cookie, default=DEFAULT_COOKIE_TTL)
+        if ttl <= 0:
+            raise SolveError(
+                ErrorCode.UNSOLVED,
+                f"pydoll 拿到的 {want_cookie} 已过期或剩余寿命过短，不返回（否则客户端只会拿到静默 403）",
+                stage="wait",
+                hint="检查本机时钟；持续出现说明该出口 IP 或 UA 已被提分",
+            )
+
         return {
             "ok": True,
             "solved": True,
@@ -193,11 +209,11 @@ class PydollBackend:
             "user_agent": ua,
             "cookies": cookies,
             "cookie_list": cookie_list,
-            "expires_in": 0,
-            "expires_at": 0.0,
+            "expires_in": ttl,
+            "expires_at": time.time() + ttl,
             "elapsed": elapsed,
             "cached": False,
             "cacheable": True,
-            "egress_id": "pydoll",
+            "egress_id": self.egress_id,
             "backend": self.name(),
         }

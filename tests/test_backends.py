@@ -301,3 +301,126 @@ def test_flaresolverr_backend_returns_egress_and_ttl():
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# ── X2：TTL 的单一实现（三个 cookie 后端共用）──────────────────────
+def test_derive_ttl_uses_cookie_expiry():
+    import time as _t
+    ttl = be.derive_ttl([{"name": "cf_clearance", "expires": _t.time() + 600}], "cf_clearance")
+    assert 590 <= ttl <= 600
+
+
+def test_derive_ttl_returns_zero_when_expired_or_too_short():
+    import time as _t
+    assert be.derive_ttl([{"name": "cf_clearance", "expires": _t.time() - 10}], "cf_clearance") == 0
+    # 只剩 5 秒也算死凭证：发出去只会让客户端吃静默 403
+    assert be.derive_ttl([{"name": "cf_clearance", "expires": _t.time() + 5}], "cf_clearance") == 0
+
+
+def test_derive_ttl_falls_back_to_default_for_session_cookie():
+    assert be.derive_ttl([{"name": "cf_clearance", "expires": -1}], "cf_clearance",
+                         default=1234) == 1234
+    assert be.derive_ttl([], "cf_clearance", default=1234) == 1234
+
+
+def test_derive_ttl_caps_at_max_ttl():
+    import time as _t
+    assert be.derive_ttl([{"name": "cf_clearance", "expires": _t.time() + 99999}],
+                         "cf_clearance", max_ttl=1500) == 1500
+
+
+def test_derive_ttl_ignores_cookies_without_expiry_but_keeps_looking():
+    import time as _t
+    ttl = be.derive_ttl(
+        [{"name": "__cf_bm", "expires": _t.time() + 60},
+         {"name": "cf_clearance", "expires": _t.time() + 300}],
+        "cf_clearance",
+    )
+    assert 290 <= ttl <= 300
+
+
+def test_flaresolverr_backend_refuses_dead_clearance():
+    """返回一条已过期的 cf_clearance 等于把缓存关掉 + 让客户端吃 403，必须报 unsolved。"""
+    import time as _t
+    dead = {"status": "ok", "solution": {"userAgent": "Firefox/156", "cookies": [
+        {"name": "cf_clearance", "value": "DEAD", "domain": ".e.com", "path": "/",
+         "expiry": _t.time() - 5},
+    ]}}
+    srv, base = _serve(lambda body: (200, dead))
+    try:
+        with pytest.raises(SolveError) as ei:
+            be.FlareSolverrBackend(base).solve("https://e.com/", 30)
+        assert ei.value.code is ErrorCode.UNSOLVED
+        assert "过期" in ei.value.message
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+# ── X4：timeout 是整条链的预算，不是每个后端的预算 ────────────────
+class _Recorder:
+    """记录每个后端实际拿到的预算，并（可选）耗时后失败。"""
+
+    def __init__(self, name, *, sleep=0.0, error=None):
+        self._name = name
+        self._sleep = sleep
+        self._error = error or SolveError(ErrorCode.UNSOLVED, "没解出来", stage="wait")
+        self.budget = None
+
+    def name(self):
+        return self._name
+
+    def is_configured(self):
+        return True
+
+    def solve(self, url, timeout, force=False, **kwargs):
+        import time as _t
+        self.budget = timeout
+        if self._sleep:
+            _t.sleep(self._sleep)
+        raise self._error
+
+
+def test_router_shares_deadline_between_backends():
+    """回归：每个后端都拿满 timeout ⇒ 四后端最坏 375s，而 Go 客户端 240s 先超时。"""
+    a = _Recorder("a", sleep=0.05)
+    b = _Recorder("b")
+    with pytest.raises(SolveError):
+        be.BackendRouter([a, b]).solve("https://e.com/", 10)
+    assert a.budget == pytest.approx(10.0, abs=0.2)
+    assert b.budget is not None and b.budget < a.budget, \
+        f"第二个后端必须拿到更小的剩余预算，实际 a={a.budget} b={b.budget}"
+    assert b.budget > 9.0
+
+
+def test_router_stops_when_budget_is_exhausted():
+    """预算不够再试一个后端时，必须报 timeout 并留下 attempts，而不是硬把下一个也跑一遍。"""
+    a = _Recorder("a", sleep=0.35)
+    b = _Recorder("b")
+    router = be.BackendRouter([a, b])
+    with pytest.raises(SolveError) as ei:
+        router.solve("https://e.com/", be.MIN_BACKEND_BUDGET + 0.1)
+    # a 没解出来 ⇒ 报 a 的错（unsolved），b 被跳过
+    assert ei.value.code is ErrorCode.UNSOLVED
+    assert b.budget is None, "预算不足时不该再调用下一个后端"
+    assert ei.value.extra["attempts"][-1] == {
+        "backend": "b", "skipped": True, "reason": "deadline-exhausted"
+    }
+
+
+def test_router_reports_timeout_when_budget_too_small_to_try_any_backend():
+    """预算小到连最小后端预算都不够时，错误码必须是 timeout（而不是 not-configured）。"""
+    a = _Recorder("a")
+    router = be.BackendRouter([a])
+    with pytest.raises(SolveError) as ei:
+        router.solve("https://e.com/", 0)
+    assert ei.value.code is ErrorCode.TIMEOUT
+    assert a.budget is None, "没有预算就不该调用后端"
+    assert ei.value.extra["attempts"] == [
+        {"backend": "a", "skipped": True, "reason": "deadline-exhausted"}
+    ]
+
+
+def test_backend_id_is_the_allowlist_for_every_chain_member():
+    """`BackendId` 自称白名单，那它就必须覆盖链上每一个后端（cfsolve/pydoll 曾经不在里面）。"""
+    assert {m.value for m in be.BackendId} >= {"camoufox", "cfsolve", "pydoll", "flaresolverr"}
