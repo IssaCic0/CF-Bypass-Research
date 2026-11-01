@@ -1,8 +1,11 @@
 # 求解服务镜像（v4.0 T-41）
 #
-# ⚠️ 状态：**未在本机验证**（本机 Docker daemon 未运行）。以下内容是按官方文档写的，
-#    第一次在有权器的机器上 `docker build` 时必须重新确认依赖包名与 camoufox 版本。
-#    验证命令见文末。
+# ✅ 状态：**已在本机实测**（v4.7，Docker 29.9.2 / linux-amd64）。
+#    构建：`docker build --build-arg SLIM_FONTS=1 -t cf-bypass-solver:4.7.0 .` → 3.52 GB
+#    运行：容器 **5–6s** 就绪（/health → state=ready）；`/detect` / `/solve` / `/metrics`
+#          / `/shutdown`（202 + exit 0）六项全部实测通过。见 `evidence/v47-container.md`。
+#    唯一需要重新确认的点：**换 camoufox 版本时** Debian 依赖包名可能变（base 是 python:3.12-slim，
+#    包名跟 Debian 主版本走）。
 #
 # 两个刻意的取舍：
 #   1. **camoufox 二进制在 build 阶段 fetch**，不放到运行期。
@@ -58,7 +61,26 @@ ENV HOME=/home/solver
 # 关键：删除必须**与 fetch 在同一个 RUN 里**。单独写一个 RUN 去 rm，
 # 只是在新层里加了一个 whiteout，镜像一点都不会变小（实测：分开写时 slim 仍是 4.97GB）。
 ARG SLIM_FONTS=0
-RUN python -m camoufox fetch     && if [ "$SLIM_FONTS" != "0" ]; then          B=$(ls -d /home/solver/.cache/camoufox/browsers/official/*/ | head -1);          echo "SLIM_FONTS=$SLIM_FONTS -> $B";          if [ "$SLIM_FONTS" = "1" ]; then rm -rf "$B/fonts/M"; else rm -rf "$B/fonts"; fi;          rm -rf /home/solver/.cache/camoufox/addons/*/;        fi     && chown -R solver:solver /home/solver/.cache
+ARG PREWARM_ADDONS=1
+# 为什么还要单独预热插件：camoufox 的 uBlock Origin **不在** `camoufox fetch` 的产物里 ——
+# 它是在**浏览器首次启动**时才下载并解压的。实测：只 build 不预热时镜像里 `addons/` 是空目录，
+# 每个新容器启动都会打 "Downloading addon (UBO) 0%→100%"。
+# 这与本文件开头的取舍直接矛盾（"运行期 fetch 需要外网，容器会起不来/超时"）：
+# 离线或受限网络下，浏览器就永远起不来。所以这里在 build 阶段**真的把浏览器拉起来一次**
+# （headless，不需要显示器），把插件预热进镜像。体积代价 ≈2 MB。
+# 顺带修掉一个反向操作：原来的 slim 分支会 `rm -rf addons/*/` —— 为了省 2MB 而把
+# "离线可用"删掉，代价比收益大得多，已移除。
+RUN python -m camoufox fetch \
+ && if [ "$SLIM_FONTS" != "0" ]; then \
+        B=$(ls -d /home/solver/.cache/camoufox/browsers/official/*/ | head -1); \
+        echo "SLIM_FONTS=$SLIM_FONTS -> $B"; \
+        if [ "$SLIM_FONTS" = "1" ]; then rm -rf "$B/fonts/M"; else rm -rf "$B/fonts"; fi; \
+    fi \
+ && if [ "$PREWARM_ADDONS" != "0" ]; then \
+        python -c "from camoufox.sync_api import Camoufox as C; c=C(headless=True); b=c.__enter__(); b.close(); c.__exit__(None,None,None)" \
+        || echo "WARN: 插件预热失败（离线构建？）—— 运行期首次启动会再尝试联网下载"; \
+    fi \
+ && chown -R solver:solver /home/solver/.cache
 
 USER solver
 
