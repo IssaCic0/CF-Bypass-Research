@@ -1,0 +1,8 @@
+# 开发/CI 依赖（生产不需要）。安装：pip install -r requirements.txt -r requirements-dev.txt
+#
+# 为什么单列：requirements.txt 是**运行期**锁版本，CI 需要额外装覆盖率工具；
+# 把 pytest-cov 塞进 requirements.txt 会让生产镜像多装一个用不上的包。
+
+-r requirements.txt
+
+pytest-cov==7.1.0

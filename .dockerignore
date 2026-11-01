@@ -1,0 +1,21 @@
+# 构建上下文瘦身：这些目录/文件进镜像没有意义，只会让构建变慢、镜像变大。
+.git
+.github
+.codegraph
+graft
+node_modules
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+logs
+plans
+docs
+tests
+*.md
+!requirements.txt
+env
+tmp
+*.sqlite3
+*.log
+.DS_Store
