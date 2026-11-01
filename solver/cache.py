@@ -48,6 +48,19 @@ PBKDF2_ITERATIONS = 200_000
 SQLITE_FILENAME = "cache.sqlite3"
 #: 多进程写冲突时最多等多久（毫秒）。超过就抛，由调用方降级——不能无限等。
 SQLITE_BUSY_TIMEOUT_MS = 5000
+#: 切 WAL 的重试预算：25 × 0.2~0.6s ≈ 最长 10s。冷启动时这点等待远好过"起不来"。
+WAL_RETRY_ATTEMPTS = 25
+WAL_RETRY_DELAY = 0.2
+
+
+def _try_set_wal(conn) -> str:
+    """单次尝试把连接切到 WAL，返回实际生效的 journal 模式。
+
+    抽成模块级函数只为一件事：让"重试逻辑"可以被用例单独验证
+    （`_enable_wal` 会反复调它；用例可以把这个函数换成"前两次抛
+    `database is locked`"而不去真的制造跨进程竞态）。
+    """
+    return str(conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] or "").lower()
 
 
 class CacheStore(Protocol):
@@ -298,6 +311,7 @@ class SqliteStore:
         self._conn_lock = threading.RLock()
         self._conn_obj = None
         self._conn_creations = 0        # 供测试断言"只建过一次连接"
+        self._journal_mode = ""         # 实际生效的 journal 模式（切 WAL 失败时≠wal）
         self._init_schema()
 
     # -- 连接管理 ----------------------------------
@@ -308,13 +322,17 @@ class SqliteStore:
         thread-local 等于"每条 TCP 连接开一条 SQLite 连接"（WAL 下 3 个文件句柄），
         连接对象随线程死亡后句柄并不总被及时释放 —— 实测 1 小时泄漏 1308 个句柄。
 
-        关于并发（独立审查 P2 指出原注释名不副实，已改正）：
-          · **写路径**（set/delete/try_claim/release_claim/purge/record_solve）走 `_conn_lock`，
-            同一进程内串行化，避免多线程同时写同一条连接；
-          · **读路径**（get/items/__len__/stats/host_stats）**不取锁** —— 只读，
-            并发安全由 `sqlite3` 自身（`check_same_thread=False` + 单连接内部互斥）保证；
-            代价是"读与写在连接级别仍会互斥"，这是 pysqlite 的既有行为；
-          · 跨进程并发由 WAL + busy_timeout 处理（那是另一层问题）。
+        关于并发（v4.7 更正：上一版的注释在这里是**错的**）：
+          · **读和写都必须走 `_conn_lock`**。曾经写的是"读路径只读、并发安全由 sqlite3
+            内部互斥保证" —— 实测不成立：pysqlite 只把单次 C 调用串行化，两条线程在
+            **同一条连接**上各自 execute() 之后**游标状态是共享的**，`fetchone()` 会互相踩。
+            实测后果有两种：`InterfaceError('bad parameter or other API misuse')`，
+            以及最坏的一种 —— `fetchone()` 拿到**别的语句**的行，即**别的键的条目**
+            （问 k9 拿到 k10 的 cf_clearance）。凭证缓存串域是 P0。
+            回归用例：`test_concurrent_reads_and_writes_never_corrupt_rows`
+            （16 线程 × 20 轮，断言读到的 cf_clearance 必须是自己那条）。
+          · 锁只覆盖到 fetch 完成（行已物化），解密/解析在锁外做，避免占锁太久。
+          · 跨进程并发由 WAL + busy_timeout 处理（那是另一层问题，见 `_enable_wal`）。
         """
         import sqlite3
 
@@ -322,12 +340,43 @@ class SqliteStore:
             if self._conn_obj is None:
                 conn = sqlite3.connect(self.path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000.0,
                                        check_same_thread=False)
-                conn.execute("PRAGMA journal_mode=WAL")      # 允许并发读 + 单写
-                conn.execute("PRAGMA synchronous=NORMAL")    # WAL 下的合理折中
+                # busy_timeout 要在切 journal_mode **之前**生效（见 _enable_wal 的说明）。
                 conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+                conn.execute("PRAGMA synchronous=NORMAL")    # WAL 下的合理折中
+                self._journal_mode = self._enable_wal(conn)
                 self._conn_obj = conn
                 self._conn_creations += 1
             return self._conn_obj
+
+    def _enable_wal(self, conn, attempts: int | None = None, delay: float | None = None) -> str:
+        """把连接切到 WAL，带**有界重试**；仍然失败就退回当前模式（但不静默）。
+
+        为什么需要重试：`PRAGMA journal_mode=WAL` 需要一次短暂独占锁，而它在拿不到锁时
+        **不走 busy handler**，直接返回 `database is locked`。实测（v4.7）：
+        `test_concurrent_first_boot_shares_one_salt` 的 6 个子进程同时首启同一个空目录，
+        约 **1/10** 概率有一个子进程在这一步直接起不来 —— 等价于 compose 3 worker 冷启动。
+        WAL 只是并发优化，不该成为"服务起不来"的原因。
+
+        ⚠️ 诚实说明：这条竞态**没有**被用例确定性复现出来（试过同进程持锁、跨进程持锁、
+        90 次裸构造，都没能稳定命中），所以回归用例只覆盖"重试逻辑本身"
+        （`test_wal_switch_retries_when_database_is_locked`）。真实竞态靠降低概率 + 压力观察，
+        见 `workflow_status.md` §7 N-15。
+        """
+        last = ""
+        attempts = WAL_RETRY_ATTEMPTS if attempts is None else attempts
+        delay = WAL_RETRY_DELAY if delay is None else delay
+        for i in range(attempts):
+            try:
+                return _try_set_wal(conn)
+            except Exception as e:  # noqa: BLE001 —— 只可能是 busy/locked/只读挂载
+                last = f"{type(e).__name__}: {e}"
+                time.sleep(delay * (1 + i % 3))
+        print(f"[cfsolve] 警告：无法切到 WAL（{last}），已退回默认 journal 模式；"
+              f"并发读性能下降，功能不受影响", flush=True)
+        try:
+            return str(conn.execute("PRAGMA journal_mode").fetchone()[0] or "").lower()
+        except Exception:  # noqa: BLE001
+            return ""
 
     def _init_schema(self) -> None:
         conn = self._conn()
@@ -363,15 +412,29 @@ class SqliteStore:
 
     # -- 协议实现 ----------------------------------
     def get(self, key: str) -> dict | None:
+        # **读也要锁**（v4.7 实测的 P0）。
+        # 曾经的理由是"写路径加锁、读路径靠 pysqlite 内部互斥"——这不成立：
+        # pysqlite 只把单次 C 调用串行化，两条线程在**同一条连接**上各自 execute() 之后，
+        # 游标状态是共享的，fetchone() 会互相踩。实测两种后果：
+        #   1. InterfaceError('bad parameter or other API misuse')
+        #   2. fetchone() 拿到**别的语句**的行 —— 最坏情况下是**别的键的条目**：
+        #      实测问 `k9` 拿到了 `C10` 的 cf_clearance（凭证缓存串了域，P0）。
+        # 锁只覆盖到 fetchone()（行已物化），解密/解析在锁外做，避免占锁太久。
         try:
-            row = self._conn().execute(
-                "SELECT value, expires_at FROM entries WHERE key = ?", (key,)
-            ).fetchone()
+            with self._conn_lock:
+                row = self._conn().execute(
+                    "SELECT value, expires_at FROM entries WHERE key = ?", (key,)
+                ).fetchone()
         except Exception:  # noqa: BLE001 —— 锁冲突/库损坏都不该打断服务
             return None
         if row is None:
             return None
         blob, expires_at = row
+        if not isinstance(expires_at, (int, float)):
+            # 半行/坏行：NOT NULL 约束理论上挡得住，但既然共享连接能给出畸形行，
+            # 这里就不能再假设它是数字（原来直接 float() 会抛 TypeError 冒到调用方）。
+            self.delete(key)
+            return None
         if float(expires_at) <= time.time():
             self.delete(key)
             return None
@@ -428,7 +491,10 @@ class SqliteStore:
     def items(self) -> Iterable[tuple[str, dict]]:
         out: list[tuple[str, dict]] = []
         try:
-            rows = self._conn().execute("SELECT key, value, expires_at FROM entries").fetchall()
+            # 同上：共享连接上的读必须进锁，否则 fetchall() 可能拿到别的语句的行。
+            with self._conn_lock:
+                rows = self._conn().execute(
+                    "SELECT key, value, expires_at FROM entries").fetchall()
         except Exception:  # noqa: BLE001
             return out
         now = time.time()
@@ -455,11 +521,15 @@ class SqliteStore:
 
     def stats(self) -> dict:
         try:
-            conn = self._conn()
-            alive = conn.execute("SELECT COUNT(*) FROM entries WHERE expires_at > ?", (time.time(),)).fetchone()[0]
+            # 读路径同样必须进锁（共享连接 + 并发游标会串行/串数据，见 _conn 的说明）。
+            with self._conn_lock:
+                alive = self._conn().execute(
+                    "SELECT COUNT(*) FROM entries WHERE expires_at > ?", (time.time(),)
+                ).fetchone()[0]
         except Exception:  # noqa: BLE001
             alive = 0
-        return {"backend": "sqlite", "entries": int(alive), "max_entries": self._max, "path": self.path}
+        return {"backend": "sqlite", "entries": int(alive), "max_entries": self._max,
+                "path": self.path, "journal_mode": self._journal_mode}
 
     def try_claim(self, key: str, ttl: float = 120.0, owner: str = "") -> bool:
         """跨进程抢占"我来解这个域"。**原子**（INSERT OR IGNORE），抢到返回 True。
@@ -510,16 +580,22 @@ class SqliteStore:
 
     def host_stats(self, limit: int = 20) -> list[dict]:
         try:
-            rows = self._conn().execute(
-                "SELECT host, solves, failures FROM host_stats ORDER BY solves DESC LIMIT ?", (int(limit),)
-            ).fetchall()
+            # 同上：读路径必须进锁（共享连接 + 并发游标 = 行串台）。
+            with self._conn_lock:
+                rows = self._conn().execute(
+                    "SELECT host, solves, failures FROM host_stats ORDER BY solves DESC LIMIT ?",
+                    (int(limit),),
+                ).fetchall()
         except Exception:  # noqa: BLE001
             return []
         return [{"host": r[0], "solves": int(r[1]), "failures": int(r[2])} for r in rows]
 
     def __len__(self) -> int:
         try:
-            return int(self._conn().execute("SELECT COUNT(*) FROM entries").fetchone()[0])
+            # 同上：`/health` 每个请求都会走这里，和求解线程的写并发。
+            with self._conn_lock:
+                return int(self._conn().execute(
+                    "SELECT COUNT(*) FROM entries").fetchone()[0])
         except Exception:  # noqa: BLE001
             return 0
 

@@ -355,3 +355,102 @@ def test_sqlite_close_then_reopen_creates_new_connection(tmp_path):
     store.close()
     assert len(store) == 1
     assert store._conn_creations == 2
+
+
+def test_concurrent_reads_and_writes_never_corrupt_rows(tmp_path):
+    """并发读写共用一条连接时，**读**路径也必须进锁。
+
+    为什么（v4.7 实测）：v4.2 把 thread-local 连接改成共享连接，修掉了句柄泄漏
+    （每条新 TCP 连接 +3 句柄）。但当时只给**写**路径加了 `_conn_lock`，
+    读路径的注释写的是"靠 pysqlite 内部互斥"——**这不成立**：
+    pysqlite 只把单次 C 调用串行化，两条线程在同一条连接上各自 `execute()` 后，
+    **游标状态是共享的**，`fetchone()` 会互相踩。实测两种表现：
+
+      · `InterfaceError('bad parameter or other API misuse')`
+      · `fetchone()` 拿到**别的语句**的行 → 本用例里就是 `expires_at=None`
+        → `float(None)` → TypeError（`solver/cache.py::get` 里没有被捕获）
+
+    在服务里的后果：并发 `/health`（读 `len`）+ `/solve`（读写）时缓存命中路径偶发异常，
+    极端情况下**可能读到别的键的条目**（这里用 cf_clearance 值断言，读错就直接失败）。
+
+    这条用例原来的兄弟 `test_sqlite_store_uses_single_shared_connection` 抓不到它 ——
+    线程里的异常只变成 `PytestUnhandledThreadExceptionWarning`，**用例照样绿**。
+    """
+    import threading
+
+    store = cache_mod.SqliteStore(str(tmp_path), TOKEN)
+    errors: list[str] = []
+
+    def work(i: int) -> None:
+        try:
+            for _ in range(20):
+                store.set(f"k{i}|default", entry(clearance=f"C{i}"))
+                got = store.get(f"k{i}|default")
+                assert got is None or got.get("cf_clearance") == f"C{i}", (
+                    f"读到了别的键的条目：期望 C{i}，实际 {got!r}")
+                len(store)
+                store.items()
+                store.host_stats()
+        except BaseException as e:  # noqa: BLE001 —— 线程里的异常必须被抓出来，否则又变成 warning
+            errors.append(f"thread {i}: {type(e).__name__}: {e}")
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+    assert not any(t.is_alive() for t in threads), "线程没跑完（可能死锁）"
+    assert not errors, f"并发读写出现 {len(errors)} 次异常，前 3 条：{errors[:3]}"
+    assert len(store) == 16
+
+
+def test_wal_switch_retries_when_database_is_locked(tmp_path, monkeypatch):
+    """切 WAL 撞上 `database is locked` 时必须**重试**，而不是让服务起不来。
+
+    背景（v4.7）：`PRAGMA journal_mode=WAL` 拿不到锁时**不走 busy handler**，
+    直接抛 OperationalError。实测 `test_concurrent_first_boot_shares_one_salt`
+    的 6 个子进程同时首启同一个空目录，约 1/10 概率有一个子进程在这一步起不来
+    ——用 compose 就是"3 个 worker 冷启动时偶尔有一个反复重启"。
+
+    ⚠️ 诚实说明：这条竞态本身**没能**被确定性复现（同进程持锁、跨进程持锁、
+    90 次裸构造都没稳定命中），所以这里 mock 出真实的 SQLite 错误，
+    只验证"重试逻辑存在且有效"。真实竞态靠降低概率 + 压力观察（见 §7 N-15）。
+    """
+    import sqlite3
+
+    calls = {"n": 0}
+    real = cache_mod._try_set_wal
+
+    def flaky(conn):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise sqlite3.OperationalError("database is locked")
+        return real(conn)
+
+    monkeypatch.setattr(cache_mod, "_try_set_wal", flaky)
+    monkeypatch.setattr(cache_mod, "WAL_RETRY_DELAY", 0.01)
+
+    store = cache_mod.SqliteStore(str(tmp_path), TOKEN)
+    assert calls["n"] >= 3, f"没有重试：只尝试了 {calls['n']} 次"
+    assert store._journal_mode == "wal", f"重试后仍未进 WAL：{store._journal_mode!r}"
+    store.set("k|default", entry())
+    assert store.get("k|default") is not None
+
+
+def test_wal_degradation_is_loud_but_usable(tmp_path, monkeypatch, capsys):
+    """实在切不过去（只读挂载等）：降级到默认模式，**必须可用且必须留痕**。"""
+    import sqlite3
+
+    def always_locked(conn):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(cache_mod, "_try_set_wal", always_locked)
+    monkeypatch.setattr(cache_mod, "WAL_RETRY_ATTEMPTS", 3)
+    monkeypatch.setattr(cache_mod, "WAL_RETRY_DELAY", 0.01)
+
+    store = cache_mod.SqliteStore(str(tmp_path), TOKEN)
+    assert store._journal_mode != "wal"
+    store.set("k|default", entry())
+    assert store.get("k|default") is not None, "降级后缓存仍然必须可用"
+    assert store.stats()["journal_mode"] == store._journal_mode, "stats 里要能看到真实模式"
+    assert "无法切到 WAL" in capsys.readouterr().out, "降级必须打印警告（不许静默）"
