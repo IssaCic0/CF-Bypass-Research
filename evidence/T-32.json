@@ -1,0 +1,113 @@
+{
+  "task_id": "T-32",
+  "status": "done",
+  "timestamp": "2026-11-01T22:35:57+0800",
+  "baseline_commit": "d5a5f53",
+  "goal": "route=auto：让 /detect 的结论驱动 /solve 决策，无盾站不再白付 16-20s 浏览器",
+  "commands_executed": [
+    {
+      "cmd": "python -m pytest tests/test_route.py -q",
+      "exit_code": 0,
+      "raw_output_tail": "30 passed in 0.46s"
+    },
+    {
+      "cmd": "python -m pytest tests/ -q --cov=solver --cov-fail-under=80",
+      "exit_code": 0,
+      "raw_output_tail": "257 passed, TOTAL 81% (81.03%)，route.py 99%"
+    },
+    {
+      "cmd": "起真服务(8915) 后 POST /solve {url:https://example.com/, route:auto}",
+      "exit_code": 0,
+      "raw_output_tail": "200 {\"ok\":true,\"solved\":false,\"no_challenge\":true,\"route\":\"auto\",\"routed_by\":{\"action\":\"skip\",\"reason\":\"no-protection\",...},\"elapsed\":0.55}"
+    },
+    {
+      "cmd": "同一 URL 不传 route（对照）",
+      "exit_code": 0,
+      "raw_output_tail": "200 {\"ok\":false,\"error_code\":\"unsolved\",...} —— 真去求解，耗时 20s（超时预算内未拿到 clearance）"
+    },
+    {
+      "cmd": "GET /health 读计数",
+      "exit_code": 0,
+      "raw_output_tail": "route=auto 之后 solves 仍为 0；不传 route 之后 solves=1 failures=1"
+    }
+  ],
+  "files_changed": [
+    "solver/route.py",
+    "solver/service.py",
+    "tests/test_route.py",
+    "docs/API.md"
+  ],
+  "tests": [
+    {
+      "name": "test_auto_skips_solve_when_no_protection",
+      "type": "unit",
+      "status": "pass"
+    },
+    {
+      "name": "test_auto_prefers_pure_for_managed_challenge",
+      "type": "unit",
+      "status": "pass"
+    },
+    {
+      "name": "test_auto_prefers_browser_for_turnstile",
+      "type": "unit",
+      "status": "pass"
+    },
+    {
+      "name": "test_auto_rejects_unsupported_provider",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "DataDome 命中 → action=reject，hint 里点名厂商"
+    },
+    {
+      "name": "test_auto_mixed_providers_rejects_when_any_is_unsupported",
+      "type": "unit",
+      "status": "pass"
+    },
+    {
+      "name": "test_auto_without_detect_degrades_to_solve",
+      "type": "unit",
+      "status": "pass"
+    },
+    {
+      "name": "test_http_auto_skips_browser_for_unprotected_site",
+      "type": "integration",
+      "status": "pass",
+      "evidence": "命中无盾站时 solves 计数保持 0（一次求解都没发生）"
+    },
+    {
+      "name": "test_http_auto_rejects_unsupported_provider_without_waiting",
+      "type": "integration",
+      "status": "pass"
+    },
+    {
+      "name": "test_http_without_route_keeps_v3_behaviour",
+      "type": "integration",
+      "status": "pass",
+      "evidence": "不传 route 时探测器调用次数为 0，响应里没有 routed_by"
+    },
+    {
+      "name": "test_http_rejects_unknown_route_value",
+      "type": "integration",
+      "status": "pass"
+    }
+  ],
+  "seams_touched": [
+    "POST /solve 请求/响应契约",
+    "solver ↔ detect 探测路径"
+  ],
+  "mock_scenarios_covered": [
+    "no-protection",
+    "cloudflare-managed",
+    "cloudflare-turnstile",
+    "aws-waf",
+    "unsupported-provider",
+    "detect-unavailable",
+    "unknown-route"
+  ],
+  "limitations": [
+    "prefer=pure/browser 目前只是**提示**：后端链顺序仍由配置决定（cfsolve 已默认排第一），未实现按 prefer 动态跳过后端",
+    "『不支持厂商』复用 unsolved + stage=detect 表达，没有新增独立错误码（避免破坏既有错误码契约）；若要专门的 unsupported-provider 码，属于契约变更",
+    "真机只验证了『无盾站 skip』这条路径（example.com）；CF managed 站的真实路由收益需要 §15 预算"
+  ]
+}

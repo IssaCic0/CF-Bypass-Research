@@ -1,0 +1,61 @@
+{
+  "task_id": "T-09",
+  "status": "done",
+  "timestamp": "2026-11-01T22:30:39+0800",
+  "baseline_commit": "d5a5f53",
+  "goal": "Go 客户端 per-host 单飞：同域并发冷缓存只求解一次",
+  "commands_executed": [
+    {
+      "cmd": "cd gocfsolve && go vet ./...",
+      "exit_code": 0,
+      "raw_output_tail": "(无输出)"
+    },
+    {
+      "cmd": "cd gocfsolve && go test -race -run SingleFlight -v ./...",
+      "exit_code": 0,
+      "raw_output_tail": "PASS TestGetSingleFlightColdDomain (0.20s) / DifferentHostsDoNotBlock (0.30s) / SharesError (0.15s) / LeaderCancelDoesNotDeadlock (2.25s); ok gocfsolve"
+    }
+  ],
+  "files_changed": [
+    "gocfsolve/cfsolve.go",
+    "gocfsolve/revalidate_test.go"
+  ],
+  "tests": [
+    {
+      "name": "TestGetSingleFlightColdDomain",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "50 goroutine 同冷域 → 求解 <=2 次（实测 1 次），全部拿到同一份 clearance"
+    },
+    {
+      "name": "TestGetSingleFlightDifferentHostsDoNotBlock",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "两域并行 0.30s 完成（串行会是 0.60s）"
+    },
+    {
+      "name": "TestGetSingleFlightSharesError",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "leader 失败 → 10 个等待者都拿到 unsolved，求解 1 次，无悬挂"
+    },
+    {
+      "name": "TestGetSingleFlightLeaderCancelDoesNotDeadlock",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "leader ctx 取消后等待者在 3s 内全部返回，flights map 已清理"
+    }
+  ],
+  "coverage_summary": null,
+  "seams_touched": [
+    "Go 客户端 → 求解服务 /solve HTTP 契约"
+  ],
+  "mock_scenarios_covered": [
+    "success",
+    "unsolved",
+    "ctx-cancel"
+  ],
+  "limitations": [
+    "单进程内单飞；跨进程同域并发仍会重复求解（见 N-05 已知限制）"
+  ]
+}

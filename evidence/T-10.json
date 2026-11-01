@@ -1,0 +1,71 @@
+{
+  "task_id": "T-10",
+  "status": "done",
+  "timestamp": "2026-11-01T22:30:39+0800",
+  "baseline_commit": "d5a5f53",
+  "goal": "Go 回放 403/挑战页自愈：失效缓存 → 重解一次 → 用新凭证重放",
+  "commands_executed": [
+    {
+      "cmd": "cd gocfsolve && go test -race -run 'Revalidate|403|ChallengePage|ZeroTTL' -v ./...",
+      "exit_code": 0,
+      "raw_output_tail": "PASS: TestDoWith403TriggersRevalidate / 403RevalidatesOnlyOnce / 403InvalidatesLocalCache / ChallengePageBodyHeuristic / NormalBodyIsNotTruncated / 403ConcurrentSingleRevalidate / RevalidateDisabledKeepsPassthrough / RevalidateSkipsNonReplayableRequestBody / ZeroTTLResponseIsNotCached"
+    }
+  ],
+  "files_changed": [
+    "gocfsolve/cfsolve.go",
+    "gocfsolve/revalidate_test.go"
+  ],
+  "tests": [
+    {
+      "name": "TestDoWith403TriggersRevalidate",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "403(cf-mitigated) → 求解 2 次 → 重放带新凭证 CL-2 → 200 OK-BODY"
+    },
+    {
+      "name": "TestDoWith403RevalidatesOnlyOnce",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "重解后仍 403 → 只解 2 次、打靶 2 次（不循环）"
+    },
+    {
+      "name": "TestDoWith403InvalidatesLocalCache",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "缓存里已是 CL-2 且 Cached=true"
+    },
+    {
+      "name": "TestDoWithNormalBodyIsNotTruncated",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "5010 字节正文完整返回（偷看后 body 已还原）"
+    },
+    {
+      "name": "TestDoWith403ConcurrentSingleRevalidate",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "5 并发同域 403 → 求解 <=3 次（实测 2 次）"
+    },
+    {
+      "name": "TestRevalidateSkipsNonReplayableRequestBody",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "GetBody=nil 的 POST → 不重试，打靶 1 次"
+    }
+  ],
+  "seams_touched": [
+    "Go 客户端 → 目标站回放",
+    "Go 客户端 → /solve 重解"
+  ],
+  "mock_scenarios_covered": [
+    "success",
+    "403",
+    "cf-mitigated header",
+    "challenge-page-body",
+    "concurrent-403",
+    "non-replayable-body"
+  ],
+  "limitations": [
+    "真实 CF 站点上未验证（受 §15 预算约束）；判据来自响应头与正文特征"
+  ]
+}

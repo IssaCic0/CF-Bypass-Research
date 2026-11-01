@@ -1,0 +1,85 @@
+{
+  "round": "纯协议（cfsolve）首次真机验证",
+  "date": "2026-11-01",
+  "build": {
+    "result": "成功（本机 Windows）",
+    "binary": "target/release/challenge.exe",
+    "size_bytes": 49628672,
+    "build_time": "1m37s（依赖已缓存后）",
+    "blockers_solved": [
+      "缺 libclang → 用 PyPI 包 libclang(18.1.1) 自带的 libclang.dll（80MB），设 LIBCLANG_PATH",
+      "cmake 3.28 不认识 VS18 生成器 → 升级到 cmake 4.4.4 仍不认 → 改为在 MSVC 开发环境(vcvars64)+Ninja 下构建",
+      "缺 NASM（BoringSSL 汇编）→ choco install nasm",
+      "cfsolve 源码含 Unix-only 调用（tokio::signal::unix、libc::clock_gettime）→ 本机打了 2 处条件编译补丁（见 patch_notes）"
+    ],
+    "patch_notes": [
+      "Cargo.toml: 增加 [target.\"cfg(windows)\".dependencies] windows-sys(Win32_System_Performance)",
+      "src/performance_clock.rs: monotonic_us 拆成 #[cfg(unix)] 原实现 + #[cfg(windows)] 用 QueryPerformanceCounter 实现",
+      "src/capture/proxy.rs: shutdown_requested 的 unix 分支加 cfg，Windows 只等 ctrl_c",
+      "⚠️ 这是本地补丁，不是上游支持的平台"
+    ]
+  },
+  "cli_trials_with_bundled_profile": [
+    {
+      "site": "https://steamdb.info/",
+      "rc": 1,
+      "ms": 3197,
+      "page_bytes": 204403,
+      "error": "page has no .cf-turnstile container",
+      "interpretation": "从本机出口用 Safari-iOS 指纹直接拿到**正常页**（无挑战）→ 没有要解的东西"
+    },
+    {
+      "site": "https://www.glassdoor.com/",
+      "rc": 1,
+      "ms": 23660,
+      "page_bytes": 11886,
+      "error": "the clearance form set no `cf_clearance` cookie",
+      "interpretation": "确实跑了挑战流程（23.7s）但没拿到 cookie → 自带 profile 与本机出口/环境不匹配"
+    },
+    {
+      "site": "https://www.epicgames.com/",
+      "rc": 1,
+      "ms": 15727,
+      "page_bytes": 424833,
+      "error": "page has no .cf-turnstile container"
+    },
+    {
+      "site": "https://www.quora.com/",
+      "rc": 1,
+      "ms": 6702,
+      "page_bytes": 87566,
+      "error": "page has no .cf-turnstile container"
+    },
+    {
+      "site": "https://www.udemy.com/",
+      "rc": 1,
+      "ms": 4902,
+      "page_bytes": 307039,
+      "error": "page has no .cf-turnstile container"
+    }
+  ],
+  "cli_summary": "自带 profile 成功率 0/4（挑战页）；1 个站点(steamdb)直接拿到正常页说明纯协议栈在 TLS/HTTP 层是通的",
+  "service_e2e": {
+    "config": "--cfsolve-bin <challenge.exe> --cfsolve-profile <safari-26-ios.json>（后端链 cfsolve→camoufox）",
+    "target": "https://steamdb.info/",
+    "http": 200,
+    "ok": true,
+    "backend": "camoufox",
+    "elapsed_sec": 20.58,
+    "clearance_len": 463,
+    "attempts": [
+      {
+        "backend": "cfsolve",
+        "ok": false,
+        "error_code": "unsolved",
+        "stage": "wait"
+      },
+      {
+        "backend": "camoufox",
+        "ok": true
+      }
+    ],
+    "conclusion": "纯协议与浏览器的回落链**在真机上跑通**：cfsolve 先试→失败→camoufox 接管并成功"
+  },
+  "next_step_to_make_pure_protocol_actually_work": "需要有能过盾的 **Safari 或 Chromium** 浏览器 + capture-proxy 录一份**与本机出口同环境**的 profile；本机能稳定过盾的是 Camoufox(Firefox)，cfsolve 不支持 Firefox profile → 本机无法自录匹配 profile"
+}

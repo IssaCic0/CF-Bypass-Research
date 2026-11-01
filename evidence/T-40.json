@@ -1,0 +1,39 @@
+{
+  "task_id": "T-40",
+  "status": "done",
+  "timestamp": "2026-11-01T22:30:39+0800",
+  "baseline_commit": "d5a5f53",
+  "goal": "离线压测（hot/cold/share）+ 环境自检 doctor",
+  "commands_executed": [
+    {
+      "cmd": "python scripts/loadtest.py --mode hot --workers 8 --duration 5",
+      "exit_code": 0,
+      "raw_output_tail": "requests=14382 errors=0 qps=2874.9 p50=2.64ms p90=4.18ms p99=5.91ms verdict=PASS"
+    },
+    {
+      "cmd": "python scripts/loadtest.py --mode cold --workers 16 --solve-delay 0.05",
+      "exit_code": 0,
+      "raw_output_tail": "accepted=16 rejected=0 errors=0 solver_calls=16 solves_per_request=1.0 verdict=PASS"
+    },
+    {
+      "cmd": "python scripts/loadtest.py --mode share --processes 4 --iterations 3",
+      "exit_code": 0,
+      "raw_output_tail": "sequential solves=3 hits=9 failures=0; burst solves=12 hits=0; verdict=PASS（sequential 口径）"
+    },
+    {
+      "cmd": "python scripts/doctor.py --port 8907",
+      "exit_code": 1,
+      "raw_output_tail": "服务启动: 24.3s 后 ready (cache=sqlite:...); WARN x2 (token 未生成 / cfsolve 未配置)"
+    }
+  ],
+  "files_changed": [
+    "scripts/loadtest.py",
+    "scripts/doctor.py"
+  ],
+  "tests": [],
+  "limitations": [
+    "hot 测的是本地回放路径（假目标站），不含真实站点的 TLS/网络成本",
+    "cold 用假 /solve，验证的是准入与去重机制，不是浏览器求解性能",
+    "doctor exit=1 表示「有可降级项」，不是失败"
+  ]
+}

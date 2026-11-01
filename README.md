@@ -34,15 +34,34 @@ Go 网关(gocfsolve.Client) ──POST /solve──► solver/service.py (:8878,
 ```
 
 ```bash
-# 1) 起服务
-pip install camoufox && python -m camoufox fetch
+# 1) 一次性准备
+pip install -r requirements.txt
+python -m camoufox fetch
+
+# 2) 起服务（首次启动自动生成 token 并写入 ./.env）
 python solver/service.py --port 8878
 
-# 2) 跑端到端
+# 3) 跑端到端（会自动读 ./.env 里的 token）
 cd gocfsolve && go run ./examples/endtoend -target https://steamdb.info/
 ```
 
+### 第 4 步：确认你成功了
+
+只看这三行，不要靠"感觉跑通了"：
+
+```
+✅ 求解服务在线：map[browser:camoufox state:ready ...]
+✅ 取得 cf_clearance（463 字节, UA=Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0…, 求解 18.12s, cached=false）
+📄 回放结果：status=200 长度=202117 挑战页=false 耗时=1.34s
+```
+
+- 只看到第一行 → **只通了健康检查**，求解没跑。
+- 前两行有、第三行失败 → **求解成功但回放失败**，先查"同出口 IP / 同 UA"。
+- 三行齐 → 全链路通。
+
 详细选型理由、部署方式、已知限制、踩坑记录 → **[docs/最终方案与实现结果.md](docs/最终方案与实现结果.md)**
+接口契约（含错误码表） → **[docs/API.md](docs/API.md)**
+按挑战类型拆分的排查手册 → **[docs/challenges/](docs/challenges/)**
 
 ---
 
@@ -58,7 +77,22 @@ cd gocfsolve && go run ./examples/endtoend -target https://steamdb.info/
 | 纯 JS 引擎 + 自写 shim | ❌ | 脚本执行到运行时注入阶段，但仍报错、无 cookie | 自建浏览器 |
 | **浏览器收割（Camoufox）** | ✅ **2/2 站点** | steamdb 19.6s / glassdoor 14.5s | ≈700 MB/实例 |
 
-**能纯算的部分我们已经在用，而且有效**：cookie 回放、TLS 指纹、header 顺序、加密链计算。
+> **四条路线可切换**：纯协议 `cfsolve` / Camoufox（默认）/ CloakBrowser / patchright。
+> 选型、成本、许可证与实测数据见 **[docs/方案矩阵.md](docs/方案矩阵.md)**；
+> 三个参考仓库的深度调研见 **[docs/参考仓库深度调研.md](docs/参考仓库深度调研.md)**。
+
+**当前支持四类产物**（同一个浏览器求解路径，`want` 参数区分）：
+
+| `want` | 产物 | 真机验证 |
+|---|---|---|
+| `clearance`（默认） | `cf_clearance` cookie | ✅ A 组 24/25 |
+| `turnstile` | Turnstile 一次性 token | ✅ 官方测试 sitekey 通过（dummy token，6–8s） |
+| `recaptcha_v3` | reCAPTCHA v3 一次性 token | ✅ Google 官方 demo 页通过（2297 字节 token，18.5s） |
+| `awswaf` | `aws-waf-token` cookie | ⚠️ 仅离线测试（无 AWS-WAF 目标站） |
+
+**能纯算的部分我们已经在用，而且有效**：cookie 回放、TLS 指纹、加密链计算。
+（注意：**header 顺序不在其中**——Go 标准库按字段名字典序写 header，无法复现浏览器的顺序；
+`gocfsolve` 只保证补齐 Firefox 侧必有的头，不保证顺序。）
 真正不能纯算的，恰好是 CF 用来做判定的那一层。
 
 ---
@@ -154,26 +188,45 @@ https://steamdb.info/  →  status=200  len=201391  challenge_page=false  elapse
 
 ```
 solver/
-  service.py            # ★ 最终方案：Camoufox 求解服务（POST /solve，按域缓存）
+  service.py            # ★ 最终方案：Camoufox 求解服务（/solve /health /stats /metrics）
+  errors.py             # 错误码与 SolveError（对外契约，HTTP 状态映射在此）
+  cache.py              # 缓存层：MemoryStore / FileStore（加密+原子写+过期+上限）
+  proxypool.py          # 代理池：按域一致性哈希粘性 + 评分 + 冷却退避
+  backends.py           # 多后端接缝：BackendId 白名单 + 有序路由 + attempts 轨迹
 gocfsolve/
   cfsolve.go            # ★ 最终方案：Go 客户端（缓存 + 提前续期 + Do() 自动回放）
+  cfsolve_test.go       # Go 侧离线测试（httptest，不联网）
   examples/endtoend/    # 端到端验证程序（求解 → 回放 → 校验 200）
+tests/
+  test_service.py       # 服务契约/准入/健康/鉴权（注入假浏览器）
+  test_cache.py         # 落盘缓存：加密、原子写、过期、上限、跨进程共享
+  test_proxypool.py     # 代理池：粘性、扩容影响面、冷却、凭据不外泄
+  test_backends.py      # 多后端路由与 FlareSolverr 契约
 docs/
+  API.md                # ★ 接口契约（参数/响应/错误码表）
+  findings.json         # 研究结论的机器可读清单（带 verdict 与证据路径）
+  challenges/           # 按挑战类型拆分的排查手册（jsd / managed / turnstile）
   最终方案与实现结果.md                 # ★ 选型理由 / 实测数据 / 部署 / 踩坑
   Cloudflare过盾方案可行性侦察报告.md   # 完整侦察报告（15 节，含全部原始输出）
 scripts/
+  validate-findings.mjs # 校验 docs/findings.json（证据路径必须存在 + 定级规则）
   analyze.py            # 静态分析 jsd main.js：字符串字面量 / 码表 / 关键字命中
   scan_ctype.py         # 50 站采样，统计 CF 挑战类型 cType 分布
   probe_browser.py      # Playwright headless / headed 过盾对照实验
   probe_camoufox.py     # Camoufox 过盾实验（当前唯一通过）
   diag_challenge.py     # 挑战页 DOM 诊断：iframe / checkbox / 按钮 / 截图
-node-shim/
-  shims.js              # 12 项浏览器能力伪造层（WebGL/Audio/WebRTC/Worker/fonts…）
-  run2.js               # A1 主程序：jsdom + shims 跑 CF 挑战脚本
-go-jseng/
-  main.go               # A2：Go + goja 执行 575 KB 混淆编排脚本
-go-replay/
-  main.go               # Go 原生 net/http 回放 cf_clearance
+requirements.txt        # 精确锁版本的运行期依赖
+requirements-dev.txt    # 开发/CI 依赖（pytest-cov）
+run.ps1 / run.bat       # ★ 统一入口：doctor / test / go / smoke / bench / verify（v4.0）
+policy.md               # 质量门禁（覆盖率 80%、证据门禁、提交规则），写死数值
+workflow_status.md      # 任务契约 / 验收表 / 验证日志 / 审查记录
+test_ledger.md          # 测试台账：每个验收项对应哪些用例
+evidence/               # 验收证据（真实命令 + 真实输出），一个任务卡一个 json
+.github/workflows/ci.yml# CI：python(覆盖率门槛) + go(vet/test -race) + findings 三 job，全程离线
+Dockerfile              # 容器镜像（camoufox 二进制在 build 阶段 fetch）
+docker-compose.yml      # 多 worker + 共享缓存卷
+plans/
+  下一步改进指南.md      # 施工图（任务卡 + 验收门禁）
 ```
 
 ---
@@ -182,15 +235,80 @@ go-replay/
 
 ### 环境
 
-- Python 3.11+（`playwright`、`camoufox`、`httpx`、`curl_cffi`、`psutil`）
-- Node 18+（`jsdom`、`canvas`）
-- Go 1.21+（`goja`）
+- Python 3.11+（版本见 `requirements.txt`，**已锁版本**）
+- Go 1.21+（仅 `gocfsolve/` 客户端与测试需要）
+- Node 18+（仅 `scripts/validate-findings.mjs` 需要）
 
 ```bash
-pip install playwright camoufox httpx curl_cffi psutil
-python -m playwright install chromium
-cd node-shim && npm i jsdom canvas
+pip install -r requirements.txt -r requirements-dev.txt   # 运行期 + 测试依赖（版本已锁）
+python -m camoufox fetch                                  # 必需：拉 Camoufox 的 Firefox 二进制
+
+# 装完先自检（会起一次服务做 /health 探活，20 秒内给结论）
+python scripts/doctor.py
 ```
+
+### 多进程部署（要吞吐就看这一节）
+
+单进程只**串行**求解（Playwright sync API 绑定线程），所以「加吞吐」= 「加进程」。
+关键是**共用同一个落盘缓存目录**，否则每个进程会各解一次同一个域，扩容等于白扩：
+
+```powershell
+# 起 4 个 worker（端口 8878..8881），共用一个缓存目录与同一个 token
+pwsh scripts/run-pool.ps1 -Count 4 -CacheDir "$env:LOCALAPPDATA\cfsolve\cache"
+
+# 可选：保活（在过期前主动续期，把贵操作挪出请求路径）
+pwsh scripts/run-pool.ps1 -Count 4 -Prewarm "steamdb.info,glassdoor.com" -RenewBefore 300
+```
+
+Go 侧用 `cfsolve.NewPool` 接（按域一致性哈希 + 失败摘除/自动回归）：
+
+```go
+pool, err := cfsolve.NewPool(
+    []string{"http://127.0.0.1:8878", "http://127.0.0.1:8879",
+             "http://127.0.0.1:8880", "http://127.0.0.1:8881"},
+    cfsolve.WithPoolToken(token),
+    cfsolve.WithPoolMaxFailures(2),
+    cfsolve.WithPoolDownDuration(30*time.Second),
+)
+defer pool.Close()
+cl, err := pool.Get(ctx, target)      // 同域永远打到同一个 worker
+```
+
+### 一键入口（v4.0，推荐）
+
+```powershell
+.un.ps1 doctor     # 环境自检：依赖/浏览器二进制/端口/缓存目录/token + 起一次服务打 /health
+.un.ps1 test       # Python 全量测试 + 覆盖率门槛（≥80%，低于门槛直接红）
+.un.ps1 go         # Go: go vet + go test -race
+.un.ps1 smoke      # 起服务 → /health → /detect → SSRF 守卫，全链路冒烟
+.un.ps1 bench      # 离线压测三模式（hot 回放吞吐 / cold 准入 / share 多进程缓存）
+.un.ps1 verify     # 提交前必跑：以上全部
+.un.ps1 stop       # 停掉占着端口的进程
+```
+
+`run.bat` 是同一套子命令的 cmd 包装。
+
+### 跑测试（离线，不联网、不起浏览器）
+
+```bash
+python -m pytest tests/ -q                      # Python 侧（注入假浏览器）
+python -m pytest tests/ -q --cov=solver --cov-fail-under=80   # 带覆盖率门槛
+cd gocfsolve && go vet ./... && go test -race ./...           # Go 侧（httptest + 竞态检测）
+node scripts/validate-findings.mjs              # 校验研究结论的证据链
+```
+
+### 压测与缓存共享演练（默认离线，不打真实站点）
+
+```bash
+python scripts/loadtest.py --mode hot   --workers 8 --duration 5   # 稳态回放吞吐（E2）
+python scripts/loadtest.py --mode cold  --workers 16               # 冷路径准入 + 去重（E1/F2）
+python scripts/loadtest.py --mode share --processes 4              # 多进程同域只解一次（G2/A3）
+python scripts/loadtest.py --mode hot --dry-run                    # 只看计划
+```
+
+> ⚠️ **已知限制（实测数据，别假设它不存在）**：多进程共享缓存只防"**先后**到达"的重复求解；
+> 4 个 worker **同时**抢同一个新域时会各解一次（当前实现没有跨进程互斥，见 `solver/cache.py` 的设计取舍）。
+> `share` 模式的 burst 阶段就是把这个数字量化出来的地方。
 
 ### 跑实验
 
@@ -274,6 +392,74 @@ CF 的 `chl_page` 三者全中。这就是"离线纯算"走不通的机理说明
 本项目仅用于**安全研究与授权测试**：理解反爬机制、评估不同技术路线的工程成本。
 所有请求均为普通 GET（不注册、不提交、不批量），样本取自公开可访问的挑战页。
 请勿用于未授权的访问、绕过访问控制或任何违法用途。使用者自行承担全部责任。
+
+---
+
+## ❓ FAQ
+
+<details>
+<summary><b>纯协议为什么不行？</b></summary>
+
+因为 CF 校验的不是算法，是**环境真实性**。挑战脚本我们能在 jsdom 和 goja 里完整执行（语法层），
+但 CF 在隐藏 realm 里对 DOM/WebGL/Audio/WebRTC 的属性做交叉校验，纯 JS 假体给不出自洽答案。
+详见 [docs/challenges/managed-challenge.md](docs/challenges/managed-challenge.md)。
+</details>
+
+<details>
+<summary><b>为什么必须在 C++ 实现层改指纹？</b></summary>
+
+Playwright 抹 `navigator.webdriver` 只是在 JS 层打补丁，本仓库实测 4 次全失败（headless 与 headed 都 403）。
+Camoufox 在 C++ 层篡改 `hardwareConcurrency`/WebGL renderer/AudioContext/screen/WebRTC，
+是唯一实测 2/2 通过的路线。
+</details>
+
+<details>
+<summary><b>cookie 能撑多久？</b></summary>
+
+约 30 分钟量级，但**不要拍死**：服务已改为读 `cf_clearance` cookie 自带的 `expires`（真实 TTL，
+上限为配置值的 2 倍），客户端再提前 5 分钟续期。
+</details>
+
+<details>
+<summary><b>回放为什么必须同出口 IP、同 UA？</b></summary>
+
+`cf_clearance` 是与「域 + 出口 IP + UA」绑定的凭证。换任意一项，服务端会静默返回 403 ——
+这是最难排查的一类故障。所以求解服务的缓存键里带“出口标识”，`gocfsolve` 也把 UA 一起校验。
+</details>
+
+<details>
+<summary><b>要多少内存？</b></summary>
+
+单实例实测：Camoufox 空闲 191 MB → 打开 1 个空白页 403 MB → 打开挑战页 551 MB。
+本仓库按 **≈700 MB/实例** 规划；单进程串行求解（Playwright sync API 绑定线程），要提吞吐就多进程。
+</details>
+
+<details>
+<summary><b>能保证过任何站点吗？</b></summary>
+
+**不能。** 本项目证明的是"当前这批 managed challenge 站点、用这条路线、在本机实测可以通过"。
+CF 一旦上新的指纹面，Camoufox 需要跟随上游升级；深保护站点（JSVMP / WASM 自带密钥）依然很难。
+把这里的能力当成银弹会直接踩坑。
+</details>
+
+<details>
+<summary><b>为什么求解服务要鉴权？只监听 127.0.0.1 不够吗？</b></summary>
+
+不够。它会把调用方给的 URL 用真浏览器打开，是天然的 SSRF 跳板；而且单 worker 意味着
+一个恶意请求就能把服务占满。现在：除 `/health` 外全部要求 Bearer token，
+并对目标做私网/回环地址拦截，同时有并发与队列上限（满了立刻 429，不进无界队列）。
+</details>
+
+<details>
+<summary><b>怎么快速判断是不是服务坏了，还是目标变严了？</b></summary>
+
+```bash
+curl -s http://127.0.0.1:8878/health | jq '.state, .last_error'
+```
+`state: ready` → 服务正常，问题在目标侧（换一个已知能过的站验证）。
+`state: degraded` → 浏览器挂了，看 `last_error`；worker 会指数退避自愈。
+</details>
+
 
 ## 📄 许可
 

@@ -1,0 +1,47 @@
+{
+  "task_id": "T-07b",
+  "status": "done",
+  "timestamp": "2026-11-01T22:30:39+0800",
+  "baseline_commit": "d5a5f53",
+  "goal": "Go 池：错误分类（终止/过载）+ 探活发现 ready=false + 403 不误杀节点",
+  "commands_executed": [
+    {
+      "cmd": "cd gocfsolve && go test -race -run Pool -v ./...",
+      "exit_code": 0,
+      "raw_output_tail": "PASS: TestPoolTerminalErrorIsNotNodeFault / SaturationDoesNotMarkNodeDown / HealthProbeMarksNotReadyNode / Do403DropsStaleCredentialWithoutBlamingNode（另含既有 7 例）"
+    }
+  ],
+  "files_changed": [
+    "gocfsolve/pool.go",
+    "gocfsolve/pool_v4_test.go"
+  ],
+  "tests": [
+    {
+      "name": "TestPoolTerminalErrorIsNotNodeFault",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "401 → 不 failover（其它节点 0 次调用）、failures == 0"
+    },
+    {
+      "name": "TestPoolSaturationDoesNotMarkNodeDown",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "429 busy → 节点仍 healthy、failures == 0"
+    },
+    {
+      "name": "TestPoolHealthProbeMarksNotReadyNode",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "503 + ready:false 在 2s 内被标记为不健康"
+    },
+    {
+      "name": "TestPoolDo403DropsStaleCredentialWithoutBlamingNode",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "403 → 节点仍健康，但该域凭证被清（配合 T-10 重解）"
+    }
+  ],
+  "limitations": [
+    "403 语义经过一次真实分歧：最终定为「不 blame 节点、只清该域凭证」，理由是目标站的业务性 403 也会命中这条路径"
+  ]
+}

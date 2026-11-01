@@ -1,0 +1,45 @@
+# 多 worker + 共享缓存（v4.0 T-41 / 决策 C-3）
+#
+# 为什么是"多个同样的容器 + 一个共享卷"，而不是一个容器起多进程：
+#   · 求解是串行的（Playwright sync API 绑线程），要吞吐只能加**进程**；
+#   · 进程之间靠**共享 cache 目录**避免同一域重复求解（SQLite/WAL 支持多进程并发读单写）；
+#   · 每个 worker 自己崩自己重启，互不影响 —— 这就是要的隔离。
+#
+# ⚠️ 状态：未在本机验证（Docker daemon 未运行）。首次使用请按 docs/部署-容器.md 的检查清单跑一遍。
+
+x-solver: &solver
+  build: .
+  image: cf-bypass-solver:4.0.0
+  restart: unless-stopped
+  volumes:
+    - solver-data:/data
+  environment:
+    # 所有 worker 必须共用同一个 token 与同一个 cache 目录，否则缓存互不可见
+    CF_SOLVE_TOKEN_FILE: /data/.env
+    CF_CACHE_DIR: /data/cache
+    CF_BROWSER_OS: windows      # 固定 persona：随机 UA 会让 IP 时区与指纹互相矛盾
+  healthcheck:
+    test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8878/health', timeout=4).status==200 else 1)"]
+    interval: 30s
+    timeout: 5s
+    start_period: 120s
+    retries: 3
+
+services:
+  solver-1:
+    <<: *solver
+    container_name: cf-solver-1
+    ports: ["8878:8878"]
+
+  solver-2:
+    <<: *solver
+    container_name: cf-solver-2
+    ports: ["8879:8878"]
+
+  solver-3:
+    <<: *solver
+    container_name: cf-solver-3
+    ports: ["8880:8878"]
+
+volumes:
+  solver-data:

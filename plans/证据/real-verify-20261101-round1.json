@@ -1,0 +1,414 @@
+{
+  "source": "scripts/verify_real.py 实跑日志（该轮脚本在打印停止提示时因 Windows GBK 崩溃，未自动落盘；本文件由原始 stdout 日志重建，未改动任何数值）",
+  "started_at": "2026-11-01（本机）",
+  "budget": 50,
+  "used": 49,
+  "failures": 5,
+  "stopped_early": true,
+  "stop_reason": "累计失败达到 5 次（与 P0 停止条件一致）",
+  "arms": {
+    "pinned": {
+      "attempts": 25,
+      "solve_ok": 24,
+      "solve_rate": 0.96,
+      "avg_solve_sec": 16.82,
+      "replays": 5,
+      "replay_ok": 4
+    },
+    "random": {
+      "attempts": 17,
+      "solve_ok": 13,
+      "solve_rate": 0.765,
+      "avg_solve_sec": 15.86,
+      "replays": 2,
+      "replay_ok": 2
+    }
+  },
+  "caveat": "A/B 是站点间对照，站点难度差异会混入结论；不得当成交互效应显著。",
+  "notes": [
+    "两组服务均为本机同一出口 IP（未接代理池），因此结论不含跨出口影响。",
+    "g2.com 前两次失败为 invalid-request（入口 DNS 瞬时失败）→ 已修为 transport(502)+可重试。",
+    "patreon.com 2/2 unsolved（60s 预算内未拿到 clearance）→ 站点侧更严，非服务故障。",
+    "epicgames 回放返回 302（站点跳转），非 401/403，未判为挑战页。"
+  ],
+  "results": [
+    {
+      "arm": "pinned",
+      "site": "https://steamdb.info/",
+      "attempt": 1,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 21.06,
+      "replay_status": "200"
+    },
+    {
+      "arm": "pinned",
+      "site": "https://steamdb.info/",
+      "attempt": 2,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 18.99,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://steamdb.info/",
+      "attempt": 3,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 19.93,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://steamdb.info/",
+      "attempt": 4,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 14.27,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://steamdb.info/",
+      "attempt": 5,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 13.0,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.glassdoor.com/",
+      "attempt": 1,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 17.68,
+      "replay_status": "200"
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.glassdoor.com/",
+      "attempt": 2,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 16.11,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.glassdoor.com/",
+      "attempt": 3,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 16.44,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.glassdoor.com/",
+      "attempt": 4,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 16.62,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.glassdoor.com/",
+      "attempt": 5,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 15.96,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.epicgames.com/",
+      "attempt": 1,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 18.68,
+      "replay_status": "302"
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.epicgames.com/",
+      "attempt": 2,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 17.91,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.epicgames.com/",
+      "attempt": 3,
+      "ok": false,
+      "error_code": "unsolved",
+      "elapsed": 60.13,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.epicgames.com/",
+      "attempt": 4,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 16.34,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.epicgames.com/",
+      "attempt": 5,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 15.74,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.quora.com/",
+      "attempt": 1,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 13.35,
+      "replay_status": "200"
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.quora.com/",
+      "attempt": 2,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 18.03,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.quora.com/",
+      "attempt": 3,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 13.89,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.quora.com/",
+      "attempt": 4,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 14.88,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.quora.com/",
+      "attempt": 5,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 15.05,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.udemy.com/",
+      "attempt": 1,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 17.62,
+      "replay_status": "200"
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.udemy.com/",
+      "attempt": 2,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 20.16,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.udemy.com/",
+      "attempt": 3,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 22.68,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.udemy.com/",
+      "attempt": 4,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 16.85,
+      "replay_status": null
+    },
+    {
+      "arm": "pinned",
+      "site": "https://www.udemy.com/",
+      "attempt": 5,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 12.55,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.canva.com/",
+      "attempt": 1,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 10.71,
+      "replay_status": "200"
+    },
+    {
+      "arm": "random",
+      "site": "https://www.canva.com/",
+      "attempt": 2,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 11.97,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.canva.com/",
+      "attempt": 3,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 9.29,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.canva.com/",
+      "attempt": 4,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 8.65,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.canva.com/",
+      "attempt": 5,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 8.88,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.g2.com/",
+      "attempt": 1,
+      "ok": false,
+      "error_code": "invalid-request",
+      "elapsed": 0.01,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.g2.com/",
+      "attempt": 2,
+      "ok": false,
+      "error_code": "invalid-request",
+      "elapsed": 0.0,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.g2.com/",
+      "attempt": 3,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 8.51,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.g2.com/",
+      "attempt": 4,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 11.72,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.g2.com/",
+      "attempt": 5,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 11.42,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.glassdoor.co.uk/",
+      "attempt": 1,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 23.37,
+      "replay_status": "200"
+    },
+    {
+      "arm": "random",
+      "site": "https://www.glassdoor.co.uk/",
+      "attempt": 2,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 25.94,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.glassdoor.co.uk/",
+      "attempt": 3,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 30.67,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.glassdoor.co.uk/",
+      "attempt": 4,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 22.1,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.glassdoor.co.uk/",
+      "attempt": 5,
+      "ok": true,
+      "error_code": null,
+      "elapsed": 22.95,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.patreon.com/",
+      "attempt": 1,
+      "ok": false,
+      "error_code": "unsolved",
+      "elapsed": 60.18,
+      "replay_status": null
+    },
+    {
+      "arm": "random",
+      "site": "https://www.patreon.com/",
+      "attempt": 2,
+      "ok": false,
+      "error_code": "unsolved",
+      "elapsed": 60.12,
+      "replay_status": null
+    }
+  ]
+}

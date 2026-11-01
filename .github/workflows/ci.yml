@@ -1,0 +1,70 @@
+# CI（v4.0 T-39）：三个 job，**全程离线**。
+#
+# 硬约束（改这个文件前先读）：
+#   1. 禁止 `python -m camoufox fetch`：CI 只校验逻辑，不下载几百 MB 的浏览器二进制；
+#      需要浏览器的用例在 tests/ 里全部走替身（FakeBrowser），不依赖真二进制。
+#   2. 禁止任何真实联网请求：不打真实目标站、不跑 plans/下一步改进指南.md §15 的实验。
+#   3. 覆盖率门槛 80%（policy.md），低于门槛直接红。
+#   4. Windows 专属行为（SO_REUSEADDR 语义、NTFS 权限）由本地测试覆盖，CI 只跑 Linux。
+
+name: ci
+
+on:
+  push:
+    branches: [master, "feat/**"]
+  pull_request:
+    branches: [master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: python (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt || pip install -r requirements.txt pytest pytest-cov
+      - name: 语法检查
+        run: python -m compileall -q solver scripts tests
+      - name: 测试 + 覆盖率门槛
+        run: python -m pytest tests/ -q --cov=solver --cov-report=term-missing --cov-fail-under=80
+
+  go:
+    name: go
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gocfsolve
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: gocfsolve/go.sum
+      - run: go vet ./...
+      - name: 测试（含竞态检测）
+        run: go test -race ./...
+
+  findings:
+    name: findings 一致性
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      # 这条守的是"文档结论不能凭空漂移"：每条结论必须指向仓库里真实存在的文件
+      - run: node scripts/validate-findings.mjs

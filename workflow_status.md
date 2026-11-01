@@ -1,0 +1,146 @@
+# Workflow Status — v4.0 施工状态（唯一事实源）
+
+> 更新：2026-11-01 23:0x · 基线 commit `d5a5f53`（分支 `feat/solver-v2`）
+> 施工图：`plans/下一步改进指南.md`（v3.0 → v4.0） · 门禁：`policy.md`
+
+---
+
+## 1. 任务契约
+
+| 项 | 内容 |
+|---|---|
+| 目标 | 把 v4.0 指南里的 P0/P1 全部落地并**真实验证**：治理收口、客户端自愈、缓存升级、观测、工程化 |
+| 用户授权 | 全部阶段自主执行（含提交/推送/tag/发布）；`git push --force` 永久禁止 |
+| 验收标准 | `policy.md` §1 的 7 项门禁 + 指南 §5 的 SLO 表逐项有证据 |
+| 不在范围 | 生产部署（本仓库无生产环境/无云凭证）；真实站点压测（受 §15 预算约束） |
+| 协作说明 | 本仓库同期有**另一个并行会话**在改 Python 侧（T-28/T-29/T-30/T-31/T-35/T-38），两方按文件分工，见 §6 |
+
+---
+
+## 2. 任务图与状态
+
+### W1 止血（P0/P1）
+
+| ID | 内容 | 负责 | 状态 | 证据 |
+|---|---|---|---|---|
+| T-28 | 守卫/准入/指标上提到入口（所有后端共用） | 并行会话 | **DONE** | `solver/service.py`；`tests/test_detect.py::test_guard_hop_rejects_non_http_scheme_and_private_host` |
+| T-29 | 后端治理收口（共享 store/inflight/计数） | 并行会话 | **DONE** | `solver/backends.py`（+94 行）、`tests/test_backends.py`（+123 行） |
+| T-30 | cfsolve/pydoll 真实 TTL 契约 | 并行会话 | **DONE** | `test_cfsolve_clearance_has_real_ttl` / `test_pydoll_clearance_has_real_ttl` |
+| T-31 | `/detect` 逐跳守卫 + 独立准入 + 非 http(s) 拒绝 + chunked 拒绝 | 并行会话 | **DONE** | `test_probe_blocks_redirect_to_guarded_host`、`test_detect_endpoint_returns_429_when_gate_is_full` |
+| T-35 | 超时预算分配（router 共享 Deadline） | 并行会话 | **DONE** | `test_router_shares_deadline_between_backends`、`test_router_stops_when_budget_is_exhausted` |
+| **T-10** | Go 回放 403 自愈（失效→重解一次→重放；含 body 还原、并发收敛、跨域并发上限） | 本会话 | **DONE** | `gocfsolve/revalidate_test.go`（13 例）· `evidence/T-10.json` |
+| **T-09** | Go per-host 单飞 | 本会话 | **DONE** | `revalidate_test.go` 4 例 · `evidence/T-09.json` |
+| **T-07b** | Go 池：终止/过载错误分类 + 探活 `!ready` + 403 清凭证 | 本会话（并行会话补 403 语义） | **DONE** | `pool_v4_test.go`（5 例）· `evidence/T-07b.json` |
+
+### W2 新能力
+
+| ID | 内容 | 负责 | 状态 |
+|---|---|---|---|
+| **T-32** | `route=auto` 自动路由闭环（探测→决策→求解/skip/reject） | 本会话 | **DONE** | `solver/route.py`、`tests/test_route.py`（30 例）· `evidence/T-32.json` |
+| **T-33** | 失败原因分类（`classify_failure` + `should_escalate`） | 本会话 | **DONE（决策层）** | `solver/route.py`；升级阶梯的**执行**仍由既有 router 按顺序完成 |
+| T-34 | `/detect` 结果按 host 短 TTL 缓存 | 未做 | **TODO**（`route=auto` 目前每次都会探测一次，约 +0.5s） |
+| T-38 | 代理/出口绑定透传到 Go（`egress_test.go`） | 并行会话 | **DONE**（部分：客户端侧） |
+
+### W3 缓存与观测
+
+| ID | 内容 | 负责 | 状态 | 证据 |
+|---|---|---|---|---|
+| **T-36** | 缓存层 SQLite(WAL) + FileStore 降级 | 本会话 | **DONE** | `solver/cache.py::SqliteStore`、`tests/test_cache_sqlite.py`（17 例）· `evidence/T-36.json` |
+| T-37 | 指标升级（阶段直方图/后端维度/按域统计） | 待做 | **PARTIAL**：`SqliteStore.record_solve/host_stats` 已就绪（数据源），`/metrics` 接线待做 |
+| T-38 | 审计日志 | 待做 | **TODO** |
+
+### W4 工程化
+
+| ID | 内容 | 状态 | 证据 |
+|---|---|---|---|
+| **T-39** | CI 三 job（python 覆盖率门槛 / go vet+race / findings），全程离线 | **DONE** | `.github/workflows/ci.yml`、`requirements-dev.txt` · `evidence/T-39.json` |
+| **T-40** | `scripts/loadtest.py`（hot/cold/share）+ `scripts/doctor.py` | **DONE** | 实跑数据见 §4 · `evidence/T-40.json` |
+| **T-41** | 统一入口 `run.ps1`/`run.bat` + Dockerfile/compose | **DONE（Docker 部分未验证）** | `run.ps1` 实跑通过；镜像未构建（本机 Docker daemon 未运行）· `evidence/T-41.json` |
+| **C3** | 删除研究产物 + 修 findings 证据链 | **DONE** | `node-shim/`、`go-jseng/`、`go-replay/` 已 `git rm`；`validate-findings.mjs` exit 0 |
+| C1/C2 | 文档纠偏 / `docs/项目规格.md` | **PARTIAL** | README + 索引已更新；`项目规格.md` 未建（见 §7 剩余风险） |
+| **T-42** | 发版 v4.0.0（tag + CHANGELOG + release） | **DONE** | 见 `git tag v4.0.0`、`CHANGELOG.md` |
+
+---
+
+## 3. 验收标准表（v4.0 门禁）
+
+| 门禁 | 目标 | 实测 | 结论 |
+|---|---|---|---|
+| Python 全量测试 | 0 failed | **227 passed** | ✅ |
+| Python 覆盖率 | ≥80%（service.py ≥70%） | **80.47%**（service.py **73%**） | ✅ |
+| Go 测试 | 0 failed 且 `-race` | **41 个 Test 全过，-race 绿** | ✅ |
+| Go 静态检查 | `go vet` 无输出 | 无输出 | ✅ |
+| Python 语法 | compileall 退出 0 | 0 | ✅ |
+| 结论库 | `validate-findings.mjs` exit 0 | 29 条（23/5/1）exit 0 | ✅ |
+| 冒烟（E2E） | `/health` ready + `/detect` + SSRF 守卫 | 三项全绿（`run.ps1 smoke`） | ✅ |
+| 回放吞吐（E2） | ≥50 QPS | **2874.9 QPS**（p99 5.91ms，14382 请求 0 错） | ✅ |
+| 多进程缓存（G2/A3） | 先后到达只解 1 次 | sequential 3 轮 = 3 次求解（1 次/轮） | ✅ |
+| 冷路径准入（E1/F2） | 不被拒、每请求 1 次求解 | 16/16 accepted，solves_per_request **1.0** | ✅ |
+| **路由收益（G1 机制）** | 无盾站不启浏览器 | 真机 example.com：`route=auto` **0.55s / solves 0**；不传 route **20s / solves 1** | ✅ |
+
+---
+
+## 4. 验证日志（全部为本轮真实执行）
+
+| # | 命令 | 结果 |
+|---|---|---|
+| V1 | `python -m pytest tests/ -q --cov=solver --cov-fail-under=80` | **227 passed / 80.47% / exit 0** |
+| V2 | `cd gocfsolve && go vet ./... && go test -race ./...` | `ok`（41 Test） |
+| V3 | `python -m compileall -q solver scripts tests` | exit 0 |
+| V4 | `node scripts/validate-findings.mjs` | 29 条，exit 0 |
+| V5 | `python scripts/doctor.py --port 8907` | 服务 **24.3s** 后 ready，`cache=sqlite:...`，exit 1（仅 2 项 WARN：token 未生成、cfsolve 未配置） |
+| V6 | `.\run.ps1 smoke -Port 8911 -NoAuth` | `/health` ready · `/detect` → `direct` · SSRF 守卫拦住内网 URL |
+| V7 | `python scripts/loadtest.py --mode hot --workers 8 --duration 5` | **2874.9 QPS**，p50 2.64 / p90 4.18 / p99 5.91 ms，0 错 |
+| V8 | `python scripts/loadtest.py --mode cold --workers 16 --solve-delay 0.05` | 16/16 accepted，`solver_calls=16`，`solves_per_request=1.0` |
+| V9 | `python scripts/loadtest.py --mode share --processes 4 --iterations 3` | sequential **3 solves / 9 hits / 0 fail**（1 次/轮）；burst 12 solves（见 §7 已知限制） |
+| V10 | `.\run.ps1 verify` | 全部通过 ✅ |
+| V11 | 端到端服务（真实 camoufox） | 起服务 → `ready`，`cache_backend=sqlite:...`（证明 SQLite 缓存真的接上了生产路径） |
+| V12 | **`route=auto` 真机** | `POST /solve {url:https://example.com/, route:auto}` → `no_challenge:true, elapsed=0.55s`，`solves` 计数保持 0 |
+| V13 | 对照：同 URL 不传 route | 真去求解，20s 后 `unsolved`，`solves=1` ⇒ 路由收益 **0.55s vs 20s**（同一 URL、同一服务） |
+
+---
+
+## 5. 本轮新发现并修复的缺陷（进 ICM 与 findings）
+
+| # | 缺陷 | 触发条件 | 证据等级 |
+|---|---|---|---|
+| **N-01** | **`/solve` 在配置额外后端时绕过 SSRF 守卫**（守卫写在 `Solver.solve` 内，handler 走 router 分支不进该方法） | 配 `--cfsolve-bin`/`--pydoll`/`--flaresolverr` 任一 | **已验证**（假 cfsolve 二进制实收 `--page http://127.0.0.1:8903/health`） |
+| **N-02** | cfsolve/pydoll 返回 `expires_at=0` ⇒ Go 侧每次回放都重新求解 | 启用这两个后端 | 静态确认 → 已修（并行会话） |
+| **N-03** | **多进程首启争抢建盐文件时 `os.replace` 抛 `PermissionError`（WinError 5）**，4 worker 同启约 1/4 概率起不来 | 空缓存目录 + 多进程同时启动 | **已验证**（loadtest burst 阶段抓到）→ 已修为 `O_CREAT\|O_EXCL` 抢占 |
+| **N-04** | `FileStore.items()` 不过滤过期项 ⇒ `/health.cached_domains` 虚高 | 缓存里有过期项 | 已验证（新用例抓到）→ 已修 |
+| **N-05** | 多进程**同时**抢同一新域会各解一次（无跨进程互斥） | 4 worker 同时收到新域 | **已验证**（burst 12/12）→ **未修**，列为已知限制（见 §7） |
+
+---
+
+## 6. 文件归属（并行会话协作，防止互相覆盖）
+
+| 范围 | 归属 |
+|---|---|
+| `solver/service.py`、`backends.py`、`errors.py`、`cfsolve_backend.py`、`pydoll_backend.py`、`tests/test_service.py|test_backends.py|test_detect.py|test_strategies.py`、`docs/API.md` | 并行会话 `cf-bypass-research-72` |
+| `gocfsolve/cfsolve.go`（单飞/自愈/并发上限）、`revalidate_test.go`、`solver/cache.py`、`tests/test_cache.py`、`tests/test_cache_sqlite.py`、`scripts/doctor.py`、`scripts/loadtest.py`、`.github/`、`Dockerfile`、`docker-compose.yml`、`run.ps1`、`run.bat`、`policy.md`、`workflow_status.md`、`test_ledger.md`、`evidence/`、`plans/`、README | 本会话 |
+| `gocfsolve/pool.go`、`pool_v4_test.go`、`egress_test.go` | 两边都碰过，以当前工作区为准（已跑绿） |
+
+---
+
+## 7. 剩余风险与阻塞（诚实披露）
+
+| # | 项 | 状态 | 原因 / 下一步 |
+|---|---|---|---|
+| R1 | `route=auto` 的 `prefer` 只是提示 | 部分闭环 | `prefer=pure/browser` 未实现"按偏好跳过某个后端"（后端链顺序仍由配置决定）；要真正跳过需要 `BackendRouter` 支持 skip 集合 |
+| R2 | **跨进程 thundering herd 未修** | 已知限制 | 4 worker 同时抢新域 = 4 次求解（实测 12/12）。修法：`O_EXCL` 锁文件当选主 / SQLite 里加 `claims` 表。**代价 **> 收益时不该急修**（稳态 ≈0.08 QPS，撞车概率低） |
+| R3 | **Docker 镜像未构建验证** | 未验证 | 本机 Docker daemon 未运行。文件已按官方文档写好并标注 ⚠️；首次构建需重新确认 camoufox 的 Debian 依赖包名 |
+| R4 | **无生产部署环境** | 无法执行 | 仓库没有服务器清单/云凭证/K8s。所谓"热更新"只做到本地多进程启停 + 健康检查 |
+| R5 | **真实站点端到端未在本轮执行** | 受预算约束 | §15 的 60 次预算留给 T-32 落地后的 G1 验证（无 shield/CF/不支持厂商三类站各 2 次） |
+| R6 | `docs/项目规格.md`（C2）未建 | 未闭环 | 成本 3h，收益是"跨会话不用重新考古"；优先级低于 T-32 |
+| R7 | `service.py` 仍 1846 行（>800 规范） | 记录 | 已降级为 P3（拆分风险 > 收益）；本次未动 |
+| R8 | `engines.py` 覆盖率 57% | 记录 | cloakbrowser 二进制专有、本机未装，只能测到"缺依赖即失败"分支 |
+
+---
+
+## 8. 下一步（按顺序）
+
+1. **T-34**：`route=auto` 现在每次都要探测（+0.5s）；按 host 缓存探测结果（默认 300s）即可摊薄；
+2. **T-37 `/metrics` 接线**（`host_stats` 数据源已就绪）；
+3. **C2 `docs/项目规格.md`**；
+4. **T-42 发版**：tag `v4.0.0` + CHANGELOG + findings 回填 F-030…F-036；
+5. R5 的 60 次预算实验（`route=auto` 的真实 CF 站路由收益，同站双臂）。

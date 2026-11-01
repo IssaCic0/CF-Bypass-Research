@@ -1,0 +1,473 @@
+{
+  "schema_version": "cf-findings/1",
+  "description": "本仓库研究结论的机器可读清单。每条结论必须给出可定位的证据路径；用 `node scripts/validate-findings.mjs` 校验。verdict 三态：confirmed=有完整证据链且已定级 / needs_validation=有确切但未解决的事实、不定级 / rejected=已证伪的候选路线。",
+  "findings": [
+    {
+      "id": "F-001",
+      "claim": "纯算（离线生成 token）路线拿不到 cf_clearance：挑战 VM 每轮重新混淆下发、绑运行时、在隐藏 realm 采集。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "docs/Cloudflare过盾方案可行性侦察报告.md",
+          "locator": "§14–16"
+        },
+        {
+          "path": "docs/challenges/managed-challenge.md",
+          "locator": "实测证据表"
+        }
+      ]
+    },
+    {
+      "id": "F-002",
+      "claim": "纯 JS 引擎（Node+jsdom、Go+goja）能执行 575 KB 的 CF 编排脚本（语法层），但拿不到 cf_clearance。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "docs/Cloudflare过盾方案可行性侦察报告.md",
+          "locator": "§9 A1/A2 结论与原始输出"
+        }
+      ],
+      "note": "原实现 node-shim/shims.js 与 go-jseng/main.go 已按 plans/下一步改进指南.md 决策 D-3 删除；历史可查：git show d5a5f53:node-shim/shims.js、git show d5a5f53:go-jseng/main.go"
+    },
+    {
+      "id": "F-003",
+      "claim": "Camoufox（C++ 层篡改指纹）是唯一实测能拿到 cf_clearance 的路线（2/2 站点）；vanilla Playwright 0/4。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "docs/最终方案与实现结果.md",
+          "locator": "三、实现结果"
+        },
+        {
+          "path": "docs/Cloudflare过盾方案可行性侦察报告.md",
+          "locator": "§8 真实浏览器过盾实测"
+        }
+      ]
+    },
+    {
+      "id": "F-004",
+      "claim": "旧 jsd 纯协议路线已结构性失效：main.js 302 到 /h/g/、码表改运行时构造、oneshot 返回 400/405、53 站采样 jsd 命中 0。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "docs/challenges/jsd.md",
+          "locator": "实测证据"
+        },
+        {
+          "path": "docs/Cloudflare过盾方案可行性侦察报告.md",
+          "locator": "§2.1–2.4"
+        }
+      ]
+    },
+    {
+      "id": "F-005",
+      "claim": "Go 标准库 net/http 可直接回放 cf_clearance（200）；但该证据只覆盖 1 个站点（steamdb），不能外推为「这批站点都不查 JA3」。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "docs/Cloudflare过盾方案可行性侦察报告.md",
+          "locator": "§11（glassdoor 403 为 cookie 不匹配，非对照组）"
+        },
+        {
+          "path": "docs/challenges/turnstile.md",
+          "locator": "回放层判断顺序"
+        }
+      ]
+    },
+    {
+      "id": "F-006",
+      "claim": "求解服务的缓存键必须包含出口标识：cf_clearance 绑「域+出口 IP+UA」，仅用 host 做键会在接代理池时把 A 出口的凭证发给 B 出口。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "cache_key()"
+        },
+        {
+          "path": "gocfsolve/cfsolve.go",
+          "locator": "cacheKey()"
+        },
+        {
+          "path": "tests/test_service.py",
+          "locator": "test_cache_key_includes_egress_id"
+        }
+      ]
+    },
+    {
+      "id": "F-007",
+      "claim": "浏览器 worker 若在 try 之外初始化，启动失败会让线程静默死亡、所有请求等满超时，而 /health 仍报 ok。",
+      "verdict": "confirmed",
+      "severity": "critical",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "_worker() 自愈与三态 health"
+        },
+        {
+          "path": "tests/test_service.py",
+          "locator": "test_launch_failure_reports_unhealthy_then_recovers"
+        }
+      ]
+    },
+    {
+      "id": "F-008",
+      "claim": "求解失败必须用 HTTP 200 + solved:false 表达（而非 4xx/5xx），否则客户端无法区分「请求写错」与「这次没解出来」。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "solver/errors.py",
+          "locator": "STATUS_BY_CODE / UNSOLVED=200"
+        },
+        {
+          "path": "docs/API.md",
+          "locator": "错误码表"
+        },
+        {
+          "path": "gocfsolve/cfsolve_test.go",
+          "locator": "TestUnsolvedIsHTTP200WithErrorCode"
+        }
+      ]
+    },
+    {
+      "id": "F-009",
+      "claim": "求解服务默认只监听回环不足以保证安全：必须带鉴权，否则任意本机进程可把它当 SSRF 跳板与算力免费池。",
+      "verdict": "confirmed",
+      "severity": "critical",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "_authorized() 与 load_or_create_token()"
+        },
+        {
+          "path": "tests/test_service.py",
+          "locator": "test_solve_requires_token / test_token_generated_and_persisted"
+        }
+      ]
+    },
+    {
+      "id": "F-010",
+      "claim": "「厂商验的是可计算谜题还是环境真实性」才是纯协议能否成立的分水岭；不存在「纯协议一律不行」或「一律可行」。",
+      "verdict": "needs_validation",
+      "evidence": [
+        {
+          "path": "docs/challenges/jsd.md",
+          "locator": "结论段"
+        },
+        {
+          "path": "docs/challenges/managed-challenge.md",
+          "locator": "不可行的分支"
+        }
+      ]
+    },
+    {
+      "id": "F-011",
+      "claim": "多出口部署下的真实命中率与失败率、以及 geoip/locale 与出口 IP 对齐后的成功率提升幅度。",
+      "verdict": "needs_validation",
+      "evidence": [
+        {
+          "path": "docs/最终方案与实现结果.md",
+          "locator": "六、已知限制"
+        }
+      ]
+    },
+    {
+      "id": "F-012",
+      "claim": "「只抹 navigator.webdriver 的 stealth 补丁（patchright/undetected 系）在当前 managed challenge 上可行」——本仓库实测 0/4，作为候选路线被证伪。",
+      "verdict": "rejected",
+      "evidence": [
+        {
+          "path": "docs/Cloudflare过盾方案可行性侦察报告.md",
+          "locator": "§8 失败明细"
+        }
+      ]
+    },
+    {
+      "id": "F-013",
+      "claim": "Camoufox 0.5.8 默认每次启动随机挑选 OS persona（实测同一脚本三次分别得到 X11/Linux、Macintosh、Windows 三种 UA），因此 UA 不构成跨进程的稳定标识。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "_default_browser_factory / --browser-os"
+        },
+        {
+          "path": "docs/challenges/managed-challenge.md",
+          "locator": "踩的坑 6"
+        }
+      ]
+    },
+    {
+      "id": "F-014",
+      "claim": "固定 --browser-os windows 后 UA 在多次启动间保持稳定（实测两次均为 Windows NT 10.0 / Firefox 156.0），可作为环境自洽的前置条件；但其对过盾成功率的实际收益未经真机 A/B 验证。",
+      "verdict": "needs_validation",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "--browser-os"
+        },
+        {
+          "path": "docs/API.md",
+          "locator": "启动参数表"
+        }
+      ]
+    },
+    {
+      "id": "F-015",
+      "claim": "Turnstile token 可在目标 origin 下用官方 widget 取得：stock 页经 route.fulfill 注入目标文档，且必须用 render=explicit 主动 turnstile.render()（仅放 .cf-turnstile div 不会自动渲染）。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "solver/challenges.py",
+          "locator": "TURNSTILE_STUB_TEMPLATE / build_turnstile_stub"
+        },
+        {
+          "path": "docs/challenges/turnstile.md",
+          "locator": "实现要点"
+        },
+        {
+          "path": "tests/test_challenges.py",
+          "locator": "test_turnstile_*"
+        }
+      ]
+    },
+    {
+      "id": "F-016",
+      "claim": "reCAPTCHA v3 必须先确认 script 存在并等 grecaptcha 就绪，且用『点火 + 轮询全局变量』而不是 await execute —— 后者在真实页面上会久不 resolve，把 5s 拖成 58s。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "solver/challenges.py",
+          "locator": "START_RECAPTCHA / READ_RECAPTCHA"
+        },
+        {
+          "path": "tests/test_challenges.py",
+          "locator": "test_recaptcha_v3_*"
+        }
+      ]
+    },
+    {
+      "id": "F-017",
+      "claim": "AWS WAF（aws-waf-token）走与 cf_clearance 相同的『等 cookie』路径即可，但尚未对真实 WAF 目标站做真机验证。",
+      "verdict": "needs_validation",
+      "evidence": [
+        {
+          "path": "solver/challenges.py",
+          "locator": "COOKIE_FIELD"
+        },
+        {
+          "path": "docs/challenges/awswaf.md",
+          "locator": "实测证据表"
+        }
+      ]
+    },
+    {
+      "id": "F-018",
+      "claim": "存在真正可行的『纯协议』路线，但其形态是『录制回放真实浏览器环境快照』（cfsolve 的 profile），而不是现场编造指纹——这与早期 goja/jsdom 实验失败的结论不矛盾。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "solver/cfsolve_backend.py",
+          "locator": "模块 docstring：原理与硬约束"
+        },
+        {
+          "path": "docs/纯协议-cfsolve.md",
+          "locator": "二、录制 profile"
+        },
+        {
+          "path": "docs/参考仓库深度调研.md",
+          "locator": "一、cfsolve"
+        }
+      ]
+    },
+    {
+      "id": "F-019",
+      "claim": "CloakBrowser 的二进制为专有许可（最新版需订阅）且不可随本仓库分发，因此默认引擎仍为 Camoufox；但已作为可切换引擎接入。",
+      "verdict": "confirmed",
+      "severity": "low",
+      "evidence": [
+        {
+          "path": "solver/engines.py",
+          "locator": "INSTALL_HINT / _cloakbrowser_factory"
+        },
+        {
+          "path": "docs/方案矩阵.md",
+          "locator": "四条路线对照"
+        }
+      ]
+    },
+    {
+      "id": "F-020",
+      "claim": "Scrapling 的挑战类型分类（non-interactive/managed/interactive/embedded）与交互式点击策略可作为我们『只等不点』的补充，但其框架依赖过重，不引入。",
+      "verdict": "needs_validation",
+      "evidence": [
+        {
+          "path": "docs/参考仓库深度调研.md",
+          "locator": "三、Scrapling"
+        },
+        {
+          "path": "docs/challenges/managed-challenge.md",
+          "locator": "踩的坑"
+        }
+      ]
+    },
+    {
+      "id": "F-021",
+      "claim": "cfsolve 不支持 Windows：源码含 Unix-only 调用（tokio::signal::unix、libc::clock_gettime）；本地打 2 处条件编译补丁后可构建并运行，但这不是上游支持的平台。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "docs/纯协议-cfsolve.md",
+          "locator": "零、本机构建实录"
+        },
+        {
+          "path": "plans/证据/pure-protocol-cfsolve-round1.json",
+          "locator": "build.patch_notes"
+        }
+      ]
+    },
+    {
+      "id": "F-022",
+      "claim": "用作者自带的 safari-iOS profile，纯协议在挑战页上 0/4；但在本机出口处能直接拿到 steamdb 正常页，说明 TLS/HTTP 层可用、瓶颈是 profile 与出口环境不匹配。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "plans/证据/pure-protocol-cfsolve-round1.json",
+          "locator": "cli_trials_with_bundled_profile"
+        },
+        {
+          "path": "docs/纯协议-cfsolve.md",
+          "locator": "零点五、真机数据"
+        }
+      ]
+    },
+    {
+      "id": "F-023",
+      "claim": "A/B 实测（同出口、3 站、每格一次）：Camoufox 3/3 平均 18.74s；pydoll(CDP 直连真 Chrome) 2/3 平均 74.52s；cfsolve(纯协议+自带 profile) 0/3。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "plans/证据/ab-methods-20261101-030208.json",
+          "locator": "summary"
+        },
+        {
+          "path": "docs/AB实测-三种过盾方法.md",
+          "locator": "一、结果表"
+        }
+      ]
+    },
+    {
+      "id": "F-024",
+      "claim": "pydoll 在 headless 模式下 Chrome 的 UA 含 `HeadlessChrome`（实测 Chrome 156），是强检测信号；其自带 expect_cloudflare_turnstile 能在非 headless 下过盾但整体比 Camoufox 慢约 4 倍。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "solver/pydoll_backend.py",
+          "locator": "模块 docstring 的关键限制"
+        },
+        {
+          "path": "docs/AB实测-三种过盾方法.md",
+          "locator": "三、pydoll 优缺点"
+        }
+      ]
+    },
+    {
+      "id": "F-025",
+      "claim": "本机尝试用 capture-proxy + CDP 驱动 Chrome 自录 profile 失败：Chrome 120s 未过 glassdoor、captures 0 字节；根因是目标站对本机 IP 很硬 + MITM 后客户端(Chrome)与服务端(Safari transport)指纹自相矛盾。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "docs/纯协议-cfsolve.md",
+          "locator": "二点五、本机尝试自录 profile"
+        }
+      ]
+    },
+    {
+      "id": "F-026",
+      "claim": "cfsolve 的 profile 录制工具（capture-proxy）对当前 CF 版本失效：提取时报 `expected one custom base64 alphabet, found 0`，即 CF 已不再下发静态码表（运行时构造）。因此纯协议路线当前不可用，作者自带 profile 0/3 也可由此解释。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "docs/纯协议-cfsolve.md",
+          "locator": "二点五、本机自录 profile"
+        },
+        {
+          "path": "docs/challenges/jsd.md",
+          "locator": "实测证据（码表已运行时构造）"
+        }
+      ]
+    },
+    {
+      "id": "F-027",
+      "claim": "cfsolve 的 capture 工具链依赖三个静态特征（base64 码表 / RSA modulus / cf-chl token+secret），新版 CF 全部改为运行时生成。本地已修好前两个（浏览器 hook + --alphabet / --modulus + BigInt 注入，验证到浏览器过盾并成功 open session），第三个需重做挑战协议的一部分，属上游工作量。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "tools/cfsolve-patches/README.md",
+          "locator": "实测效果与还差什么"
+        },
+        {
+          "path": "docs/纯协议-cfsolve.md",
+          "locator": "二点七、补工具链实录"
+        },
+        {
+          "path": "plans/证据/cfsolve-capture-session-incomplete.json",
+          "locator": "notes"
+        }
+      ]
+    },
+    {
+      "id": "F-028",
+      "claim": "纯协议（cfsolve + 自带 safari-iOS profile）在 glassdoor.co.uk 上可用：CLI 3/3 成功（36–43.5s）、同站 A/B 18.43s（快于 Camoufox 19.56s）、经本仓库服务端到端 19.22s 且浏览器未启动。可用性站点相关：steamdb/udemy/quora 对该 persona 不弹挑战，glassdoor.com 因国家跳转失败。",
+      "verdict": "confirmed",
+      "severity": "high",
+      "evidence": [
+        {
+          "path": "plans/证据/ab-methods-20261101-040608.json",
+          "locator": "summary"
+        },
+        {
+          "path": "docs/AB实测-三种过盾方法.md",
+          "locator": "一点五、同站对比"
+        }
+      ]
+    },
+    {
+      "id": "F-029",
+      "claim": "已把 scrapfly/Antibot-Detector（MIT）的 33 个厂商字面特征移植为服务端探测能力（/detect + scripts/detect.py），并补 5 条自增强特征（cf-mitigated/_cf_chl_opt/cdn-cgi challenge-platform/challenges.cloudflare.com/aws-waf-token）；真机分类正确（glassdoor.co.uk 与 udemy → Cloudflare managed、example.com → 无防护）。",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "evidence": [
+        {
+          "path": "solver/detect.py",
+          "locator": "SIGNATURES + STRONG_SIGNALS + recommend"
+        },
+        {
+          "path": "docs/检测-防护识别.md",
+          "locator": "二、怎么用（真实输出）"
+        },
+        {
+          "path": "tests/test_detect.py",
+          "locator": "21 项离线测试"
+        }
+      ]
+    }
+  ]
+}
