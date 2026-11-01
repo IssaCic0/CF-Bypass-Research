@@ -821,8 +821,18 @@ def _post_raw(base, raw: bytes):
 
 
 def _solve_audits(audit):
-    lines = [x for x in audit.read_text(encoding="utf-8").splitlines() if x.strip()]
-    return [json.loads(x) for x in lines if json.loads(x).get("event") == "solve"]
+    """只解析一次；非 JSON 行给出可读失败而不是裸 JSONDecodeError。"""
+    recs = []
+    for line in audit.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise AssertionError(f"审计文件里出现了非 JSON 行：{line[:120]!r}（{e}）") from e
+        if isinstance(rec, dict) and rec.get("event") == "solve":
+            recs.append(rec)
+    return recs
 
 
 def test_malformed_json_is_rejected_and_still_audited(live_audit):

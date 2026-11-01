@@ -438,7 +438,13 @@ def test_wal_switch_retries_when_database_is_locked(tmp_path, monkeypatch):
 
 
 def test_wal_degradation_is_loud_but_usable(tmp_path, monkeypatch, capsys):
-    """实在切不过去（只读挂载等）：降级到默认模式，**必须可用且必须留痕**。"""
+    """切不过去时降级，**必须可用且必须留痕**。
+
+    场景限定为"可写但不支持 WAL 的文件系统"（网络卷 / 某些容器卷 / NFS）。
+    ⚠️ **只读挂载不在降级保障内**：那种情况下 `CREATE TABLE`、`commit()`、
+    `_harden_file()` 全都写不了，服务本来就起不来 —— 别把它当成本用例覆盖的场景
+    （上一版注释这么写是错的，独立审查抓到了）。
+    """
     import sqlite3
 
     def always_locked(conn):
@@ -454,9 +460,13 @@ def test_wal_degradation_is_loud_but_usable(tmp_path, monkeypatch, capsys):
 
     # 断言"stats 报的就是库里真实的模式"，而不是"stats 报的就是那个属性"——
     # 后者是恒等式（stats() 直接返回 self._journal_mode），什么都证明不了。
-    import sqlite3 as _s
     real = str(store._conn().execute("PRAGMA journal_mode").fetchone()[0] or "").lower()
     assert store.stats()["journal_mode"] == real, f"stats 报的模式与库里不一致：{store.stats()} vs {real}"
+    # 把"现读"这件事钉死：篡改缓存的属性值后，stats() 必须仍然报库里的真实值。
+    # 不做这一步的话，"stats() 现读"和"stats() 返回缓存属性"两种实现都能通过上面那条断言。
+    store._journal_mode = "wal"
+    assert store.stats()["journal_mode"] == real, "stats() 没有现读，仍在返回建连时的缓存值"
+    store._journal_mode = real
     # 降级后必须是**已知**的 rollback 模式（delete/truncate/persist），不能是"未知空串"：
     # 否则"真降级"和"连模式都读不出来"会被混为一谈。
     assert real in ("delete", "truncate", "persist", "memory"), f"降级后的模式不可识别：{real!r}"
@@ -525,3 +535,29 @@ def test_read_paths_actually_take_the_connection_lock(tmp_path):
     # 每条读路径至少 2 次（自己的 with + _conn() 的 with）→ 5 条 ≥ 10
     assert spy.entries - base >= 10, (
         f"读路径没有全部取锁：只进入 {spy.entries - base} 次（期望 ≥10）")
+
+
+def test_wal_silent_downgrade_is_still_loud_and_safe(tmp_path, monkeypatch, capsys):
+    """`PRAGMA journal_mode=WAL` **不抛异常**、只原值返回时，也必须降级 + 告警 + synchronous=FULL。
+
+    这是独立审查第二轮抓到的真洞（第一轮只修了 `except` 分支）：
+    在部分文件系统（网络卷/NFS）、只读库或事务中，SQLite 会**原值返回**（如 "delete"）
+    而不抛异常。若成功分支不校验返回值，就变成"静默降级"：
+    rollback journal + `synchronous=NORMAL`（掉电安全被削弱）+ 一句警告都没有。
+    """
+    calls = {"n": 0}
+
+    def returns_delete(conn):
+        calls["n"] += 1
+        return "delete"                     # 不抛异常，但也没切成 WAL
+
+    monkeypatch.setattr(cache_mod, "_try_set_wal", returns_delete)
+    store = cache_mod.SqliteStore(str(tmp_path), TOKEN)
+    store.set("k|default", entry())
+    assert store.get("k|default") is not None, "降级后仍然必须可用"
+
+    assert calls["n"] == 1, f"返回值降级不该重试（这不是锁竞争），实际试了 {calls['n']} 次"
+    assert store.stats()["journal_mode"] == "delete"
+    assert int(store._conn().execute("PRAGMA synchronous").fetchone()[0]) == 2,         "降级后 synchronous 必须回到 FULL(2)"
+    err = capsys.readouterr().err
+    assert "未能启用 WAL" in err, "静默降级也必须告警"

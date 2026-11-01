@@ -60,8 +60,28 @@ def _try_set_wal(conn) -> str:
     抽成模块级函数只为一件事：让"重试逻辑"可以被用例单独验证
     （`_enable_wal` 会反复调它；用例可以把这个函数换成"前两次抛
     `database is locked`"而不去真的制造跨进程竞态）。
+
+    ⚠️ 注意返回值**不保证是 "wal"**：SQLite 在某些文件系统（网络卷/NFS）、只读库
+    或事务中会**原值返回**而不抛异常。调用方必须校验返回值，别把返回值当"成功"。
     """
     return str(conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] or "").lower()
+
+
+#: SQLite 的"重试有意义"的错误码：SQLITE_BUSY(5) / SQLITE_LOCKED(6)。
+_SQLITE_RETRYABLE = frozenset({5, 6})
+
+
+def _is_lock_error(exc: BaseException) -> bool:
+    """这个异常是"等一会儿可能就好了"的锁竞争，还是永久错误？
+
+    优先用驱动给的错误码（Python 3.11+ 的 `sqlite_errorcode`）—— 文案会随版本变，
+    错误码不会。老版本/其它实现上没有这个属性时，退回子串匹配。
+    """
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return (code & 0xFF) in _SQLITE_RETRYABLE     # 扩展错误码的低 8 位是主码
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
 
 
 class CacheStore(Protocol):
@@ -383,14 +403,25 @@ class SqliteStore:
         for i in range(attempts):
             try:
                 mode = _try_set_wal(conn)
-                conn.execute("PRAGMA synchronous=NORMAL")   # WAL 下的合理折中
-                return mode
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:  # noqa: BLE001 —— 只有"锁竞争"值得重试
                 last = f"{type(e).__name__}: {e}"
-                msg = str(e).lower()
-                if "locked" not in msg and "busy" not in msg:
+                if not _is_lock_error(e):
                     break                                   # 永久错误：不浪费 10s
                 time.sleep(delay * (1 + i % 3))
+                continue
+            # **关键**：`PRAGMA journal_mode=WAL` 在"切不过去"时**未必抛异常** ——
+            # 某些文件系统（网络卷/NFS）、只读库、事务中，SQLite 会**原值返回**
+            # （比如返回 "delete"）。不校验返回值就等于把"静默降级"当成"成功"：
+            # rollback journal + synchronous=NORMAL（掉电安全被削弱）+ 一句警告都没有。
+            # 独立审查第二轮抓到的就是这条（第一轮只修了 except 分支）。
+            if mode == "wal":
+                try:
+                    conn.execute("PRAGMA synchronous=NORMAL")   # WAL 下的合理折中
+                except Exception:  # noqa: BLE001 —— 设不上就保持默认 FULL（更安全）
+                    pass
+                return mode
+            last = f"journal_mode 返回 {mode!r}（未抛异常，说明该文件系统不支持 WAL）"
+            break
         # 回读真实模式：多进程下别的进程可能已经把库切成 WAL，这时"降级"是假警报，
         # 文案必须依据回读值而不是固定的"已退回默认模式"。
         try:
@@ -466,7 +497,8 @@ class SqliteStore:
         except (TypeError, ValueError):
             self.delete(key)
             return None
-        if not isinstance(expires_at, (int, float)):
+        if not isinstance(blob, (bytes, bytearray, memoryview)) or \
+                not isinstance(expires_at, (int, float)):
             # 半行/坏行：NOT NULL 约束理论上挡得住，但既然共享连接能给出畸形行，
             # 这里就不能再假设它是数字（原来直接 float() 会抛 TypeError 冒到调用方）。
             self.delete(key)
