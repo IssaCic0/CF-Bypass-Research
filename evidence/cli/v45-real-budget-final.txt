@@ -1,0 +1,9 @@
+# 剩余真机预算的最后一轮（route=auto + 回放验证）
+# 2026-11-02 02:46:53+0800  预算：4 次（2 站 × [solve + replay]）
+{"site": "https://patreon.com/", "solve_http": 200, "solved": false, "backend": null, "solve_sec": 1.2, "route_reason": "no-protection", "prefer": "any", "detect_challenge": null, "clearance_len": 0}
+{"site": "https://epicgames.com/", "solve_http": 200, "solved": true, "backend": "camoufox", "solve_sec": 8.7, "route_reason": "cloudflare-managed", "prefer": "pure", "detect_challenge": "managed", "clearance_len": 462, "replay": {"status": 403, "bytes": 0, "challenge_page": null, "ms": 1780}}
+
+# 第 4 次预算：用**完整 cookie_list** 重放（上一次只发了 cf_clearance，是我的脚本太简化）
+{"solved": true, "cached": true, "sec": 0.0, "cookies": 2}
+  将回放的 cookie 名: ['cf_clearance', '__cf_bm']
+{"replay_status": 403, "ms": 1742}

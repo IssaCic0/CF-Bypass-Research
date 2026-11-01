@@ -2,6 +2,47 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [4.5.0] - 2026-11-02
+
+主题：把上轮列出的 4 条尾巴收掉——compose 多 worker、镜像瘦身、真机预算用尽、`service.py` 第一步拆分。
+
+### 新增
+
+- **`--build-arg SLIM_FONTS`**：镜像默认 4.63 GB；`SLIM_FONTS=1` 只删 Camoufox 的 CJK 字体包
+  → **3.27 GB（−1.36 GB）**，且**已验活**（10 s 就绪、`browser_alive=true`、`/detect` 200）。
+  默认不删：那 2.1 GB 字体包是**字体枚举指纹真实性**的依赖，删了可能降低成功率。
+- **`solver/probe.py`（135 行）**：`probe_protection` + 逐跳重定向守卫的 3 个常量。
+- **`solver/auth.py`（77 行）**：`load_or_create_token` / `_read_token_file` / `token_fingerprint`。
+  `service.py` 侧原样再导出，既有引用与 `monkeypatch` 全部照旧。
+
+### 实测
+
+| 项 | 结果 |
+|---|---|
+| `docker compose up -d`（3 worker） | ✅ **20 s** 全部 healthy；三者 `cache_backend`/`ua_fingerprint` 一致；内存合计 **2.26 GB** |
+| 跨容器 `claims` 抢占 | ✅ 1 真 / 2 假，释放后可再抢（共享卷 `/data`） |
+| 镜像瘦身 | ✅ 4.63 GB → **3.27 GB**，容器 10 s 就绪、`/detect` 真出站 200 |
+| `service.py` | 2452 → **2310** 行（−142，−5.8%） |
+| Python / Go | **297 passed / 覆盖率 81.90%**；Go 41 + egress 4，`vet` + `-race` 绿 |
+
+### 真机预算用尽（60/60）
+
+| 站点 | 决策 | 结果 |
+|---|---|---|
+| patreon.com | skip（探测未命中防护） | ✅ **1.2 s** 返回 `no_challenge=true`（旧行为会跑 20 s 浏览器） |
+| epicgames.com | solve（Cloudflare managed） | ✅ **8.7 s / 462 字节** |
+
+回放侧：用**完整 cookie_list**（`cf_clearance` + `__cf_bm`）重放 epicgames 仍 403。
+**不判成服务缺陷**：脚本是 Python `urllib`（OpenSSL TLS、缺 `Sec-Fetch-*` 等 Firefox 导航头），
+Go 客户端会带完整头部并用自己的连接池。这是「回放依赖 UA+完整 cookie+头部/TLS 一致」的已知限制显形。
+预算已用尽，按 §15 纪律不再打真机；要验证需换出口 + 用 `gocfsolve.Do()` 而非脚本重放。
+
+### 两个只有动手才会遇到的坑（已写进 Dockerfile 注释）
+
+1. **删除必须与 `fetch` 同一个 `RUN`**，分开写只加 whiteout，镜像一点不小（实测分两层时仍是 4.97 GB）；
+2. **BuildKit 缓存会给出一个没有浏览器的镜像**（0.99 GB、一跑就 `CamoufoxNotInstalled`）
+   ⇒ 瘦身必须验活，不能只看数字。
+
 ## [4.4.1] - 2026-11-02
 
 补丁版：自查发现"抢占在失败路径上没释放"。

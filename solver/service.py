@@ -55,6 +55,19 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urljoin, urlsplit
 
 try:  # 作为包导入（tests / 未来 solver 包）
+    from .probe import (  # 探测能力已拆到独立模块（v4.4，只搬不改）
+        DEFAULT_PROBE_UA,
+        PROBE_MAX_REDIRECTS,
+        _PROBE_UA_BY_OS,
+        probe_protection,
+    )
+    from .auth import (  # token 装载同理
+        TOKEN_ENV,
+        TOKEN_LINE_PREFIX,
+        _read_token_file,
+        load_or_create_token,
+        token_fingerprint,
+    )
     from .errors import ErrorCode, SolveError
     from .detect import summarize as detect_summarize
     from .cache import build_store
@@ -93,6 +106,19 @@ try:  # 作为包导入（tests / 未来 solver 包）
         build_turnstile_stub,
     )
 except ImportError:  # 直接以脚本运行：python solver/service.py
+    from probe import (  # type: ignore[no-redef]
+        DEFAULT_PROBE_UA,
+        PROBE_MAX_REDIRECTS,
+        _PROBE_UA_BY_OS,
+        probe_protection,
+    )
+    from auth import (  # type: ignore[no-redef]
+        TOKEN_ENV,
+        TOKEN_LINE_PREFIX,
+        _read_token_file,
+        load_or_create_token,
+        token_fingerprint,
+    )
     from errors import ErrorCode, SolveError  # type: ignore[no-redef]
     from detect import summarize as detect_summarize  # type: ignore[no-redef]
     from cache import build_store  # type: ignore[no-redef]
@@ -148,19 +174,9 @@ DEFAULT_MAX_INFLIGHT = 8
 #: `/detect` 的并发上限（与求解 inflight **分开**计：探测不许挤占浏览器的额度）
 DEFAULT_MAX_DETECT = 4
 #: `/detect` 跟随重定向的跳数上限
-PROBE_MAX_REDIRECTS = 3
 DEFAULT_WARM_RETRY_MAX = 30.0
 SHUTDOWN_GRACE = 10.0
-TOKEN_ENV = "CF_SOLVE_TOKEN"
-TOKEN_LINE_PREFIX = "CF_SOLVE_TOKEN="
 
-#: 探测用 UA 的 persona 兜底（浏览器还没起来时用；起来了就用它的真实 UA）
-_PROBE_UA_BY_OS = {
-    "windows": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101 Firefox/156.0",
-    "macos": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:156.0) Gecko/20100101 Firefox/156.0",
-    "linux": "Mozilla/5.0 (X11; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0",
-}
-DEFAULT_PROBE_UA = _PROBE_UA_BY_OS["windows"]
 
 #: DNS 正缓存条目上限（60s 短命缓存，超了直接清空——比引入 LRU 便宜且够用）
 DNS_CACHE_MAX = 2048
@@ -241,106 +257,6 @@ def _default_browser_factory(*, headless: bool, os_persona: str = ""):
     return Camoufox(**kwargs)
 
 
-def probe_protection(url: str, timeout: float = 15.0, *, guard=None, user_agent: str = "") -> dict:
-    """发一次普通 GET（**逐跳**校验重定向），把状态码/头/cookie/body 交给探测器。
-
-    `guard(url)` 是 SSRF 守卫，**每一跳都要调一次**。为什么必须逐跳：
-    `urllib.request.urlopen` 默认自动跟随最多 10 次重定向，且**跟随过程中不再回看守卫**
-    —— 一个 302 就能把内部地址塞进来。这是 `/solve` 早就修过（见
-    `_install_request_guard`）、`/detect` 却漏掉的同一个洞。
-
-    这里改成"自己跟随、自己校验"：关闭 urllib 的自动跟随，按 `Location` 逐跳解析，
-    每一跳先问守卫，再发下一跳。跳数上限 `PROBE_MAX_REDIRECTS`，防止重定向环挂死线程。
-    """
-    import urllib.error
-    import urllib.request
-
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        """不让 urllib 自己跟：重定向由下面的循环逐跳校验后再发。"""
-
-        def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
-            return None
-
-    opener = urllib.request.build_opener(_NoRedirect)
-    request_headers = {
-        # UA 必须与求解侧是同一个身份：用另一套身份探出来的"有没有盾/什么盾"，
-        # 与真实求解时看到的不一定一致（CF 的判定就吃这一层）。
-        "User-Agent": user_agent or DEFAULT_PROBE_UA,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-    }
-
-    status = 0
-    headers: dict = {}
-    body = ""
-    final_url = url
-    current = url
-    hops = 0
-
-    while True:
-        if guard is not None:
-            guard(current)                 # 每一跳（含首跳）都过守卫
-        try:
-            with opener.open(urllib.request.Request(current, headers=request_headers),
-                             timeout=timeout) as response:
-                status = response.status
-                headers = dict(response.headers.items())
-                body = response.read(500_000).decode("utf-8", "replace")
-                final_url = response.geturl() or current
-            break
-        except urllib.error.HTTPError as e:
-            if e.code in (301, 302, 303, 307, 308):
-                location = (e.headers.get("Location") if e.headers else "") or ""
-                try:
-                    e.close()
-                except Exception:  # noqa: BLE001
-                    pass
-                if not location:
-                    status = e.code
-                    headers = dict(e.headers.items()) if e.headers else {}
-                    body = ""
-                    final_url = current
-                    break
-                hops += 1
-                if hops > PROBE_MAX_REDIRECTS:
-                    raise SolveError(
-                        ErrorCode.TRANSPORT,
-                        f"探测重定向超过 {PROBE_MAX_REDIRECTS} 跳，已中止",
-                        stage="navigate",
-                        hint="目标可能在重定向环里；如需探测最终页，请直接用最终 URL",
-                    ) from e
-                current = urljoin(current, location)
-                continue
-            status = e.code
-            headers = dict(e.headers.items()) if e.headers else {}
-            try:
-                body = e.read(500_000).decode("utf-8", "replace")
-            except Exception:  # noqa: BLE001
-                body = ""
-            final_url = current
-            break
-        except SolveError:
-            raise
-        except Exception as e:  # noqa: BLE001
-            raise SolveError(
-                ErrorCode.TRANSPORT, f"探测失败：{type(e).__name__}: {str(e)[:120]}", stage="navigate",
-                hint="检查目标可达性；探测只发一次普通 GET，不需要浏览器",
-            ) from e
-
-    cookies = {}
-    # urllib 会把多条 Set-Cookie 合并，这里按分号粗切出 cookie 名即可（只用于识别）
-    set_cookie = headers.get("Set-Cookie") or ""
-    for part in set_cookie.split(","):
-        name = part.split("=", 1)[0].strip()
-        if name and " " not in name:
-            cookies[name] = "1"
-
-    result = detect_summarize(url=url, status=status, headers=headers, body=body, cookies=cookies)
-    result["final_url"] = final_url
-    result["backend"] = "detect"
-    return result
-
-
 def _same_document(candidate: str, target: str) -> bool:
     """判断两个 URL 是否指向"同一个文档"（忽略 fragment 与末尾斜杠差异）。"""
     def norm(u: str) -> str:
@@ -361,64 +277,6 @@ def _is_connected(browser) -> bool:
 
 
 # ── token 装载 ─────────────────────────────────────
-def load_or_create_token(path: str) -> tuple[str, str]:
-    """按优先级取 token：环境变量 → token 文件 → 自动生成并原子写入。
-
-    返回 (token, source)，source ∈ {"env", "file", "generated"}。
-    自动生成时用 O_CREAT|O_EXCL 独占创建；若并发下已存在则回读（多进程首启竞态）。
-    """
-    env = (os.environ.get(TOKEN_ENV) or "").strip()
-    if env:
-        return env, "env"
-
-    if os.path.exists(path):
-        token = _read_token_file(path)
-        if token:
-            return token, "file"
-
-    token = secrets.token_urlsafe(32)
-    directory = os.path.dirname(os.path.abspath(path)) or "."
-    os.makedirs(directory, exist_ok=True)
-    line = f"{TOKEN_LINE_PREFIX}{token}\n"
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError:
-        existing = _read_token_file(path)
-        if existing:
-            return existing, "file"
-        # 文件存在但没有 token 行：追加（保留用户其它 env 内容）
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(line)
-        os.chmod(path, 0o600)
-        return token, "generated"
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(line)
-    finally:
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-    return token, "generated"
-
-
-def _read_token_file(path: str) -> str:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            for raw in f:
-                line = raw.strip()
-                if line.startswith(TOKEN_LINE_PREFIX):
-                    return line[len(TOKEN_LINE_PREFIX):].strip()
-    except OSError:
-        return ""
-    return ""
-
-
-def token_fingerprint(token: str) -> str:
-    """日志里只打指纹，不打 token 本体。"""
-    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
-
-
 # ── 求解器 ─────────────────────────────────────────
 class Solver:
     """单 worker 线程持有 Camoufox，串行求解 + 按「域名+出口标识」缓存。

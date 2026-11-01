@@ -119,6 +119,10 @@
 | V30 | **route=auto 真机 3 站** | udemy 6.9s/459B、canva 4.7s/330B（solve）；**g2 → reject 1.3s**（DataDome，不再白等 45s） |
 | V31 | **容器化真跑** | build 1.61GB；容器 **5s 就绪**（修复前 110-120s）；六项端点全过；`/shutdown` → 202(peer=172.17.0.1) → `exit=0` |
 | V32 | **容器专属缺陷 N-11/N-12** | N-11 fetch 落 root HOME→每容器重下载（110s→5s）；N-12 `/shutdown` 仅回环在端口映射下失效（加 `--allow-remote-shutdown`+回归用例） |
+| V33 | **compose 三 worker** | 20s 3/3 healthy；cache/ua_fingerprint 一致；内存 2.26GB；跨容器 try_claim 1真2假 |
+| V34 | **镜像瘦身** | 4.63GB → **3.27GB**（SLIM_FONTS=1），容器 10s 就绪 + /detect 200（必须验活，BuildKit 缓存曾给出无浏览器镜像） |
+| V35 | **真机预算 60/60 用尽** | patreon skip 1.2s；epicgames solve 8.7s/462B；epicgames 回放 403（脚本 TLS/头部不一致，未判为服务缺陷） |
+| V36 | **service.py 拆分第一步** | 2452 → 2310 行；拆出 probe.py(135)/auth.py(77)，原样再导出，297 测试全绿 |
 
 ---
 

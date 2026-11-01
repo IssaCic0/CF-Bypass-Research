@@ -48,7 +48,17 @@ RUN useradd --create-home --uid 10001 solver \
 #     "A model this user cannot read was installed by another account"（它按目录属主判权限）。
 # 所以：把 HOME 指到 solver 的家目录，以 root 完成 fetch，**再把属主整体交给 solver**。
 ENV HOME=/home/solver
-RUN python -m camoufox fetch && chown -R solver:solver /home/solver/.cache
+
+# 可选瘦身：Camoufox 自带 **2.1 GB 字体包**（用于字体枚举指纹的真实性），
+# 压缩后约占镜像 1.3 GB。删掉能显著变小，但**会削弱指纹真实性**，对"查字体"的站点
+# 可能降低成功率 —— 所以默认不删（保真优先）。
+#   docker build --build-arg SLIM_FONTS=1 -t cf-bypass-solver:slim .   # 只删 CJK 字体包
+#   docker build --build-arg SLIM_FONTS=2 -t cf-bypass-solver:slim .   # 删全部字体
+#
+# 关键：删除必须**与 fetch 在同一个 RUN 里**。单独写一个 RUN 去 rm，
+# 只是在新层里加了一个 whiteout，镜像一点都不会变小（实测：分开写时 slim 仍是 4.97GB）。
+ARG SLIM_FONTS=0
+RUN python -m camoufox fetch     && if [ "$SLIM_FONTS" != "0" ]; then          B=$(ls -d /home/solver/.cache/camoufox/browsers/official/*/ | head -1);          echo "SLIM_FONTS=$SLIM_FONTS -> $B";          if [ "$SLIM_FONTS" = "1" ]; then rm -rf "$B/fonts/M"; else rm -rf "$B/fonts"; fi;          rm -rf /home/solver/.cache/camoufox/addons/*/;        fi     && chown -R solver:solver /home/solver/.cache
 
 USER solver
 
