@@ -38,6 +38,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import ipaddress
 import json
@@ -1632,6 +1633,24 @@ class Handler(BaseHTTPRequestHandler):
     router = None             # 可选：配了兜底后端时使用（BackendRouter）
     server_version = "cfsolve/2.0"
     protocol_version = "HTTP/1.1"     # 支持 keep-alive；默认 HTTP/1.0 会每响应断连
+    #: 在途请求计数（优雅退出要靠它"等请求做完再走"）。
+    #: 为什么需要：`daemon_threads=True` 只保证进程能退出，**不保证**在途请求能拿到响应；
+    #: 实测（Windows）收到终止信号时，正在求解的调用方拿到的是 `WinError 10054 连接被强制关闭`。
+    inflight_lock = threading.Lock()
+    inflight_requests = 0
+    #: 是否允许非回环地址触发 `/shutdown`（默认禁止：这是一个能停服的高危端点）
+    allow_remote_shutdown = False
+
+    @classmethod
+    def enter_request(cls) -> None:
+        with cls.inflight_lock:
+            cls.inflight_requests += 1
+
+    @classmethod
+    def exit_request(cls) -> None:
+        with cls.inflight_lock:
+            cls.inflight_requests -= 1
+
     #: 空闲连接超时。开了 keep-alive 却不设超时，一条空闲连接会一直占着 handler 线程
     #: （`daemon_threads` 只影响退出，不影响运行期），长期跑会被慢客户端耗尽线程。
     timeout = 30
@@ -1707,6 +1726,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             self._deny()
             return
+        if path == "/shutdown":
+            self._handle_shutdown()
+            return
         if path == "/detect":
             self._handle_detect(raw, body_error)
             return
@@ -1716,6 +1738,9 @@ class Handler(BaseHTTPRequestHandler):
 
         req_id = secrets.token_hex(4)
         started = time.monotonic()
+        # 路由决策在 try 之外初始化：失败时也要把它带回给调用方
+        # （实测：route=auto 求解失败时响应里完全没有 routed_by，排查时不知道"当时怎么判的"）。
+        routed_by = None
         try:
             if body_error:
                 raise SolveError(ErrorCode.INVALID_REQUEST, body_error, stage="validate")
@@ -1777,7 +1802,6 @@ class Handler(BaseHTTPRequestHandler):
                     ErrorCode.INVALID_REQUEST, f"未知 route={route_mode!r}", stage="validate",
                     hint=f"可选 {sorted(ROUTE_MODES)}；不传等价于 fixed（v3 行为）",
                 )
-            routed_by = None
             if route_mode != "fixed":
                 detect_result = self._probe_for_route(url, timeout=timeout) if route_mode == "auto" else None
                 decision = route_decide(detect_result, route_mode)
@@ -1831,6 +1855,10 @@ class Handler(BaseHTTPRequestHandler):
                       clearance_len=len(result.get("cf_clearance", "")),
                       ms=round((time.monotonic() - started) * 1000))
         except SolveError as e:
+            if routed_by is not None:
+                # 失败也必须回传"我是怎么路由的"：否则线上只看到 unsolved，
+                # 却不知道它探测到了什么、选了哪条路。
+                e.extra = {**(getattr(e, "extra", None) or {}), "routed_by": routed_by}
             self._send(e.http_status, e.payload())
             self._log(event="solve", req_id=req_id, ok=False, error_code=e.code.value,
                       stage=e.stage, ms=round((time.monotonic() - started) * 1000))
@@ -1838,11 +1866,35 @@ class Handler(BaseHTTPRequestHandler):
             traceback.print_exc()
             err = SolveError(ErrorCode.INTERNAL, f"{type(e).__name__}: {str(e)[:160]}",
                              stage="internal", hint="查看服务端 traceback")
+            if routed_by is not None:
+                err.extra = {**(getattr(err, "extra", None) or {}), "routed_by": routed_by}
             self._send(err.http_status, err.payload())
             self._log(event="solve", req_id=req_id, ok=False, error_code=err.code.value,
                       stage="internal", ms=round((time.monotonic() - started) * 1000))
 
     # -- 防护识别 ----------------------------------
+    def _handle_shutdown(self) -> None:
+        """优雅退出端点（供滚动重启用，替代 `taskkill /F`）。
+
+        三道门（都不许省）：
+          1. **鉴权**：与其它端点同一套 Bearer（`--no-auth` 时例外，那本来就是联调模式）；
+          2. **来源**：默认只允许**回环地址**触发 —— 这是一个能停服的端点，
+             公网可达就等于给了个 DoS 开关；
+          3. **异步返回**：先 202 再真正退出，调用方不会拿到"连接被重置"。
+        """
+        peer = (self.client_address or ("", 0))[0]
+        loopback = peer in ("127.0.0.1", "::1", "localhost")
+        if not loopback and not Handler.allow_remote_shutdown:
+            raise SolveError(
+                ErrorCode.UNAUTHORIZED, "只允许从回环地址触发优雅退出", stage="admit",
+                hint="跨机停服请用信号/编排器；确需远程触发请显式加 --allow-remote-shutdown",
+            )
+        self._send(202, {"ok": True, "state": "shutting-down", "peer": peer})
+        self._log(event="shutdown", peer=peer)
+        srv = getattr(self, "server", None)
+        if srv is not None and hasattr(srv, "begin_shutdown"):
+            srv.begin_shutdown()
+
     def _handle_detect_from_query(self) -> None:
         from urllib.parse import parse_qs, urlsplit as _split
 
@@ -1994,6 +2046,39 @@ class Server(ThreadingHTTPServer):
     # 表现为"服务起来了、却一直返回别人的响应"，极难排查。
     # 所以在 Windows 上不要它：宁可启动时就报 OSError，也不要静默串台。
     allow_reuse_address = os.name != "nt"
+
+    def drain(self, timeout: float) -> int:
+        """等在途请求处理完（最多 timeout 秒），返回**剩余未完成数**。
+
+        优雅退出的正确顺序：停止接收新连接（`shutdown()`）→ 等在途请求收尾 → 才 close()。
+        少中间这一步，就等于"断开 listener 后立刻把还在算的请求砍掉"。
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while time.monotonic() < deadline:
+            if Handler.inflight_requests == 0:
+                return 0
+            time.sleep(0.02)
+        return Handler.inflight_requests
+
+    def begin_shutdown(self) -> None:
+        """从任意线程触发优雅退出（供 `/shutdown` 端点与信号处理共用）。"""
+        threading.Thread(target=self.shutdown, daemon=True).start()
+
+
+def _track_inflight(method):
+    """给 handler 方法套一层在途计数（优雅退出靠它判断"还有没有人没回话"）。"""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        Handler.enter_request()
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            Handler.exit_request()
+    return wrapper
+
+
+Handler.do_GET = _track_inflight(Handler.do_GET)        # type: ignore[method-assign]
+Handler.do_POST = _track_inflight(Handler.do_POST)      # type: ignore[method-assign]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2192,6 +2277,13 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if prewarmer is not None:
             prewarmer.stop()
+        # 优雅退出三步曲：已经停止接收新连接 → 等在途请求收尾 → 再关资源。
+        # 少了"等"这一步，正在求解的调用方会拿到连接被重置（实测 WinError 10054）。
+        left = srv.drain(SHUTDOWN_GRACE)
+        if left:
+            print(f"[cfsolve] 优雅退出：{SHUTDOWN_GRACE:.0f}s 内仍有 {left} 个请求未完成", flush=True)
+        else:
+            print("[cfsolve] 优雅退出：在途请求已全部完成", flush=True)
         srv.server_close()
         solver.close()
     print("[cfsolve] 已退出", flush=True)

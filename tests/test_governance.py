@@ -295,3 +295,163 @@ def test_detect_cache_is_bounded():
         assert len(s._detect_cache) <= svc.DETECT_CACHE_MAX
     finally:
         s.close()
+
+
+# ── 优雅退出：in-flight 请求的结局（此前完全没测过）──────────────
+def test_close_with_inflight_request_does_not_hang():
+    """`close()` 期间正在求解的请求必须有明确结局（报错或完成），不能永久挂住。
+
+    这是"滚动重启会不会掉请求"的核心：旧进程收到退出信号时，如果直接杀线程，
+    调用方拿到的是 connection reset；如果死等，进程永远退不掉。
+    """
+    import threading
+
+    browser = FakeBrowser()
+    s = svc.Solver(browser_factory=factory_returning(browser), allow_private_hosts=True,
+                   max_inflight=1, max_queue=4)
+    assert wait_until(lambda: s.health()[0] == 200)
+
+    outcome: dict[str, object] = {}
+
+    def slow_call():
+        try:
+            # FakeBrowser 的求解会真跑一小段；这里用极长 timeout 也没关系，
+            # 关键是 close() 之后它必须返回，而不是挂死。
+            outcome["result"] = s.solve(HOST, timeout=5)
+        except BaseException as e:  # noqa: BLE001
+            outcome["error"] = type(e).__name__
+
+    t = threading.Thread(target=slow_call, daemon=True)
+    t.start()
+    s.close()                     # 优雅退出：发关闭信号 + 关闭浏览器
+    t.join(timeout=15)
+    assert not t.is_alive(), "close() 之后 in-flight 请求仍然挂着（会拖住重启）"
+    assert "result" in outcome or "error" in outcome, "必须有明确结局（成功或异常），不能静默"
+
+    # 关闭后新请求必须被明确拒绝（而不是尝试用一个已死的浏览器）
+    with pytest.raises(SolveError) as ei:
+        s.solve(HOST, timeout=5)
+    assert ei.value.code in (ErrorCode.BROWSER_UNAVAILABLE, ErrorCode.BUSY), \
+        f"关闭后应明确拒绝，实际 {ei.value.code}"
+
+
+def test_close_is_idempotent():
+    """重复 close 不许抛（预启动脚本/信号处理里很容易重复调用）。"""
+    s = svc.Solver(browser_factory=factory_returning(FakeBrowser()), allow_private_hosts=True)
+    assert wait_until(lambda: s.health()[0] == 200)
+    s.close()
+    s.close()
+
+
+# ── 优雅退出：/shutdown 端点 + 在途请求排空 ──────────────────
+@pytest.fixture
+def live_server_slow():
+    """起一个真实 Server，并挂一个"慢后端"（0.6s），用于测排空。"""
+    browser = FakeBrowser()
+    s = svc.Solver(browser_factory=factory_returning(browser), allow_private_hosts=True)
+    assert wait_until(lambda: s.health()[0] == 200)
+    fake = FakeBackend(sleep=0.6)
+    svc.Handler.solver = s
+    svc.Handler.token = "t"
+    svc.Handler.router = be.BackendRouter([fake], governance=s)
+    srv = svc.Server(("127.0.0.1", 0), svc.Handler)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    try:
+        yield srv, f"http://127.0.0.1:{srv.server_address[1]}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        svc.Handler.router = None
+        s.close()
+
+
+def test_shutdown_requires_token(live_server_slow):
+    """能停服的端点必须鉴权 —— 少了它就是一个公网 DoS 开关。"""
+    _srv, base = live_server_slow
+    req = urllib.request.Request(base + "/shutdown", data=b"{}", method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with pytest.raises(urllib.error.HTTPError) as ei:
+        urllib.request.urlopen(req, timeout=10)
+    assert ei.value.code == 401
+
+
+def test_shutdown_from_loopback_returns_202_and_stops_server(live_server_slow):
+    srv, base = live_server_slow
+    req = urllib.request.Request(base + "/shutdown", data=b"{}", method="POST",
+                                 headers={"Content-Type": "application/json",
+                                          "Authorization": "Bearer t"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        assert resp.status == 202
+        payload = json.loads(resp.read().decode())
+    assert payload["state"] == "shutting-down"
+
+    # 服务应当停止接收新请求
+    deadline = time.time() + 5
+    stopped = False
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(base + "/health", timeout=1)
+            time.sleep(0.05)
+        except Exception:  # noqa: BLE001
+            stopped = True
+            break
+    assert stopped, "调用 /shutdown 后服务仍在接受新请求"
+
+
+def test_drain_waits_for_inflight_request(live_server_slow):
+    """排空必须真的等：在途请求要拿到 200，而不是被砍成连接重置。"""
+    srv, base = live_server_slow
+    got: dict = {}
+
+    def call():
+        try:
+            code, body = _post(base, {"url": HOST, "timeout": 30})
+            got["code"] = code
+            got["ok"] = body.get("ok")
+        except Exception as e:  # noqa: BLE001
+            got["error"] = f"{type(e).__name__}: {e}"
+
+    t = threading.Thread(target=call, daemon=True)
+    t.start()
+    time.sleep(0.15)                     # 让请求确实进到"求解中"（后端 sleep 0.6s）
+    srv.shutdown()                       # 停止接收新连接
+    left = srv.drain(5.0)                # 等在途请求收尾
+    t.join(timeout=10)
+
+    assert left == 0, f"在途请求没有被排空（剩 {left} 个）"
+    assert got.get("code") == 200 and got.get("ok") is True, f"在途请求的结局不对: {got}"
+
+
+def test_routed_by_survives_failure(monkeypatch):
+    """失败也要回传路由决策：线上只看到 unsolved 时，必须还能知道"它当时怎么判的"。
+
+    实测背景：route=auto 打一个真实 CF 站 60s 未解出，响应里 routed_by 全空，
+    排查时无法区分"探测说没盾但实际有盾"与"探测说有盾但解不出来"。
+    """
+    browser = FakeBrowser()
+    s = svc.Solver(browser_factory=factory_returning(browser), allow_private_hosts=True)
+    assert wait_until(lambda: s.health()[0] == 200)
+    # 后端直接失败，模拟"求解不出来"
+    fake = FakeBackend(raises=SolveError(ErrorCode.UNSOLVED, "boom", stage="wait"))
+    svc.Handler.solver = s
+    svc.Handler.token = "t"
+    svc.Handler.router = be.BackendRouter([fake], governance=s)
+    srv = svc.Server(("127.0.0.1", 0), svc.Handler)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    try:
+        monkeypatch.setattr(svc, "probe_protection", lambda *a, **k: {
+            "url": HOST, "status": 403, "protected": True, "cloudflare_challenge_type": "managed",
+            "providers": [{"id": "detect-cloudflare", "name": "Cloudflare"}],
+            "recommendation": {"route": "browser"},
+        })
+        code, body = _post(f"http://127.0.0.1:{srv.server_address[1]}",
+                           {"url": HOST, "route": "auto", "timeout": 10})
+        assert body["ok"] is False
+        assert "routed_by" in body, f"失败响应必须带 routed_by，实际 keys={list(body)}"
+        assert body["routed_by"]["reason"] == "cloudflare-managed"
+        assert body["routed_by"]["prefer"] == "pure"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        svc.Handler.router = None
+        s.close()

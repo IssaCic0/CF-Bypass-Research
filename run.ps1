@@ -123,13 +123,40 @@ try {
         }
 
         'stop' {
-            Write-Step "停掉监听 $Port 的进程"
+            Write-Step "优雅停止监听 $Port 的服务"
             $conns = netstat -ano | Select-String ":$Port\s+.*LISTENING"
             if (-not $conns) { Write-Host "没有进程监听 $Port"; exit 0 }
+
+            # 先试 /shutdown：Windows 上 Stop-Process/kill -TERM 等价于强制终止，
+            # 正在求解的调用方会拿到 WinError 10054（实测），滚动重启会掉请求。
+            $token = $env:CF_SOLVE_TOKEN
+            if (-not $token -and (Test-Path (Join-Path $Root '.env'))) {
+                $line = Get-Content (Join-Path $Root '.env') | Where-Object { $_ -match '^CF_SOLVE_TOKEN=' } | Select-Object -First 1
+                if ($line) { $token = $line.Split('=', 2)[1].Trim() }
+            }
+            $graceful = $false
+            try {
+                $headers = @{}
+                if ($token) { $headers['Authorization'] = "Bearer $token" }
+                Invoke-RestMethod -Uri "http://127.0.0.1:$Port/shutdown" -Method Post -Headers $headers `
+                    -ContentType 'application/json' -Body '{}' -TimeoutSec 5 | Out-Null
+                $graceful = $true
+                Write-Host "已请求优雅退出（等 15s 让在途请求收尾）"
+                for ($i = 0; $i -lt 30; $i++) {
+                    Start-Sleep -Milliseconds 500
+                    if (-not (netstat -ano | Select-String ":$Port\s+.*LISTENING")) { break }
+                }
+            } catch {
+                Write-Host "优雅退出不可用（$($_.Exception.Message)），回退为强制终止" -ForegroundColor Yellow
+            }
+
+            $conns = netstat -ano | Select-String ":$Port\s+.*LISTENING"
             foreach ($line in $conns) {
                 $procId = ($line.ToString() -split '\s+')[-1]
-                Write-Host "kill PID $procId"
-                Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+                if ($procId -match '^\d+$') {
+                    Write-Host "强制终止 PID $procId（$(if ($graceful) {'优雅退出未在 15s 内完成'} else {'无 token 或端点不可用'})）"
+                    Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+                }
             }
         }
 

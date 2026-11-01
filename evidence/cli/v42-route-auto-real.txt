@@ -1,0 +1,3 @@
+# route=auto 在真实 CF 站上的行为（真机，消耗过盾预算）
+{"site": "https://steamdb.info/", "http": 200, "solved": true, "backend": "camoufox", "elapsed": 7.47, "routed_by": {"action": "solve", "reason": "cloudflare-managed", "prefer": "pure", "detect": {"protected": true, "providers": ["Cloudflare"], "challenge_type": "managed"}}, "clearance_len": 460}
+{"site": "https://glassdoor.co.uk/", "http": 200, "solved": false, "backend": null, "elapsed": 61.14, "routed_by": {"action": null, "reason": null, "prefer": null, "detect": {"protected": null, "providers": null, "challenge_type": null}}, "clearance_len": 0}

@@ -284,6 +284,20 @@ GET  /detect?url=https://target/
 `recommendation.route` 取值：`direct` / `direct_unless_blocked` / `browser` / `pure_protocol_may_work`
 / `browser_token` / `browser_cookie` / `unsupported_or_browser`。
 
+#### 探测结果按域缓存（v4.1）
+
+同一域名 300 秒内的重复探测会直接返回**缓存结论**（响应里多一个 `"cached": true`），
+不再发出站请求。目的是摊掉 `route=auto` 每次多出来的 ≈0.5s。
+
+| 参数 | 位置 | 说明 |
+|---|---|---|
+| `fresh=1` / `"fresh": true` | `GET /detect?url=…&fresh=1` / `POST` body | 跳过缓存，强制实时探测（运维要看当前真实状态时用） |
+
+服务端开关：`--detect-cache-ttl <秒>`（默认 300，**0 = 关闭**）。
+
+> 缓存命中会**绕过探测并发闸门**（`--max-detect`）——这是有意的：命中不发出站请求，
+> 不占出站额度。若你要求"每个请求都必须过闸门"，把 `--detect-cache-ttl` 设为 0。
+
 **`final_url` 是实际拿到响应的那个 URL**（跟随重定向之后）。注意每条跳转都会被独立校验（见下）。
 
 ### 与「防护识别」相关的两条硬约束
@@ -298,6 +312,26 @@ GET  /detect?url=https://target/
 探测发出的 `User-Agent` **与求解侧同一身份**：浏览器已就绪时用它的真实 UA，
 否则按 `--browser-os` 对应的 persona 推。用另一套身份探出来的"有没有盾"和真实求解时看到的并不一致。
 
+## POST /shutdown — 需要 token，且**只允许回环地址**
+
+优雅退出：**先停收新连接 → 等在途请求收尾（最多 10s）→ 再关资源**。
+存在的理由：Windows 上 `Stop-Process` / `kill -TERM` 等价于强制终止，
+正在求解的调用方会拿到 `WinError 10054 连接被强制关闭`（实测），滚动重启必掉请求。
+
+```http
+POST /shutdown      Authorization: Bearer <token>
+→ 202 {"ok": true, "state": "shutting-down", "peer": "127.0.0.1"}
+```
+
+| 限制 | 说明 |
+|---|---|
+| 来源 | 默认**只允许 `127.0.0.1` / `::1`**；跨机触发会 401，需要显式 `--allow-remote-shutdown` |
+| 鉴权 | 与其它端点同一套 Bearer（`--no-auth` 联调模式下不校验） |
+| 时序 | 先返回 202 再异步退出 —— 调用方不会拿到"连接被重置" |
+
+实测（本机，7.02s 的真求解在途中触发 shutdown）：在途请求**拿到 200 + solved=true**，
+端口随后释放，日志 `优雅退出：在途请求已全部完成`。
+
 ## GET /stats — 需要 token
 
 `/health` 的同义别名（字段一致）。**注意**：它现在要求 token（v2 起除 `/health` 外全部需要鉴权），
@@ -309,7 +343,10 @@ Prometheus 文本格式。暴露的指标：
 
 | 指标 | 类型 | 用途 |
 |---|---|---|
-| `cfsolve_solves_total` | counter | 真实求解次数（含失败） |
+| `cfsolve_solves_total` | counter | **真实发起的求解次数（含失败）**；参数错误/队列满这类没真正发起的终止性错误不计入 |
+| `cfsolve_backend_total{backend,result}` | counter | 按后端的调用结果（`result=ok\|error`），用来定位"哪一棒在退步"（v4.1） |
+| `cfsolve_host_solves_total{host}` | counter | 按域求解次数，**只保留 top-20**（域名是调用方可控输入，全量当标签会把 Prometheus 打爆）（v4.1） |
+| `cfsolve_host_failures_total{host}` | counter | 按域失败次数，同样只保留 top-20（v4.1） |
 | `cfsolve_cache_hits_total` | counter | 缓存命中 |
 | `cfsolve_failures_total` | counter | 求解失败 |
 | `cfsolve_timeouts_total` | counter | 超时 |

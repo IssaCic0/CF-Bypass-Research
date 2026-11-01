@@ -2,6 +2,63 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [4.2.0] - 2026-11-02
+
+主题：**稳定性收口**——把"优雅退出会掉请求"这个真实故障补掉，并把文档漂移一次清完。
+
+### 新增
+
+- **`POST /shutdown` 优雅退出端点**（Bearer 鉴权 + **默认只允许回环地址**）。
+  先停收新连接 → **等在途请求收尾（≤10s）** → 再关资源。
+  实测（7.02s 的真求解在途中触发）：在途请求**拿到 200 + solved=true**，
+  端口随后释放，日志 `优雅退出：在途请求已全部完成`。
+- **`Server.drain()`**：按在途请求计数排空；`Handler` 用装饰器统计在途请求（`do_GET/do_POST`）。
+- **`scripts/soak.py`**：长跑稳定性（RSS/句柄/ready/探测耗时曲线 + 四条判定阈值），
+  默认**不做真求解**（不烧过盾预算）。
+- **`run.ps1 stop` 改为优雅停止**：先 `POST /shutdown`，15s 未退才强杀。
+
+### 修复
+
+- **优雅退出会砍掉在途请求**（P1，实测）：Windows 上 `Stop-Process` / `kill -TERM`
+  等价于强制终止，正在求解的调用方拿到 `WinError 10054 连接被强制关闭`。
+  根因是"停收连接后立刻退出"，没有等 handler 线程收尾（`daemon_threads=True` 只保证能退出，
+  不保证能回包）。现在有 `/shutdown` + `drain()` + 滚动重启脚本三件套。
+- **`route=auto` 失败响应缺 `routed_by`**（P2，实测）：真实 CF 站 60s 未解出时，
+  响应里 `routed_by` 全空，排查时无法区分"探测判错"与"解不出来"。现在成功/失败/异常三条路径都回传。
+
+### 文档（一次清完 5 处漂移）
+
+- `docs/API.md`：补 `/detect` 的 `fresh` 参数与 `cached` 字段、`--detect-cache-ttl`、
+  `/shutdown` 契约、新增指标（`cfsolve_backend_total{backend,result}`、`cfsolve_host_*`）。
+- `docs/00-索引.md`：能力清单补 `route=auto` 与"治理不随后端变化"。
+- `SKILL.md`：补 `route=auto`、治理必须绑入口/路由的坑、geoip 否决结论。
+- `docs/项目规格.md`：新增 `POST /shutdown`、`--allow-remote-shutdown`、
+  **入口守卫 400 vs 502 的语义对照表**（实测踩过：拿不存在的域名测"后端是否被调用"，差点误判）。
+- `plans/下一步改进指南.md`：回填已完成/未开始卡的状态，避免下次把已完成当 TODO。
+- `docs/部署-容器.md`：热更新改用 `/shutdown`，说明为什么不能 `taskkill /F`。
+
+### 决策
+
+- **geoip（T-14）否决**：`camoufox` 的 `geoip=True` 会调用 `download_mmdb()` **下载 GeoIP 数据库**
+  （`geolocation.py`，落到 `user_cache_dir("camoufox")/geoip/mmdb/`）。这是运行期外部依赖 + 隐私面，
+  按指南 §8 的规则直接否决，不做 A/B、保持 `geoip=False`。要重开必须：①离线 MMDB 供给方式 ②同站双臂实测收益。
+
+### 稳定性实测（本机）
+
+| 场景 | 结果 |
+|---|---|
+| 缓存命中并发（32 线程 × 20） | **640 请求 0 错**，396.3 QPS，p50 5.7ms / p99 **1017ms**（A2 目标 ≤2s ✅） |
+| 冷路径 8 并发（`--max-inflight 2`） | **6 个立刻 429 busy、2 个准入**（一个 6.8s、一个 13.5s 串行），行为符合设计：满了即拒、不无界排队 |
+| 优雅退出（在途 7.02s 真求解） | 修复前 `WinError 10054`；修复后 **200 + solved=true** |
+| 长跑（1 小时 soak） | 见 `plans/证据/v42-soak.jsonl`（RSS 稳定在 ~830MB，句柄在 t≈10min 后趋于平台） |
+
+### 真实调用（真机，预算 ≈53/60）
+
+- ✅ `route=auto` 打 **steamdb.info**：探测 `cloudflare/managed` → `action=solve, prefer=pure` →
+  **7.47s 解出 460 字节 clearance**。这是"自动路由在真实 CF 站上选对了路"的第一份证据。
+- ⚠️ `route=auto` 打 **glassdoor.co.uk**：60s 未解出（该站当天在 A/B 里已被连打 12 次）。
+  按 §15 的 IP 信誉纪律**主动停止**后续真机实验，剩余 ≈7 次预算留待换出口后再用。
+
 ## [4.1.0] - 2026-11-01
 
 主题：**把治理从"某个后端实现"上提到"入口 + 路由层"**。

@@ -97,6 +97,27 @@ python scripts/ab_test.py --sites "https://a/,https://b/,https://c/" --gap 5
 - 结果落 `plans/证据/ab-methods-<时间戳>.json`
 - 累计失败 ≥5 就停，隔天再测
 
+## 五点五、服务里已经内建的两件事（别再手写）
+
+1. **`route=auto`**：`POST /solve {"route":"auto"}` 会先探测再决策 ——
+   无盾站**不求解**直接告知、不支持的厂商**直接拒绝**、CF managed/jsd 纯协议优先、
+   turnstile/recaptcha 浏览器优先。默认 `route=fixed`（= 老行为），不传时**不会**多发探测请求。
+   服务端有 `--detect-cache-ttl`（默认 300s）按域缓存探测结论，`fresh=1` 可强制实时。
+2. **治理挂在入口 + 路由层**：SSRF 守卫、inflight 准入、缓存、指标对**所有后端**生效。
+
+### 这一块最容易踩的坑（v4.0 踩过一次，v4.1 才真修）
+
+**不要把治理写进某个后端实现里**（例如只写进 `Solver.solve`）。
+除 Camoufox 以外的后端（cfsolve / pydoll / flaresolverr）**都不走 `Solver.solve`**，
+治理写在那里等于对它们完全不生效 —— 表现是：不缓存（热路径命中率归零）、
+不受 inflight 约束（能被打穿）、指标全 0（**监测在说谎**）。
+判断方法：配一个额外后端，连续打两次同一域，看第二次是不是 `cached:true`，
+再看 `/metrics` 的 `cfsolve_solves_total` 有没有涨。
+
+**第二个同类坑**：把治理接到 router 之后，纯 Camoufox 部署（没有额外后端）反而
+没有 `backend`/`host` 维度了。记账要做成**唯一入口**（本仓库是 `Solver._account`），
+主路径与路由路径共用。
+
 ## 六、踩过的坑（血泪清单）
 
 1. **headless Chrome 的 UA 带 `HeadlessChrome`** → 强检测信号；pydoll 生产要非 headless（服务器配 xvfb）
@@ -113,6 +134,13 @@ python scripts/ab_test.py --sites "https://a/,https://b/,https://c/" --gap 5
 8. **SSRF 守卫只守首跳会被 302 绕过** → 必须在 context 上挂 route 拦每个请求
 9. **子资源解析失败（NXDOMAIN）不能判成越权** → 三态（blocked/unresolvable/allowed），且子资源被拦不该整次失败
 10. **`0.0.0.0` 要拦**：Linux 上 `connect(0.0.0.0)` 等价于连 localhost
+
+## 六点五、geoip 已被否决（有证据）
+
+`camoufox` 的 `geoip=True` 会调用 `download_mmdb()` **下载 GeoIP 数据库**（`geolocation.py`，
+落到 `user_cache_dir("camoufox")/geoip/mmdb/`）。这是运行期外部依赖 + 隐私面，
+按 `plans/下一步改进指南.md` §8 的规则**直接否决**，不做 A/B、保持 `geoip=False`。
+要重开必须同时满足：①离线可用的 MMDB 供给方式 ②有实测收益（同站双臂）。
 
 ## 七、相关文档
 
