@@ -1,0 +1,157 @@
+{
+  "task_id": "e2e-local",
+  "status": "passed",
+  "timestamp": "2026-11-02T06:37:53",
+  "duration_sec": 12.8,
+  "checks": [
+    {
+      "name": "A01_service_ready",
+      "ok": true,
+      "detail": "port=40246 token_file=有"
+    },
+    {
+      "name": "A02_token_file_created",
+      "ok": true,
+      "detail": "token 长度=43"
+    },
+    {
+      "name": "A03_health_unauth_200",
+      "ok": true,
+      "detail": "status=200 state=ready"
+    },
+    {
+      "name": "A04_health_unauth_no_internal_fields",
+      "ok": true,
+      "detail": "泄露字段=无"
+    },
+    {
+      "name": "A05_health_auth_full_view",
+      "ok": true,
+      "detail": "cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-e2e-x6o23tmd\\cache solves=0"
+    },
+    {
+      "name": "A06_metrics_without_token_401",
+      "ok": true,
+      "detail": "status=401 error_code=unauthorized"
+    },
+    {
+      "name": "A07_metrics_with_token",
+      "ok": true,
+      "detail": "status=200 type=text/plain; version=0.0. bytes=1525"
+    },
+    {
+      "name": "A08_detect_blocks_internal_url",
+      "ok": true,
+      "detail": "status=400 error_code=invalid-request"
+    },
+    {
+      "name": "A09_solve_blocks_metadata_ip",
+      "ok": true,
+      "detail": "status=400 error_code=invalid-request"
+    },
+    {
+      "name": "A10_solve_missing_url_400",
+      "ok": true,
+      "detail": "status=400"
+    },
+    {
+      "name": "A11_solve_malformed_json_400",
+      "ok": true,
+      "detail": "status=400"
+    },
+    {
+      "name": "A12_solve_bad_route_400",
+      "ok": true,
+      "detail": "status=400"
+    },
+    {
+      "name": "A13_unknown_path_404",
+      "ok": true,
+      "detail": "status=404"
+    },
+    {
+      "name": "A14_shutdown_202",
+      "ok": true,
+      "detail": "http=202"
+    },
+    {
+      "name": "A15_shutdown_exit_code_0",
+      "ok": true,
+      "detail": "exit=0"
+    },
+    {
+      "name": "A16_no_traceback_in_log",
+      "ok": true,
+      "detail": "日志行数=10"
+    },
+    {
+      "name": "B01_service_ready",
+      "ok": true,
+      "detail": "port=40272"
+    },
+    {
+      "name": "B02_detect_plain_site_is_direct",
+      "ok": true,
+      "detail": "status=200 protected=False route=direct"
+    },
+    {
+      "name": "B03_route_auto_skips_solve",
+      "ok": true,
+      "detail": "status=200 no_challenge=True solves=0->0 elapsed=0.00s"
+    },
+    {
+      "name": "B04_route_auto_is_fast",
+      "ok": true,
+      "detail": "elapsed=0.00s (<10s)"
+    },
+    {
+      "name": "B05_route_auto_returns_decision",
+      "ok": true,
+      "detail": "routed_by={\"mode\": \"auto\", \"action\": \"skip\", \"reason\": \"no-protection\", \"prefer\": \"any\", \"hint\": \"探测未命中任何防护特征，直接请求目标站即可（省掉一次 16–20s 的浏览器求解）\", \"detail\": {\"status\": 200}, \""
+    },
+    {
+      "name": "B06_fixed_path_structured_result",
+      "ok": true,
+      "detail": "status=200 solved=False ok=False error_code=unsolved"
+    },
+    {
+      "name": "B07_alive_after_browser_run",
+      "ok": true,
+      "detail": "state=ready failures=1"
+    },
+    {
+      "name": "B08_audit_log_written",
+      "ok": true,
+      "detail": "2 行"
+    },
+    {
+      "name": "B09_audit_has_solve_event",
+      "ok": true,
+      "detail": "events=solve"
+    },
+    {
+      "name": "B10_audit_has_no_token",
+      "ok": true,
+      "detail": "token 未出现在审计文件中"
+    },
+    {
+      "name": "B11_shutdown_202",
+      "ok": true,
+      "detail": "http=202"
+    },
+    {
+      "name": "B12_shutdown_exit_code_0",
+      "ok": true,
+      "detail": "exit=0"
+    },
+    {
+      "name": "B13_no_traceback_in_log",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "limitations": [
+    "离线验收：目标站是本地静态页，不能证明任何真实站点的过盾成功率",
+    "未覆盖多进程/多容器共享缓存（见 run.ps1 bench 与 docs/部署-容器.md）"
+  ]
+}

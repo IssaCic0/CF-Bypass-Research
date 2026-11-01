@@ -1,0 +1,97 @@
+{
+  "task_id": "hot-update-drill",
+  "status": "passed",
+  "timestamp": "2026-11-02T06:39:45",
+  "duration_sec": 28.8,
+  "checks": [
+    {
+      "name": "A01_worker_ready",
+      "ok": true,
+      "detail": "port=40388"
+    },
+    {
+      "name": "A02_shutdown_returns_202",
+      "ok": true,
+      "detail": "http=202"
+    },
+    {
+      "name": "A03_shutdown_exit_code_0",
+      "ok": true,
+      "detail": "exit=0"
+    },
+    {
+      "name": "A04_inflight_request_survived",
+      "ok": true,
+      "detail": "status=200 elapsed=6.07s exception=None"
+    },
+    {
+      "name": "A05_inflight_returns_structured_body",
+      "ok": true,
+      "detail": "keys=['error', 'error_code', 'hint', 'ok', 'solved', 'stage'] solved=False error_code=unsolved"
+    },
+    {
+      "name": "A06_no_traceback_in_log",
+      "ok": true,
+      "detail": "queue_depth_at_shutdown=0"
+    },
+    {
+      "name": "B01_two_workers_ready",
+      "ok": true,
+      "detail": "p1=40414 ready=True p2=40415 ready=True"
+    },
+    {
+      "name": "B02_shared_cache_and_token",
+      "ok": true,
+      "detail": "token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-voumckhx\\cache"
+    },
+    {
+      "name": "B03_restart_shutdown_202_exit0",
+      "ok": true,
+      "detail": "http=202 exit=0"
+    },
+    {
+      "name": "B04_restarted_worker_ready",
+      "ok": true,
+      "detail": "port=40414"
+    },
+    {
+      "name": "B05_restarted_worker_serves",
+      "ok": true,
+      "detail": "/metrics -> 200"
+    },
+    {
+      "name": "B06_other_worker_zero_failures_during_roll",
+      "ok": true,
+      "detail": "ok=60 fail=0 errors=[]"
+    },
+    {
+      "name": "C01_spare_worker_ready",
+      "ok": true,
+      "detail": "port=40547"
+    },
+    {
+      "name": "C02_old_still_serving_before_cutover",
+      "ok": true,
+      "detail": "/health -> 200"
+    },
+    {
+      "name": "C03_old_drained_after_new_ready",
+      "ok": true,
+      "detail": "http=202 exit=0"
+    },
+    {
+      "name": "C04_new_serving_after_cutover",
+      "ok": true,
+      "detail": "/metrics -> 200"
+    },
+    {
+      "name": "B07_no_traceback_in_logs",
+      "ok": true,
+      "detail": ""
+    }
+  ],
+  "limitations": [
+    "本机多进程语义：没有真负载均衡/反向代理，端口切换由操作者完成",
+    "未覆盖容器滚动（docker compose 的 --force-recreate 另行验证）"
+  ]
+}

@@ -15,16 +15,18 @@
     .\run.ps1 go              # Go vet + test -race
     .\run.ps1 verify          # 以上全跑（提交前必跑）
     .\run.ps1 smoke -Port 8878
+    .\run.ps1 e2e            # 真进程 E2E（离线；--SkipBrowser 跳过真浏览器那条）
     .\run.ps1 bench           # 离线压测三模式
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('doctor', 'test', 'quick', 'go', 'findings', 'smoke', 'start', 'stop', 'bench', 'verify', 'help')]
+    [ValidateSet('doctor', 'test', 'quick', 'go', 'findings', 'smoke', 'e2e', 'start', 'stop', 'bench', 'verify', 'help')]
     [string]$Command = 'help',
 
     [int]$Port = 8878,
-    [switch]$NoAuth
+    [switch]$NoAuth,
+    [switch]$SkipBrowser
 )
 
 $ErrorActionPreference = 'Stop'
@@ -114,6 +116,14 @@ try {
             }
         }
 
+        'e2e' {
+            Write-Step '真进程 E2E 验收（离线；起两个真服务进程，覆盖鉴权/守卫/metrics/route=auto/审计/优雅退出）'
+            $args2 = @('scripts/e2e_local.py', '--json-out', 'evidence/e2e-local.json')
+            if ($SkipBrowser) { $args2 += '--skip-browser' }
+            & python @args2
+            exit $LASTEXITCODE
+        }
+
         'start' {
             Write-Step "前台启动（port=$Port，Ctrl+C 退出）"
             $auth = @()
@@ -193,6 +203,10 @@ try {
                 if ($LASTEXITCODE -ne 0) { throw 'findings 校验失败' }
             }
             else { Write-Host 'WARN: 无 node，跳过 findings' -ForegroundColor Yellow }
+
+            Write-Step 'verify: 真进程 E2E（离线）'
+            & python scripts/e2e_local.py --json-out evidence/e2e-local.json
+            if ($LASTEXITCODE -ne 0) { throw 'E2E 验收失败（看 evidence/e2e-local.json 的 failed 项）' }
 
             Write-Host "`n全部通过 ✅" -ForegroundColor Green
         }
