@@ -2,6 +2,53 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [4.1.0] - 2026-11-01
+
+主题：**把治理从"某个后端实现"上提到"入口 + 路由层"**。
+v4.0.0 的提交信息声称做了这件事，但实测没做（三条 P0/P1 仍在），本版是真修。
+
+### 修复（实测复现 → 修 → 实测验证）
+
+- **P0 SSRF：配了任一额外后端时 `/solve` 的守卫被整体绕过**。守卫原先只在
+  `Solver.solve` 里，而配了 cfsolve/pydoll/flaresolverr 时 handler 走 router 分支根本不进该方法。
+  已实测复现（假 cfsolve 二进制收到 `--page http://127.0.0.1:.../health`）。
+  现在守卫在**选后端之前**执行一次，任何后端组合都拦得住；修复后同一实验里
+  该二进制**一次都没被启动**。
+- **P1 纯协议/pydoll/兜底后端"三不沾"**（不缓存 / 不准入 / 不进指标）。`BackendRouter`
+  新增 `governance=` 通道，由路由层统一施加缓存查询与写入、inflight 准入、按后端与按域计数。
+  实测：修复前第二次请求 `cached:false` 且 `/metrics` 全 0；修复后第二次 `cached:true`、
+  `solves=1 cache_hits=1`、`cfsolve_backend_total{backend="cfsolve",result="ok"} 1`。
+- **P1 `host_stats` 是死代码**：现在在每次后端调用后记录，并在 `/metrics` 暴露
+  top-20 的 `cfsolve_host_solves_total` / `cfsolve_host_failures_total`（截断防基数爆炸）。
+
+### 新增
+
+- **T-34 探测结果按域短 TTL 缓存**（默认 300s，`--detect-cache-ttl 0` 关闭；`fresh=1` 跳过）。
+  摊掉 `route=auto` 每次多出来的 ≈0.5s 出站。
+- **`cfsolve_backend_total{backend,result}` 指标**：能看出"哪个后端在退步"。
+- **`docs/项目规格.md`**（单一事实源：定位/拓扑/契约/配置全表/凭证模型/SLO/已知限制/决策索引）。
+- **`docs/部署-容器.md`**、**`docs/运维-压测与自检.md`**。
+- **`scripts/ab_persona.py`**：同站双臂 persona A/B（`scripts/verify_real.py` 是站点间对照，
+  归因力弱；本脚本让同一个站被两个臂各打一遍）。**强制 `force=true`**，否则第 2 次起命中
+  缓存，测到的就不是 persona 差异。
+- **`tests/test_governance.py`**（12 例）与 **`tests/test_acceptance_v41.py`**（10 例验收）。
+
+### 变更
+
+- `cfsolve_solves_total` 的口径修正为"真实发起的求解次数（含失败）"，与 HELP 文本一致。
+- `BackendRouter(backends, governance=...)`：不传时退化为纯路由（兼容旧用法）。
+- 盐文件创建的重试窗口从"20 轮 ≈0.5s"放宽到"墙钟 3s"，修复高负载下 6 进程并发首启偶发失败。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| Python 测试 | **279 passed** |
+| 覆盖率 | **81.39%**（门槛 80%） |
+| Go 测试 | 41 个 Test，`go vet` + `-race` 全绿 |
+| 治理实测 | 内网 URL 被入口拦住（后端 0 次调用）；纯协议第二次 `cached:true`；`/metrics` 与真实调用一致 |
+| 真机 A/B | 见 `plans/证据/v41-persona-ab.json`（同站双臂，预算内） |
+
 ## [4.0.1] - 2026-11-01
 
 补丁版：修掉 v4.0.0 首次真跑 CI 时暴露的 2 个跨平台缺陷（本机 Windows/py3.14 复现不出）。

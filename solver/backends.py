@@ -7,6 +7,12 @@
   · 有序列表 = 优先级：先试谁、跳过谁（未配置就 skip 而不是报错）、每个尝试过谁，
     都必须能回传出来（`attempts`），否则线上排查只能靠猜。
 
+v4.1 起路由层还负责**治理**（`governance=`）：缓存查询/写入、inflight 准入、
+按后端与按域的计数。为什么治理必须放在这里：除 Camoufox 以外的后端
+（cfsolve/pydoll/flaresolverr）都**不走 `Solver.solve`**，治理若只写在 `Solver.solve` 里，
+这些后端就会"不缓存、不准入、不进指标"——热路径命中率归零、能被打穿、指标还说一切正常
+（已实测复现）。
+
 刻意不做的事：
   · 不做权重/熔断/自适应调度 —— 那是当后端数量与流量都上来之后才谈的事；
     现在只有一两个后端时，有序列表 + 失败即换下一个就够了。
@@ -20,6 +26,7 @@ import json
 import time
 from enum import Enum
 from typing import Protocol
+from urllib.parse import urlsplit
 
 try:  # 包导入
     from .errors import ErrorCode, SolveError
@@ -304,14 +311,59 @@ class BackendRouter:
     继续试只会放大攻击面与负载。
     """
 
-    def __init__(self, backends: list[SolverBackend]) -> None:
+    def __init__(self, backends: list[SolverBackend], *, governance=None) -> None:
+        """`governance` 需提供 cache_lookup / remember / begin_backend_call / end_backend_call。
+
+        传 None 时退化为"纯路由"（只有 Camoufox 那一棒受 Solver 的治理）。
+        """
         if not backends:
             raise ValueError("至少需要一个后端")
         self._backends = backends
+        self._gov = governance
 
     @property
     def backends(self) -> list[str]:
         return [b.name() for b in self._backends]
+
+    def _governed_solve(self, backend, url: str, timeout: float, force: bool, **kwargs) -> dict:
+        """给"不走 Solver.solve"的后端套上统一治理。
+
+        三个动作必须成对，漏一个就会回归成 v4.0 的老毛病：
+          ① 先查缓存（命中直接返回，不启子进程/浏览器）
+          ② 拿 inflight 门票（拿不到立刻 BUSY，不做无界排队）
+          ③ 无论成败都 end_backend_call（否则门票泄漏 → 服务"莫名其妙全 busy"）
+        """
+        gov = self._gov
+        want = str(kwargs.get("want") or "clearance").lower()
+        cacheable = want in ("clearance", "awswaf")   # 一次性 token 绝不缓存（复用必失败）
+
+        if cacheable and not force:
+            hit = gov.cache_lookup(url)
+            if hit is not None:
+                hit.setdefault("backend", backend.name())
+                return hit
+
+        if not gov.begin_backend_call():
+            raise SolveError(
+                ErrorCode.BUSY, "并发求解数已达上限", stage="admit",
+                hint="降低并发或提高 --max-inflight；注意单进程只串行求解，调大只增加排队深度",
+            )
+
+        try:
+            host = urlsplit(url).hostname or ""
+        except Exception:  # noqa: BLE001
+            host = ""
+
+        started = time.monotonic()
+        try:
+            out = backend.solve(url, timeout=timeout, force=force, **kwargs)
+        except BaseException:
+            gov.end_backend_call(False, time.monotonic() - started, host=host, backend=backend.name())
+            raise
+        gov.end_backend_call(True, time.monotonic() - started, host=host, backend=backend.name())
+        if cacheable and isinstance(out, dict):
+            gov.remember(url, out)
+        return out
 
     def solve(self, url: str, timeout: float, force: bool = False, **kwargs) -> dict:
         attempts: list[dict] = []
@@ -331,7 +383,11 @@ class BackendRouter:
                 attempts.append({"backend": name, "skipped": True, "reason": "deadline-exhausted"})
                 continue
             try:
-                out = backend.solve(url, timeout=remaining, force=force, **kwargs)
+                if self._gov is not None and not isinstance(backend, CamoufoxBackend):
+                    # 非 Solver 后端：由路由层统一施加缓存 / 准入 / 计数
+                    out = self._governed_solve(backend, url, remaining, force, **kwargs)
+                else:
+                    out = backend.solve(url, timeout=remaining, force=force, **kwargs)
                 out.setdefault("backend", name)
                 out["attempts"] = attempts + [{"backend": name, "ok": True}]
                 return out

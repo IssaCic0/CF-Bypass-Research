@@ -23,8 +23,8 @@
 
 | ID | 内容 | 负责 | 状态 | 证据 |
 |---|---|---|---|---|
-| T-28 | 守卫/准入/指标上提到入口（所有后端共用） | 并行会话 | **DONE** | `solver/service.py`；`tests/test_detect.py::test_guard_hop_rejects_non_http_scheme_and_private_host` |
-| T-29 | 后端治理收口（共享 store/inflight/计数） | 并行会话 | **DONE** | `solver/backends.py`（+94 行）、`tests/test_backends.py`（+123 行） |
+| T-28 | 守卫/准入/指标上提到入口（所有后端共用） | 并行会话声称完成 → **v4.1 实测不成立，本会话真修** | **DONE（2026-11-01 23:xx 复验）** | 入口守卫：`service.py` do_POST 内 `_check_target`（选后端之前）；用例 `tests/test_acceptance_v41.py::test_internal_url_rejected_before_any_backend_runs`（4 种后端组合） |
+| T-29 | 后端治理收口（共享 store/inflight/计数） | 并行会话声称完成 → **v4.1 实测不成立，本会话真修** | **DONE（复验）** | `BackendRouter(governance=)` + `_governed_solve`；`tests/test_governance.py`（12 例）+ `test_acceptance_v41.py` 组 B |
 | T-30 | cfsolve/pydoll 真实 TTL 契约 | 并行会话 | **DONE** | `test_cfsolve_clearance_has_real_ttl` / `test_pydoll_clearance_has_real_ttl` |
 | T-31 | `/detect` 逐跳守卫 + 独立准入 + 非 http(s) 拒绝 + chunked 拒绝 | 并行会话 | **DONE** | `test_probe_blocks_redirect_to_guarded_host`、`test_detect_endpoint_returns_429_when_gate_is_full` |
 | T-35 | 超时预算分配（router 共享 Deadline） | 并行会话 | **DONE** | `test_router_shares_deadline_between_backends`、`test_router_stops_when_budget_is_exhausted` |
@@ -38,7 +38,7 @@
 |---|---|---|---|
 | **T-32** | `route=auto` 自动路由闭环（探测→决策→求解/skip/reject） | 本会话 | **DONE** | `solver/route.py`、`tests/test_route.py`（30 例）· `evidence/T-32.json` |
 | **T-33** | 失败原因分类（`classify_failure` + `should_escalate`） | 本会话 | **DONE（决策层）** | `solver/route.py`；升级阶梯的**执行**仍由既有 router 按顺序完成 |
-| T-34 | `/detect` 结果按 host 短 TTL 缓存 | 未做 | **TODO**（`route=auto` 目前每次都会探测一次，约 +0.5s） |
+| T-34 | `/detect` 结果按 host 短 TTL 缓存 | 本会话 | **DONE** | `--detect-cache-ttl`（默认 300s，0=关）；`fresh=1` 跳过；`tests/test_governance.py` 4 例 |
 | T-38 | 代理/出口绑定透传到 Go（`egress_test.go`） | 并行会话 | **DONE**（部分：客户端侧） |
 
 ### W3 缓存与观测
@@ -46,7 +46,7 @@
 | ID | 内容 | 负责 | 状态 | 证据 |
 |---|---|---|---|---|
 | **T-36** | 缓存层 SQLite(WAL) + FileStore 降级 | 本会话 | **DONE** | `solver/cache.py::SqliteStore`、`tests/test_cache_sqlite.py`（17 例）· `evidence/T-36.json` |
-| T-37 | 指标升级（阶段直方图/后端维度/按域统计） | 待做 | **PARTIAL**：`SqliteStore.record_solve/host_stats` 已就绪（数据源），`/metrics` 接线待做 |
+| T-37 | 指标升级（后端维度/按域统计/口径修正） | 本会话 | **DONE** | `/metrics` 新增 `cfsolve_backend_total{backend,result}`、`cfsolve_host_solves_total`（top-20 截断）；`solves_total` 口径改为"含失败" |
 | T-38 | 审计日志 | 待做 | **TODO** |
 
 ### W4 工程化
@@ -57,7 +57,7 @@
 | **T-40** | `scripts/loadtest.py`（hot/cold/share）+ `scripts/doctor.py` | **DONE** | 实跑数据见 §4 · `evidence/T-40.json` |
 | **T-41** | 统一入口 `run.ps1`/`run.bat` + Dockerfile/compose | **DONE（Docker 部分未验证）** | `run.ps1` 实跑通过；镜像未构建（本机 Docker daemon 未运行）· `evidence/T-41.json` |
 | **C3** | 删除研究产物 + 修 findings 证据链 | **DONE** | `node-shim/`、`go-jseng/`、`go-replay/` 已 `git rm`；`validate-findings.mjs` exit 0 |
-| C1/C2 | 文档纠偏 / `docs/项目规格.md` | **PARTIAL** | README + 索引已更新；`项目规格.md` 未建（见 §7 剩余风险） |
+| C1/C2 | 文档纠偏 / `docs/项目规格.md` | 本会话 | **DONE** | `docs/项目规格.md`（单一事实源）+ `docs/部署-容器.md` + `docs/运维-压测与自检.md` |
 | **T-42** | 发版 v4.0.0（tag + CHANGELOG + release） | **DONE** | 见 `git tag v4.0.0`、`CHANGELOG.md` |
 
 ---
@@ -66,8 +66,8 @@
 
 | 门禁 | 目标 | 实测 | 结论 |
 |---|---|---|---|
-| Python 全量测试 | 0 failed | **227 passed** | ✅ |
-| Python 覆盖率 | ≥80%（service.py ≥70%） | **80.47%**（service.py **73%**） | ✅ |
+| Python 全量测试 | 0 failed | **279 passed** | ✅ |
+| Python 覆盖率 | ≥80%（service.py ≥70%） | **81.39%**（service.py 75%） | ✅ |
 | Go 测试 | 0 failed 且 `-race` | **41 个 Test 全过，-race 绿** | ✅ |
 | Go 静态检查 | `go vet` 无输出 | 无输出 | ✅ |
 | Python 语法 | compileall 退出 0 | 0 | ✅ |
@@ -101,6 +101,17 @@
 | V15 | **GitHub Actions 真跑（修复后）** | **全绿**：`go` ✓ · `python (3.11)` ✓ · `python (3.12)` ✓ · `findings 一致性` ✓（run 41317345648，conclusion=success） |
 
 ---
+
+## 4.5 修正记录（撤回"假 Done"，必须留痕）
+
+| 时间 | 撤回项 | 原依据 | 实测反证 |
+|---|---|---|---|
+| 2026-11-01 22:4x | T-28 完成 | 并行会话 commit message「守卫上提到入口」 | `_check_target` 全仓仍只有 2 个调用点；配 `--cfsolve-bin` 后假二进制实收内网 URL |
+| 2026-11-01 22:4x | T-29 完成 | 同上 | `BackendRouter.__init__(backends)` 不接治理对象；实测 `solves=0`、第二次 `cached:false` |
+| 2026-11-01 22:4x | T-37 部分完成 | 代码里存在 `host_stats` | 无任何调用点（死代码） |
+
+**根因**：把并行会话的提交信息当成事实，且验收用例 F5（"任意后端组合下内网 URL 一律被拒"）
+从未被写出来 —— 没有红灯，就没被发现。**修法**：红灯先行 + 只信实测。
 
 ## 5. 本轮新发现并修复的缺陷（进 ICM 与 findings）
 

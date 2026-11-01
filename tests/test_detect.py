@@ -171,6 +171,16 @@ class _StubSolver:
     def probe_user_agent(self):
         return "stub-ua"
 
+    # T-34 的探测结果缓存（按域短 TTL）。替身默认不缓存：
+    # 这两条用例要验证的是"准入闸门"与"逐跳守卫"本身，
+    # 缓存命中会绕过闸门（这是正确的产品行为：命中不发任何出站请求，
+    # 没必要占探测额度），但会让这里测不到闸门，所以替身直接返回未命中。
+    def detect_cache_get(self, url):
+        return None
+
+    def detect_cache_put(self, url, result):
+        return None
+
 
 def _serve_handler():
     import threading

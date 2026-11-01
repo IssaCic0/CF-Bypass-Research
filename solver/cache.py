@@ -527,23 +527,33 @@ def _load_or_create_salt(path: str) -> bytes:
     if salt is not None:
         return salt
 
-    for attempt in range(20):
+    # 总等待窗口给到 ~3s：机器在高负载下（比如同时跑压测）6 个进程抢盐时，
+    # 原先 20 次 × 最长 50ms ≈ 0.5s 的窗口会偶发耗尽，表现为"并发首启偶发失败"。
+    deadline = time.monotonic() + 3.0
+    attempt = 0
+    while True:
+        attempt += 1
+        if attempt > 200 or time.monotonic() > deadline:
+            break
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
             # 别人正在写（或已写好）：等一小会儿再读
-            time.sleep(min(0.002 * (attempt + 1), 0.05))
+            time.sleep(min(0.002 * attempt, 0.05))
             salt = _read_salt(path)
             if salt is not None:
                 return salt
-            # 占位文件存在但内容为空且停留过久 ⇒ 对端在 open 与 write 之间崩了。
-            # 这种"半成品盐"会让服务永远起不来，所以允许晚到的进程清理后重试。
-            if attempt >= 10:
+            # 占位文件存在但内容为空、且已经空转了一段时间 ⇒ 对端在 open 与 write 之间崩了。
+            # 这种"半成品盐"会让服务永远起不来，所以允许晚到的进程清理后重试；
+            # 但必须用**墙钟**判断（而不是轮次），否则慢机器上会把对端正在写的文件删掉。
+            if time.monotonic() > deadline - 1.0:
                 try:
                     if os.path.getsize(path) == 0:
                         os.unlink(path)
                 except OSError:
                     pass
+                deadline = time.monotonic() + 3.0     # 清理后重新给一个窗口
+                attempt = 0
             continue
         except OSError:
             # 目录都不可写：交给上层降级（build_store 会捕获并说明原因）

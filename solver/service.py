@@ -165,6 +165,19 @@ DNS_CACHE_MAX = 2048
 #: 延迟直方图分桶（秒），用于 /metrics
 LATENCY_BUCKETS = (1.0, 3.0, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0)
 
+#: `/detect` 结果的按域缓存 TTL（秒）。默认 5 分钟。
+#: 为什么需要：`route=auto` 每次求解都会先探测一次（约 +0.5s 出站）。
+#: 同一批任务往往反复打同一批域，缓存能把这 0.5s 摊掉；但探测结论会随 CF 改版变化，
+#: 所以 TTL 必须短且可关（`--detect-cache-ttl 0` = 关闭）。
+DETECT_CACHE_TTL = 300.0
+#: 探测缓存的条目上限：域名是调用方可控输入，必须封顶。
+DETECT_CACHE_MAX = 256
+
+#: `/metrics` 里按域指标只保留前 N 个域。
+#: 域名是**调用方可控输入**，直接当标签用会让 Prometheus 的基数失控（几万个 series），
+#: 这是"加了指标反而把监控系统打挂"的典型方式。
+HOST_METRICS_TOP_N = 20
+
 #: CGNAT 段（Python 的 `is_private` 不覆盖它，但它在实践中就是内网）
 _CGNAT = ipaddress.ip_network("100.64.0.0/10")
 
@@ -426,6 +439,7 @@ class Solver:
         cache_max_files: int = 4096,
         proxy_pool: ProxyPool | None = None,
         browser_os: str = "",
+        detect_cache_ttl: float = DETECT_CACHE_TTL,
     ) -> None:
         self.ttl = max(MIN_TTL, int(ttl))
         self.egress_id = egress_id or "default"
@@ -474,10 +488,20 @@ class Solver:
         self._failures = 0
         self._timeouts = 0
         self._rejected_busy = 0
+        # 按后端的成功/失败计数（`cfsolve_backend_total{backend,result}`）。
+        # 为什么单列：`solves_total` 原来的 HELP 写"含失败"但实现只数成功，
+        # 而 router 路径连成功都不数 —— 两处口径都对不上，运维没法定位"哪个后端在退步"。
+        self._backend_ok: dict[str, int] = {}
+        self._backend_err: dict[str, int] = {}
         self._elapsed_sum = 0.0
         self._hist = [0] * len(LATENCY_BUCKETS)
 
         self._dns_cache: dict[str, tuple[float, str]] = {}
+        # 探测结果按域短 TTL 缓存（见 DETECT_CACHE_TTL 的说明）
+        self._detect_cache: dict[str, tuple[float, dict]] = {}
+        # 允许 0 = 关闭（运维有时要每次都看实时探测结论）
+        self.detect_cache_ttl = max(0.0, float(detect_cache_ttl))
+        self.detect_cache_hits = 0
 
         self._thread = threading.Thread(target=self._worker, name="cfsolve-worker", daemon=True)
         self._thread.start()
@@ -767,6 +791,112 @@ class Solver:
     def _entry_for(self, host: str):
         """该域粘住的代理出口；没有代理池时返回 None。"""
         return self._pool.for_host(host) if self._pool is not None else None
+
+    # -- 供 BackendRouter 使用的治理接口 ----------------
+    #
+    # 为什么需要这一组：治理（缓存/准入/计数/按域统计）原来只写在 `solve()` 里，
+    # 而 `BackendRouter` 的其它后端（cfsolve / pydoll / flaresolverr）根本不走 `solve()`，
+    # 于是它们既不进缓存、也不受 inflight 约束、还不进任何指标 —— 一个"热路径命中率
+    # 归零 + 能被打穿 + 指标说一切正常"的组合。治理必须绑在**入口/路由**，不能绑在某个实现上。
+
+    def cache_lookup(self, url: str) -> dict | None:
+        """按「域名+出口」查缓存，命中则返回可直接对外返回的 dict（含 cached=True）。"""
+        host = _host_of(url)
+        if not host:
+            return None
+        entry = self._entry_for(host) if self._pool is not None else None
+        if self._pool is not None and entry is None:
+            return None                      # 所有出口都在冷却：当作未命中，交给上层报 busy
+        try:
+            cached = self._store.get(self.cache_key(host, entry))
+        except Exception:  # noqa: BLE001 —— 缓存坏了不该打断求解
+            return None
+        if not cached or float(cached.get("expires_at", 0) or 0) <= _now():
+            return None
+        with self._lock:
+            self._hits += 1
+        hit = dict(cached)
+        hit.update({"ok": True, "solved": True, "cached": True, "elapsed": 0.0})
+        return hit
+
+    def remember(self, url: str, result: dict) -> None:
+        """把后端产出的凭证写进缓存（只在 TTL 有效时写；TTL=0 写进去等于每次重解）。"""
+        host = _host_of(url)
+        if not host or not isinstance(result, dict):
+            return
+        if float(result.get("expires_at", 0) or 0) <= _now():
+            return
+        entry = self._entry_for(host) if self._pool is not None else None
+        try:
+            self._store.set(self.cache_key(host, entry), result, host=host,
+                            backend=str(result.get("backend") or ""))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def begin_backend_call(self) -> bool:
+        """路由侧后端调用的准入门票；拿不到就立刻 429，不做无界排队。"""
+        return self._inflight.acquire(blocking=False)
+
+    def end_backend_call(self, ok: bool, elapsed: float, host: str = "", backend: str = "") -> None:
+        """归还准入门票 + 记账（次数、耗时分布、按后端、按域）。"""
+        try:
+            self._inflight.release()
+        except ValueError:               # 释放次数多于获取（调用方写错）：不放大成 500
+            pass
+        with self._lock:
+            self._solves += 1            # 统一口径：真实求解次数（含失败）
+            self._elapsed_sum += elapsed
+            if not ok:
+                self._failures += 1
+                if backend:
+                    self._backend_err[backend] = self._backend_err.get(backend, 0) + 1
+            elif backend:
+                self._backend_ok[backend] = self._backend_ok.get(backend, 0) + 1
+            for i, edge in enumerate(LATENCY_BUCKETS):
+                if elapsed <= edge:
+                    self._hist[i] += 1
+                    break
+        # 按域统计（只放计数，不放凭证）；SqliteStore 才有，其它实现静默跳过
+        if host:
+            record = getattr(self._store, "record_solve", None)
+            if callable(record):
+                try:
+                    record(host, ok)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def detect_cache_get(self, url: str) -> dict | None:
+        """取探测缓存（未命中/已过期返回 None）。"""
+        if self.detect_cache_ttl <= 0:
+            return None
+        host = _host_of(url)
+        if not host:
+            return None
+        with self._lock:
+            entry = self._detect_cache.get(host)
+            if entry is None:
+                return None
+            expire_at, value = entry
+            if expire_at <= _now():
+                self._detect_cache.pop(host, None)
+                return None
+            self.detect_cache_hits += 1
+        cached = dict(value)
+        cached["cached"] = True
+        return cached
+
+    def detect_cache_put(self, url: str, result):  # noqa: ANN001
+        """写探测缓存（超过上限按**最早过期**淘汰，与缓存层的语义保持一致）。"""
+        if self.detect_cache_ttl <= 0 or not isinstance(result, dict):
+            return
+        host = _host_of(url)
+        if not host:
+            return
+        with self._lock:
+            if len(self._detect_cache) >= DETECT_CACHE_MAX and host not in self._detect_cache:
+                oldest = min(self._detect_cache.items(), key=lambda kv: kv[1][0])[0]
+                self._detect_cache.pop(oldest, None)
+            self._detect_cache[host] = (_now() + self.detect_cache_ttl, dict(result))
 
     def cache_remaining(self, url: str) -> float:
         """这条凭证还能用多久（秒）；没有缓存或出口都在冷却时返回 -1。
@@ -1398,8 +1528,13 @@ class Solver:
         with self._lock:
             q = self._tasks.qsize()
             alive = 1 if self._browser_alive else 0
+            ok_map = dict(self._backend_ok)
+            err_map = dict(self._backend_err)
             lines = [
-                "# HELP cfsolve_solves_total 真实求解次数（含失败）",
+                # 口径修正：`_solves` 只在**真正发起过一次后端调用**时 +1（含失败），
+                # 而原始 HELP 写"含失败"、实现却只在成功路径 +1 —— 这类"指标说谎"
+                # 比没有指标更坏，因为它会让人相信系统是健康的。
+                "# HELP cfsolve_solves_total 真实发起的求解次数（含失败）",
                 "# TYPE cfsolve_solves_total counter",
                 f"cfsolve_solves_total {self._solves}",
                 "# HELP cfsolve_cache_hits_total 缓存命中次数",
@@ -1432,6 +1567,42 @@ class Solver:
                 lines.append(f'cfsolve_solve_seconds_bucket{{le="{edge:g}"}} {cumulative}')
             lines.append(f'cfsolve_solve_seconds_bucket{{le="+Inf"}} {self._solves}')
             lines.append(f"cfsolve_solve_seconds_sum {round(self._elapsed_sum, 3)}")
+
+            # 按后端：定位"哪一棒在退步"。没有它，多后端只是黑盒。
+            lines += [
+                "# HELP cfsolve_backend_total 按后端的调用结果计数",
+                "# TYPE cfsolve_backend_total counter",
+            ]
+            for name in sorted(set(ok_map) | set(err_map)):
+                if ok_map.get(name):
+                    lines.append(f'cfsolve_backend_total{{backend="{name}",result="ok"}} {ok_map[name]}')
+                if err_map.get(name):
+                    lines.append(f'cfsolve_backend_total{{backend="{name}",result="error"}} {err_map[name]}')
+
+            # 按域：只取 top-N，防止标签基数爆炸（域名是不可控输入，绝不能直接当标签用全量）
+            host_stats = getattr(self._store, "host_stats", None)
+            if callable(host_stats):
+                try:
+                    rows = host_stats(HOST_METRICS_TOP_N)
+                except Exception:  # noqa: BLE001
+                    rows = []
+                if rows:
+                    lines += [
+                        "# HELP cfsolve_host_solves_total 按域求解次数（仅 top-N，其余丢弃以防基数爆炸）",
+                        "# TYPE cfsolve_host_solves_total counter",
+                    ]
+                    for row in rows:
+                        host = str(row.get("host") or "")
+                        if host:
+                            lines.append(f'cfsolve_host_solves_total{{host="{host}"}} {int(row.get("solves") or 0)}')
+                    lines += [
+                        "# HELP cfsolve_host_failures_total 按域失败次数（仅 top-N）",
+                        "# TYPE cfsolve_host_failures_total counter",
+                    ]
+                    for row in rows:
+                        host = str(row.get("host") or "")
+                        if host:
+                            lines.append(f'cfsolve_host_failures_total{{host="{host}"}} {int(row.get("failures") or 0)}')
             lines.append(f"cfsolve_solve_seconds_count {self._solves}")
         return "\n".join(lines) + "\n"
 
@@ -1577,6 +1748,16 @@ class Handler(BaseHTTPRequestHandler):
                     ErrorCode.INVALID_REQUEST, f"want={want_enum.value} 需要 sitekey", stage="validate",
                     hint="从页面源码里取 data-sitekey，或 reCAPTCHA 的 api.js?render=<sitekey>",
                 )
+            # ── 入口 SSRF 守卫：**与后端无关**（v4.1）──────────────
+            # 守卫原来只写在 Solver.solve() 里，而配了 cfsolve/pydoll/flaresolverr 时
+            # handler 走 router 分支、根本不进 Solver.solve —— 于是整条守卫被绕过，
+            # 已实测复现（假 cfsolve 二进制收到了 --page http://127.0.0.1:.../health）。
+            # 正确做法：守卫在**选后端之前**执行一次，任何后端组合都拦得住。
+            entry_host = _host_of(url)
+            if not entry_host:
+                raise SolveError(ErrorCode.INVALID_REQUEST, f"无法解析域名: {url}", stage="validate")
+            self.solver._check_target(entry_host)
+
             # ── route：让探测结论驱动决策（v4.0 T-32）──────────────
             # 不传 route 等价于 fixed，行为与 v3 完全一致（向后兼容的第一优先级）。
             route_mode = req.get("route", "fixed")
@@ -1658,7 +1839,8 @@ class Handler(BaseHTTPRequestHandler):
         from urllib.parse import parse_qs, urlsplit as _split
 
         query = parse_qs(_split(self.path).query)
-        self._run_detect((query.get("url") or [""])[0])
+        fresh = (query.get("fresh") or ["0"])[0].strip().lower() in ("1", "true", "yes")
+        self._run_detect((query.get("url") or [""])[0], fresh=fresh)
 
     def _handle_detect(self, raw: bytes, body_error: str) -> None:
         """探测目标站用的是什么防护；**不做求解**，只发一次普通 GET。
@@ -1670,7 +1852,8 @@ class Handler(BaseHTTPRequestHandler):
             if body_error:
                 raise SolveError(ErrorCode.INVALID_REQUEST, body_error, stage="validate")
             payload = Handler._parse_json(raw) if raw else {}
-            self._run_detect(str(payload.get("url") or ""))
+            fresh = bool(payload.get("fresh"))
+            self._run_detect(str(payload.get("url") or ""), fresh=fresh)
             return
         except SolveError as e:
             self._send(e.http_status, e.payload())
@@ -1688,6 +1871,11 @@ class Handler(BaseHTTPRequestHandler):
             变成"每个 solve 都免费多打一次出站请求"的放大器；
           · 探测**不许**绕过 SSRF 守卫：逐跳 guard 由 probe_protection 负责，这里传同一个守卫。
         """
+        # 先查探测缓存：命中就不发出站请求，也不再占探测闸门
+        hit = self.solver.detect_cache_get(url)
+        if hit is not None:
+            return hit
+
         gate = getattr(self.solver, "detect_inflight", None)
         got_slot = False
         if gate is not None:
@@ -1699,7 +1887,9 @@ class Handler(BaseHTTPRequestHandler):
                 budget = max(2.0, min(8.0, float(timeout)))
             except (TypeError, ValueError):
                 budget = 8.0
-            return probe_protection(url, timeout=budget, guard=self.solver.guard_hop)
+            result = probe_protection(url, timeout=budget, guard=self.solver.guard_hop)
+            self.solver.detect_cache_put(url, result)
+            return result
         except SolveError:
             return None
         except Exception:  # noqa: BLE001 —— 探测永远不该让求解路径 500
@@ -1708,8 +1898,10 @@ class Handler(BaseHTTPRequestHandler):
             if got_slot:
                 gate.release()
 
-    def _run_detect(self, url: str) -> None:
+    def _run_detect(self, url: str, fresh: bool = False) -> None:
         """两种入口（GET 查询串 / POST JSON）共用的探测实现。
+
+        `fresh=True` 表示跳过 T-34 的按域短 TTL 缓存（运维想立刻看实时结论时用）。
 
         与 `/solve` 同等的两道治理，缺一不可：
           · **准入**：独立信号量，满了立刻 429。探测是同步出站请求，
@@ -1728,6 +1920,11 @@ class Handler(BaseHTTPRequestHandler):
             if not host:
                 raise SolveError(ErrorCode.INVALID_REQUEST, f"无法解析域名: {url}", stage="validate")
             self.solver._check_target(host)          # 入口：严格校验（解析不了=调用方写错）
+            if not fresh:
+                hit = self.solver.detect_cache_get(url)
+                if hit is not None:
+                    self._send(200, hit)
+                    return
             if not self.solver.detect_inflight.acquire(blocking=False):
                 raise SolveError(
                     ErrorCode.BUSY,
@@ -1736,9 +1933,11 @@ class Handler(BaseHTTPRequestHandler):
                     hint="降低 /detect 并发，或调大 --max-detect；探测与求解额度分开计",
                 )
             got_slot = True
-            self._send(200, probe_protection(
+            result = probe_protection(
                 url, guard=self.solver.guard_hop, user_agent=self.solver.probe_user_agent()
-            ))
+            )
+            self.solver.detect_cache_put(url, result)      # T-34：按域短 TTL 缓存
+            self._send(200, result)
         except SolveError as e:
             self._send(e.http_status, e.payload())
         except Exception as e:  # noqa: BLE001
@@ -1798,6 +1997,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--headed", action="store_true", help="有头模式（调试用）")
     ap.add_argument("--max-queue", type=int, default=DEFAULT_MAX_QUEUE, help="有界队列容量，满即 429")
     ap.add_argument("--max-inflight", type=int, default=DEFAULT_MAX_INFLIGHT, help="并发求解上限，满即 429")
+    ap.add_argument("--detect-cache-ttl", type=float, default=DETECT_CACHE_TTL,
+                    help="探测结果（/detect 与 route=auto）按域缓存的 TTL（秒）；0=关闭")
     ap.add_argument("--max-detect", type=int, default=DEFAULT_MAX_DETECT,
                     help="并发探测（/detect）上限，满即 429；与求解额度分开计")
     ap.add_argument("--egress-id", default=os.environ.get("CF_EGRESS_ID", "default"),
@@ -1892,6 +2093,7 @@ def main(argv: list[str] | None = None) -> int:
         cache_max_files=args.cache_max_files,
         proxy_pool=pool,
         browser_os=args.browser_os,
+        detect_cache_ttl=args.detect_cache_ttl,
         browser_factory=None if engine_enum is Engine.CAMOUFOX else build_engine_factory(
             engine_enum, os_persona=args.browser_os
         ),
@@ -1917,7 +2119,9 @@ def main(argv: list[str] | None = None) -> int:
     backends.append(CamoufoxBackend(solver))
     if args.flaresolverr:
         backends.append(FlareSolverrBackend(args.flaresolverr))
-    Handler.router = BackendRouter(backends) if len(backends) > 1 else None
+    # 把 solver 作为治理对象交给 router：缓存/准入/计数/按域统计对**所有后端**生效，
+    # 而不是只对"恰好走了 Solver.solve 的那一棒"生效。
+    Handler.router = BackendRouter(backends, governance=solver) if len(backends) > 1 else None
     solver.backend_chain = list(Handler.router.backends) if Handler.router else ["camoufox"]
 
     try:
