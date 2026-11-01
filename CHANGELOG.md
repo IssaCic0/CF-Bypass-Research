@@ -2,6 +2,27 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [4.0.1] - 2026-11-01
+
+补丁版：修掉 v4.0.0 首次真跑 CI 时暴露的 2 个跨平台缺陷（本机 Windows/py3.14 复现不出）。
+v4.0.0 的 tag 保持不动（不改写已发布引用），发布方式为 patch 递增。
+
+### 修复
+
+- **`Prewarmer` 覆盖了 `threading.Thread._stop` 私有方法**：`self._stop = threading.Event()`
+  顶替掉线程收尾时会被调用的 `Thread._stop()`，在 Python 3.12 上抛
+  `TypeError: 'Event' object is not callable`，导致保活线程永远 join 不掉。
+  改为 `_stop_event`（私有属性，无对外影响）。
+- **`test_filestore_corrupt_file_*` 弄坏了错的对象**：用 `glob("*.bin")` 取"要弄坏的文件"，
+  而 `salt.bin` 也匹配；Linux 目录序先返回 `salt.bin`，于是用例实际在破坏盐而非缓存条目。
+  改用已有的 `cache_files()` 助手（显式排除盐）。
+
+### 验证
+
+- GitHub Actions **全绿**：`go`（vet + test -race）/ `python 3.11` / `python 3.12` / `findings 一致性`
+  （run `41317345648`，conclusion=success）
+- 本机：257 项 Python 测试 + 覆盖率 81.03%；41 项 Go 测试；findings exit 0
+
 ## [4.0.0] - 2026-11-01
 
 主题：**路由闭环 · 治理收口 · 缓存与观测升级**。
