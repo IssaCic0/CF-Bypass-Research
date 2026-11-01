@@ -123,6 +123,10 @@
 | V34 | **镜像瘦身** | 4.63GB → **3.27GB**（SLIM_FONTS=1），容器 10s 就绪 + /detect 200（必须验活，BuildKit 缓存曾给出无浏览器镜像） |
 | V35 | **真机预算 60/60 用尽** | patreon skip 1.2s；epicgames solve 8.7s/462B；epicgames 回放 403（脚本 TLS/头部不一致，未判为服务缺陷） |
 | V36 | **service.py 拆分第一步** | 2452 → 2310 行；拆出 probe.py(135)/auth.py(77)，原样再导出，297 测试全绿 |
+| V37 | **独立审查第 1 轮** | `claude -p` 独立进程 → **Request Changes**：P1 `_account` 双计、P1 claims 泄漏 3 条路径、P2 `/shutdown` 拒绝无响应、P2 cfsolve expires 矛盾、P2 锁注释不符 |
+| V38 | **修复 + 回归用例** | 4 处修复全部带"改前必红"用例（300→302 测试，覆盖率 81.98%） |
+| V39 | **独立审查第 2 轮复验** | **Approve**（4 FIXED + 1 PARTIAL + 4 P3）；PARTIAL 与 2 条 P3 也已修 |
+| V40 | **回放一致性（Go 客户端，同 IP）** | epicgames：带凭证 **301/challenge_page=false**，不带凭证 **403** ⇒ 凭证有效、CF 已过；此前脚本 403 是客户端头部/域名不匹配，**不是 TLS 指纹、也不是 IP 提分** |
 
 ---
 

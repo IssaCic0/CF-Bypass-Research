@@ -356,6 +356,10 @@ class BackendRouter:
                         return peer
 
         if not gov.begin_backend_call():
+            if claimed:
+                release = getattr(gov, "release_claim_for", None)
+                if callable(release):
+                    release(url)          # 准入被拒也要放行抢占，否则对端要白等 TTL
             raise SolveError(
                 ErrorCode.BUSY, "并发求解数已达上限", stage="admit",
                 hint="降低并发或提高 --max-inflight；注意单进程只串行求解，调大只增加排队深度",

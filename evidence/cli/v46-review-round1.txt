@@ -1,0 +1,70 @@
+# 独立代码审查 · 第 1 轮（Verdict: Request Changes）
+
+> 审查方式：**独立进程** `claude -p`（全新上下文、只读工具 Read/Grep/Glob，不继承主控推理）。
+> 这是本会话里第一个真正返回 Verdict 的独立审查；此前 4 次同族子代理尝试均未返回结论。
+> 原始输出见本文件；修复与复验见 `evidence/cli/v46-review-round2.txt`。
+
+---
+
+## Q5 Handler.inflight 计数是否可能只加不减
+
+**REFUTED** — `service.py:2070-2083`
+
+`_track_inflight` 是唯一入口，`enter` 在 try 之前、`exit` 在 `finally`，`do_GET`/`do_POST` 的一切异常（含 `_read_body_raw` 的 socket 超时、`_handle_shutdown` 的未捕获 raise）都必然经过 `finally`；不存在"只加不减"的调用点。两个小瑕疵：`drain()`（`2052-2063`）读 `inflight_requests` 不加锁（只影响"可能多等一轮 20ms"）；`exit_request`（`1622-1624`）无下限保护，将来若有人重复 exit 会变负、让 drain 立刻返回 0（当前无此调用点）。
+
+---
+
+## Q6 `--allow-remote-shutdown` 的风险是否被文档说清
+
+**PARTIAL** — `service.py:1885-1893` / `docs/API.md:328`
+
+**风险本身写清了**：`docs/项目规格.md:90` 明确"开了之后任何拿到 token 的人都能停服——token 是唯一门"；`docs/API.md:328-329`、`--help`（`2095-2096`）、`docker-compose.yml:22-25` 都解释了容器必须开 flag 的理由（客户端是 docker 网关）。
+
+**但文档声称的行为与代码不符**：`docs/API.md:328` 写"跨机触发会 401"，而 `_handle_shutdown` 在 `do_POST` 的 `try`（`1737`）**之外**被调用（`1722-1724`），来源判定失败时 `1885-1893` 的 `raise SolveError` 无人捕获 → `_track_inflight` 只有 `finally` → `socketserver.handle_error` 打印 traceback 后直接关连接。**调用方拿到的是"无响应/连接被重置"，不是 401**，请求契约与证据（`evidence/v44-container.md:38` 记录过实测 401）都漂移了。另：`--allow-remote-shutdown` × `--no-auth` 这一组合（来源门打开、token 门关闭 = 任何人能停服）未在任何文档被点名。
+
+证据等级：`静态确认`（控制流可读死；本想跑真实 repro，环境未授予写临时脚本的权限）。
+
+---
+
+## Q7 有没有裸 except 吞错 / TODO 占位 / 假实现
+
+**REFUTED（无裸 except / 无 TODO / 无假实现），但有一处真缺陷** — `solver/cfsolve_backend.py:179`
+
+- `grep` 全 `solver/`：**0 处裸 `except:`**、0 处 `TODO/FIXME/XXX`、0 处 `NotImplementedError`。所有 `except Exception` 都带 `# noqa: BLE001` + 一句为什么，多数还配了留痕（`_note_error`，如 `1142` 的 ws 守卫不可用）或计数，不属于"吞错"。
+- `ErrorCode.RATE_LIMITED` 被显式标注"**预留值：当前没有按 host 限流，不会产生**"（`solver/errors.py:28`），是诚实占位而非假实现。
+- **真缺陷**：`cfsolve_backend.py:179` 一次性 token 分支返回 `"expires_in": 300, "expires_at": 0.0`，同一响应自相矛盾，且直接违反 `backends.py:55-58` 自己写下的不变量（"`expires_at = 0` 会让 Go 侧 `expiresAt()` 立刻判过期"）；`camoufox`（`service.py:1371` `now+NOMINAL_TTL`）与 `pydoll`（`212-213`）都给了真实值，只有这一条没有。
+
+---
+
+## Q8 有没有明显的安全问题（SSRF / 鉴权 / 凭证泄漏）
+
+**PARTIAL（无高危，有一处契约缺口）** — `service.py:1041-1166` / `service.py:1667-1675`
+
+**SSRF 做得比一般实现细**：入口 `_check_target`（`1234`、`1785`，且在**选后端之前**执行）+ 浏览器内**每个真实请求**复核（`1041-1166`，含子资源/iframe 区分与 WebSocket 独立守卫）+ 探测逐跳 `guard_hop`（`621-659`，非 http(s)/缺主机/私网三态），拦截安装失败 `fail closed`（`1123-1133`），chunked 走私入口已关（`2018-2020`）。残余：`getaddrinfo` 判定与浏览器自行解析是典型 TOCTOU，rebinding 窗口存在，被"每请求复核 + 只做正缓存"压小，属可接受并已被注释承认。
+
+**鉴权/凭证无泄漏**：`secrets.compare_digest`（`1675`）；token 32 字节 urlsafe + `O_CREAT|O_EXCL` + 0600（`auth.py:45-72`），日志只打 SHA256 指纹；代理凭据脱敏后进 `/health`、错误消息显式剥离凭据（`1272-1278`）；审计白名单字段（`1647`）；缓存 Fernet 加密 + 目录 700/文件 600（`cache.py:626-637`）。子进程后端是 list 传参、无 `shell=True`（`cfsolve_backend.py:111`），URL 前缀已校验，不存在参数注入。
+
+**缺口**：非回环 `/shutdown` 的拒绝路径没有响应体（见 Q6），对外契约与文档不一致；`--no-auth` 时 `_authorized()` 恒真（`1669-1671`），`/health` 会返回含 `last_error`（可能带内网主机名）/代理/域数的完整视图——仅影响显式 `--no-auth` 部署。
+
+---
+
+## 附带发现（按严重度）
+
+| 级别 | 位置 | 问题 |
+|---|---|---|
+| **P1** | `service.py:1321` vs `1331`/`1359` | 同一次求解被记两次，失败请求显示 50% 成功率（Q4） |
+| **P1** | `service.py:1262→1284`、`1272-1278`、`1300`；`backends.py:350→358` | claim 泄漏三条路径，泄漏期内同域请求每次多等 10s，最长 120s |
+| **P2** | `service.py:1885-1893` + `1722-1724` | 来源拒绝抛在 `try` 外 → 无 HTTP 响应（traceback + 断连），与 `docs/API.md:328` 的 401 不符 |
+| **P2** | `cache.py:311` vs `360-511` | "一把 RLock 串行化"名不副实，读路径全不取锁（靠 pysqlite 内部锁兜底） |
+| **P2** | `cfsolve_backend.py:179` | 一次性 token 响应里 `expires_in=300` 与 `expires_at=0.0` 自相矛盾 |
+| **P3** | `service.py:706` | claim TTL ≤ 求解时长上限，长尾求解时跨进程去重失效（重复解一次） |
+| **P3** | `service.py:421-430` | `_serve` 外层无 `except`，一旦其自身抛出（`_is_connected`/队列之外的新代码）线程即永久死亡，"自愈"失效，只能靠 `/health` 显示 degraded |
+| **P3** | `cache.py:474-481` | `release_claim` 按 key 删、不校验 owner |
+
+---
+
+## Verdict: **Request Changes**
+
+修完 2 个 P1（`_account` 双计、claim 泄漏）即可 Approve。P2 中 `/shutdown` 拒绝路径（3 行 try/except）与 `cfsolve` 的 `expires_at` 建议同批带上——前者是文档承诺的对外契约，后者是同一个 bug 在第四个后端上复发（仓库自己的注释已警告过三次）。分层缓存/准入/记账的整体设计（治理绑在路由而非某个实现、唯一记账入口、fail-closed 守卫）方向正确，Q1/Q3/Q5/Q7 的主体经得起审查。
+
+[exited with code 0]

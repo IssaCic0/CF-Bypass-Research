@@ -308,8 +308,13 @@ class SqliteStore:
         thread-local 等于"每条 TCP 连接开一条 SQLite 连接"（WAL 下 3 个文件句柄），
         连接对象随线程死亡后句柄并不总被及时释放 —— 实测 1 小时泄漏 1308 个句柄。
 
-        为什么可以共享：本层只做毫秒级小读写，一把 RLock 串行化足够；
-        跨进程并发由 WAL + busy_timeout 处理（那是另一层问题）。
+        关于并发（独立审查 P2 指出原注释名不副实，已改正）：
+          · **写路径**（set/delete/try_claim/release_claim/purge/record_solve）走 `_conn_lock`，
+            同一进程内串行化，避免多线程同时写同一条连接；
+          · **读路径**（get/items/__len__/stats/host_stats）**不取锁** —— 只读，
+            并发安全由 `sqlite3` 自身（`check_same_thread=False` + 单连接内部互斥）保证；
+            代价是"读与写在连接级别仍会互斥"，这是 pysqlite 的既有行为；
+          · 跨进程并发由 WAL + busy_timeout 处理（那是另一层问题）。
         """
         import sqlite3
 
@@ -407,10 +412,16 @@ class SqliteStore:
             self._prune(conn)
 
     def delete(self, key: str) -> None:
+        """删除一条（**写**操作，走锁）。
+
+        注意 `get()` 在"过期/解密失败"时也会调它 —— 那是无锁读路径里的一次写，
+        所以这里必须自己加锁（RLock 可重入，不会因为调用方恰好持锁而死锁）。
+        """
         try:
-            conn = self._conn()
-            conn.execute("DELETE FROM entries WHERE key = ?", (key,))
-            conn.commit()
+            with self._conn_lock:
+                conn = self._conn()
+                conn.execute("DELETE FROM entries WHERE key = ?", (key,))
+                conn.commit()
         except Exception:  # noqa: BLE001
             pass
 
@@ -434,10 +445,11 @@ class SqliteStore:
 
     def purge_expired(self) -> int:
         try:
-            conn = self._conn()
-            cur = conn.execute("DELETE FROM entries WHERE expires_at <= ?", (time.time(),))
-            conn.commit()
-            return int(cur.rowcount or 0)
+            with self._conn_lock:          # 写操作：与 set/try_claim 共用同一把锁
+                conn = self._conn()
+                cur = conn.execute("DELETE FROM entries WHERE expires_at <= ?", (time.time(),))
+                conn.commit()
+                return int(cur.rowcount or 0)
         except Exception:  # noqa: BLE001
             return 0
 
@@ -485,13 +497,14 @@ class SqliteStore:
         if not host:
             return
         try:
-            conn = self._conn()
-            conn.execute(
-                "INSERT INTO host_stats (host, solves, failures) VALUES (?, 1, ?) "
-                "ON CONFLICT(host) DO UPDATE SET solves = solves + 1, failures = failures + excluded.failures",
-                (host, 0 if ok else 1),
-            )
-            conn.commit()
+            with self._conn_lock:          # 写操作：与其它写路径共用同一把锁
+                conn = self._conn()
+                conn.execute(
+                    "INSERT INTO host_stats (host, solves, failures) VALUES (?, 1, ?) "
+                    "ON CONFLICT(host) DO UPDATE SET solves = solves + 1, failures = failures + excluded.failures",
+                    (host, 0 if ok else 1),
+                )
+                conn.commit()
         except Exception:  # noqa: BLE001
             pass
 

@@ -691,3 +691,116 @@ def test_claim_is_released_after_failure(tmp_path):
         assert other.try_claim(key, ttl=30) is True, "失败后抢占未释放，对端会白等"
     finally:
         s.close()
+
+
+# ── 独立审查 P1/P2 的回归保护（v4.6）──────────────────
+def test_failed_solve_is_counted_once(tmp_path):
+    """一次失败的求解只能记 1 次（此前"无条件先记成功 + 再记失败"→ 失败请求显示 50% 成功率）。"""
+    store = cache_mod.SqliteStore(str(tmp_path), "t")
+    s = svc.Solver(browser_factory=factory_returning(FakeBrowser()),
+                   allow_private_hosts=True, store=store)
+    assert wait_until(lambda: s.health()[0] == 200)
+    try:
+        # 让 worker "跑完但没拿到 token"：这是 `if not token` 那条失败路径
+        s._submit = lambda fn, budget: {"cookies": {}, "ua": "", "token": "", "cookie_list": []}  # type: ignore[assignment]
+        with pytest.raises(SolveError):
+            s.solve(HOST, timeout=10)
+        code, body = s.health()
+        assert body["solves"] == 1, f"失败只应记 1 次求解，实际 {body['solves']}"
+        assert body["failures"] == 1
+    finally:
+        s.close()
+
+
+def test_claim_released_when_admission_rejects(tmp_path):
+    """准入被拒（BUSY）也必须释放抢占：否则同域的其它 worker 会白等一个不会来的缓存。"""
+    store = cache_mod.SqliteStore(str(tmp_path), "t")
+    s = svc.Solver(browser_factory=factory_returning(FakeBrowser()),
+                   allow_private_hosts=True, store=store, max_inflight=1)
+    assert wait_until(lambda: s.health()[0] == 200)
+    try:
+        assert s._inflight.acquire(blocking=False)      # 占满额度
+        router = be.BackendRouter([FakeBackend()], governance=s)
+        with pytest.raises(SolveError) as ei:
+            router.solve(HOST, timeout=10)
+        assert ei.value.code == ErrorCode.BUSY
+
+        other = cache_mod.SqliteStore(str(tmp_path), "t")
+        key = s.cache_key("example.com", None)
+        assert other.try_claim(key, ttl=30) is True, "准入被拒后抢占未释放"
+    finally:
+        try:
+            s._inflight.release()
+        except ValueError:
+            pass
+        s.close()
+
+
+def test_shutdown_denied_returns_401_with_body(monkeypatch):
+    """来源不合法时必须**回 401 响应体**，而不是抛在 try 外（那会变成 traceback + 断连）。"""
+    browser = FakeBrowser()
+    s = svc.Solver(browser_factory=factory_returning(browser), allow_private_hosts=True)
+    assert wait_until(lambda: s.health()[0] == 200)
+    svc.Handler.solver = s
+    svc.Handler.token = "t"
+    svc.Handler.router = None
+    srv = svc.Server(("127.0.0.1", 0), svc.Handler)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    old_allow = svc.Handler.allow_remote_shutdown
+    monkeypatch.setattr(svc.Handler, "shutdown_allowed", staticmethod(lambda peer: False))
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{srv.server_address[1]}/shutdown", data=b"{}", method="POST",
+            headers={"Content-Type": "application/json", "Authorization": "Bearer t"})
+        with pytest.raises(urllib.error.HTTPError) as ei:
+            urllib.request.urlopen(req, timeout=10)
+        assert ei.value.code == 401
+        body = json.loads(ei.value.read().decode())
+        assert body["error_code"] == "unauthorized" and "回环" in body["error"]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        svc.Handler.allow_remote_shutdown = old_allow
+        s.close()
+
+
+def test_claim_released_when_proxy_parse_fails(tmp_path, monkeypatch):
+    """`_proxy_dict` 解析失败这条早退路径也要释放抢占（审查指出的覆盖缺口）。"""
+    store = cache_mod.SqliteStore(str(tmp_path), "t")
+    s = svc.Solver(browser_factory=factory_returning(FakeBrowser()),
+                   allow_private_hosts=True, store=store)
+    assert wait_until(lambda: s.health()[0] == 200)
+    try:
+        monkeypatch.setattr(s, "_proxy_dict", lambda entry: (_ for _ in ()).throw(ValueError("bad proxy")))
+        with pytest.raises(SolveError) as ei:
+            s.solve(HOST, timeout=10)
+        assert ei.value.code == ErrorCode.BROWSER_UNAVAILABLE
+
+        other = cache_mod.SqliteStore(str(tmp_path), "t")
+        assert other.try_claim(s.cache_key("example.com", None), ttl=30) is True, \
+            "代理解析失败后抢占未释放"
+    finally:
+        s.close()
+
+
+def test_claim_released_when_solver_admission_rejects(tmp_path):
+    """Solver 自身的 inflight 被拒（不是路由侧）也要释放抢占。"""
+    store = cache_mod.SqliteStore(str(tmp_path), "t")
+    s = svc.Solver(browser_factory=factory_returning(FakeBrowser()),
+                   allow_private_hosts=True, store=store, max_inflight=1)
+    assert wait_until(lambda: s.health()[0] == 200)
+    try:
+        assert s._inflight.acquire(blocking=False)
+        with pytest.raises(SolveError) as ei:
+            s.solve(HOST, timeout=10)
+        assert ei.value.code == ErrorCode.BUSY
+
+        other = cache_mod.SqliteStore(str(tmp_path), "t")
+        assert other.try_claim(s.cache_key("example.com", None), ttl=30) is True, \
+            "Solver 准入被拒后抢占未释放"
+    finally:
+        try:
+            s._inflight.release()
+        except ValueError:
+            pass
+        s.close()

@@ -1270,6 +1270,8 @@ class Solver:
         try:
             proxy = self._proxy_dict(proxy_entry)
         except ValueError:
+            if claimed:
+                self._release_claim(key)      # 别把抢占带进异常（对端会白等 TTL）
             raise SolveError(
                 ErrorCode.BROWSER_UNAVAILABLE,
                 "代理配置无法解析（凭据已隐去）",
@@ -1279,6 +1281,8 @@ class Solver:
 
         # 准入：inflight 上限，满了立刻拒绝（不等）
         if not self._inflight.acquire(blocking=False):
+            if claimed:
+                self._release_claim(key)      # 准入被拒也要放行，否则对端要白等
             with self._lock:
                 self._rejected_busy += 1
             raise SolveError(
@@ -1318,8 +1322,9 @@ class Solver:
             self._inflight.release()
 
         elapsed = round(time.monotonic() - t0, 2)
-        self._account(True, elapsed, host=host, backend="camoufox")
-
+        # 注意：这里**不能**先记一次成功。下面 `if not token` / `ttl<=0` 还会各记一次失败，
+        # 早先那版把成功记账写成无条件执行 → 一次失败会被记成「1 次成功 + 1 次失败」，
+        # 指标上表现为"失败请求还有 50% 成功率"（独立审查 Q4 抓到的 P1）。
         cookies = r["cookies"]
         ua = r.get("ua") or self._browser_ua
         token = r.get("token") or ""
@@ -1368,6 +1373,7 @@ class Solver:
             # 一次性 token：给个名义寿命提示调用方尽快用，但不缓存
             ttl = NOMINAL_TTL.get(want_enum, 120)
 
+        self._account(True, elapsed, host=host, backend="camoufox")   # 到这里才算真的解出来了
         expires_at = _now() + ttl
         result = {
             "ok": True,
@@ -1883,7 +1889,10 @@ class Handler(BaseHTTPRequestHandler):
         """
         peer = (self.client_address or ("", 0))[0]
         if not Handler.shutdown_allowed(peer):
-            raise SolveError(
+            # 这里**必须自己回响应**：`_handle_shutdown` 是在 do_POST 的 try 之外调用的，
+            # 直接 raise 只会打到 socketserver.handle_error（打印 traceback + 断连），
+            # 调用方拿到的是"连接被重置"而不是文档承诺的 401。
+            err = SolveError(
                 ErrorCode.UNAUTHORIZED,
                 f"只允许从回环地址触发优雅退出（当前来源 {peer}）",
                 stage="admit",
@@ -1891,6 +1900,9 @@ class Handler(BaseHTTPRequestHandler):
                       "此时客户端地址是 docker 网关（如 172.17.0.1），不是 127.0.0.1，"
                       "回环判断不成立。token 仍是第一道门。"),
             )
+            self._send(err.http_status, err.payload())
+            self._log(event="shutdown-denied", peer=peer)
+            return
         self._send(202, {"ok": True, "state": "shutting-down", "peer": peer})
         self._log(event="shutdown", peer=peer)
         srv = getattr(self, "server", None)

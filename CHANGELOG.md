@@ -2,6 +2,74 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [4.6.0] - 2026-11-02
+
+主题：**独立审查终于拿到 Verdict（Request Changes），并按循环修完 P1/P2 后复验**。
+顺带用 Go 客户端把"严格站点回放 403"的根因查清。
+
+### 独立代码审查（本会话第一次真正返回结论）
+
+前 4 次同族子代理尝试都未返回 Verdict。本轮改用**独立进程** `claude -p`
+（全新上下文、只读工具、不继承主控推理）→ 第 1 轮给出 **Request Changes**，指出：
+
+| 级别 | 问题 | 位置 |
+|---|---|---|
+| **P1** | **`_account` 双计**：成功记账写在 `_submit` 返回之后且**无条件执行**，失败分支又记一次 → 一次失败被记成「1 成功 + 1 失败」，指标上表现为失败请求还有 50% 成功率 | `service.py:1321` vs `1331/1359` |
+| **P1** | **claims 泄漏三条路径**：代理解析失败、准入被拒、路由准入被拒 —— 泄漏期内同域请求每次多等 10s，最长 120s | `service.py:1262→1284`、`1272-1278`、`1300`；`backends.py:350→358` |
+| P2 | `/shutdown` 来源拒绝抛在 `do_POST` 的 try 外 → 调用方拿到断连而不是文档承诺的 401 | `service.py:1885-1893` |
+| P2 | `cfsolve` 一次性 token 返回 `expires_in=300` 但 `expires_at=0.0`，自相矛盾（同一 bug 在第四个后端复发） | `cfsolve_backend.py:179` |
+| P2 | `SqliteStore._conn()` 注释称"一把 RLock 串行化"，实际读路径不取锁 | `cache.py:311` |
+
+**主控自查漏掉了两个 P1**（我把 Q4"是否重复计数"判成了 REFUTED）—— 这条要记下来：
+自查不能替代独立审查。
+
+### 修复（全部带回归用例）
+
+- `_account(True, …)` 挪到"确实拿到 token 之后"；一次失败只记 1 次 solves + 1 次 failures。
+  用例 `test_failed_solve_is_counted_once`。
+- 四条早退路径（代理解析失败 / Solver 准入被拒 / 路由准入被拒 / 抛 SolveError）全部释放 claims。
+  用例 `test_claim_released_when_admission_rejects`。
+- `/shutdown` 来源不合法改为**自己回 401 + JSON 体**。用例 `test_shutdown_denied_returns_401_with_body`。
+- `cfsolve` 一次性 token 的 `expires_at` 改为真实时间戳（字段自洽）。
+- `cache.py` 的并发注释改写为与实现一致（写路径加锁、读路径靠 pysqlite 内部互斥）。
+
+### 第 2 轮复验：**Approve**，顺带修掉它列的 P3
+
+- `cache.py`：注释点名的 `delete`/`purge_expired`/`record_solve` 三条写方法**真的补上了锁**
+  （原注释说"写路径加锁"但它们没加；`delete` 还会被无锁的 `get()` 调用，所以必须自己加）。
+- `cfsolve_backend.py`：一次性 token 的名义寿命改为查 `challenges.NOMINAL_TTL`，
+  不再做第三份硬拷贝（下次调寿命不会再漏一处）。
+- 补两条覆盖缺口用例：代理解析失败 / Solver 自身准入被拒 两条早退路径的 claim 释放
+  （第 2 轮指出"新用例只覆盖了路由侧同构路径"）。
+
+### 新增工具：`gocfsolve/examples/replaycheck`
+
+用来判"严格站点回放 403"到底是服务问题、脚本问题还是 IP 问题：
+同一个服务、同一份凭证、同一个出口，**只换回放客户端**，并带"不带凭证"对照组。
+
+实测 epicgames.com（同 IP）：
+
+```
+REPLAY_GO url=https://www.epicgames.com/ status=301 bytes=270 challenge_page=false
+REPLAY_NOCOOKIE                          status=403 bytes=4000
+```
+
+⇒ **凭证有效、CF 已过**（301 是站点把首页跳到 store 登录页的业务跳转）；
+之前 Python 脚本的 403 是**脚本问题**（只发 cf_clearance、请求的是无 www 的 host、缺 Firefox 导航头），
+**不是 TLS 指纹问题，也不是 IP 被提分**（同一 IP 同一时刻带凭证就能过）。
+
+同时暴露两个**调用方易踩点**（已写进 `docs/API.md`「回放要点」与项目规格 L10）：
+回放必须用**求解时的最终 URL**（cookie 域可能比请求 host 更具体）；必须带**全部 cookie_list**。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| Python | **302 passed**，覆盖率 81.98% |
+| Go | 41 + egress 4，`vet` + `-race` 绿；新增 `replaycheck` 示例可构建 |
+| 独立审查 | 第 1 轮 Request Changes → 修复 → **第 2 轮 Approve**（证据：`evidence/cli/v46-review-round{1,2}.txt`）|
+| 真机预算 | 本轮额外用了 **3 次**（超出 §15 的 60 次，用户明确要求闭合该项），已记账 |
+
 ## [4.5.0] - 2026-11-02
 
 主题：把上轮列出的 4 条尾巴收掉——compose 多 worker、镜像瘦身、真机预算用尽、`service.py` 第一步拆分。

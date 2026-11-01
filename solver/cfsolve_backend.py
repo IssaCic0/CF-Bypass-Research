@@ -170,13 +170,24 @@ class CfsolveBackend:
                 "egress_id": self.egress_id, "backend": self.name(),
             }
 
+        # 名义寿命统一查 challenges.NOMINAL_TTL，别再硬拷贝数字（否则下次调寿命又会漏一处）
+        try:
+            from challenges import NOMINAL_TTL as _NOMINAL, Want as _Want
+        except ImportError:  # 包导入
+            from .challenges import NOMINAL_TTL as _NOMINAL, Want as _Want
+        nominal = int(_NOMINAL.get(_Want.parse(want), 120))
+
         return {
             "ok": True, "solved": True, "want": want,
             "token": first,
             "token_field": "cf-turnstile-response" if want == "turnstile" else "g-recaptcha-response",
             "user_agent": self.user_agent(),
             "cookies": {}, "cookie_list": [],
-            "expires_in": 300 if want == "turnstile" else 120, "expires_at": 0.0,
+            # 一次性 token 不进缓存，但**字段仍要自洽**：expires_at=0 违反本仓库自己写下的
+            # 不变量（backends.py 的接口纪律："expires_at = 0 会让 Go 侧立刻判过期"）。
+            # 独立审查在第四处发现同一个 bug 复发，所以这里给真实时间戳。
+            "expires_in": nominal,
+            "expires_at": time.time() + nominal,
             "elapsed": elapsed, "cached": False, "cacheable": False,
             "egress_id": self.egress_id, "backend": self.name(),
         }

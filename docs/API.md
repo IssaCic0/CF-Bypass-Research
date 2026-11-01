@@ -364,6 +364,17 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8878/metrics
 
 ---
 
+## 回放要点（v4.6 实测补充，**接入方最容易踩**）
+
+1. **必须用求解时的最终 URL 回放**（跟随 302 之后那个）。原因：`cf_clearance` 的 cookie `domain`
+   可能比请求的 host 更具体 —— 例如请求 `https://epicgames.com/`，站点 302 到
+   `https://www.epicgames.com/`，凭证的域就是 **`www.epicgames.com`**；
+   此时拿它去回放 `epicgames.com` 会被严格的客户端判为"无同域 cookie"而拒绝发请求（这是正确行为）。
+2. **回放要带全部 `cookie_list`**，不能只带 `cf_clearance`（CF 还会校验 `__cf_bm` 等）。
+3. **回放的 UA 必须是响应里的 `user_agent`**（`cf_clearance` 绑 UA）。
+4. 判据：带凭证那一跳若是 2xx/3xx 且正文没有挑战特征 ⇒ **CF 已过**；
+   后面若再出现 403/重定向环，多半是**站点业务**（如跳登录页），不是 CF。
+
 ## 审计日志（`--audit-log`，v4.3）
 
 `--audit-log <path>` 开启 JSONL 审计：每次 `solve` / `detect` / `shutdown` 落一行。

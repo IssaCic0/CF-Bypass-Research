@@ -1,0 +1,47 @@
+# 回放一致性复验（同 IP、同站点、只换回放客户端）
+
+目标：判定 epicgames.com「Python 脚本回放 403」到底是
+  (a) 服务/凭证问题  (b) 脚本头部/TLS 不一致  (c) 出口 IP 被提分
+
+方法：同一个求解服务、同一份 clearance、同一个出口 IP，只换回放客户端；并加"不带凭证"的对照组。
+工具：`gocfsolve/examples/replaycheck`（v4.6 新增；用 Go 客户端的真实回放路径）
+
+## 结果（原始输出）
+
+```
+RESOLVE ok clearance_len=462 ua="Mozilla/5.0 (Windows NT 10.0; Win64; x…" cached=true
+          cookies=[cf_clearance __cf_bm __cf_bm]
+
+REPLAY_GO url=https://www.epicgames.com/ status=301 bytes=270 challenge_page=false elapsed=0.58s
+REPLAY_NOCOOKIE                          status=403 bytes=4000
+```
+
+## 结论（三条可能被一次分开）
+
+| 假设 | 判定 | 依据 |
+|---|---|---|
+| (a) 服务/凭证有问题 | ❌ 排除 | 带凭证 → **301**（穿过 CF，站点正常跳转）；不带凭证 → **403**。凭证本身有效 |
+| (b) 脚本头部/TLS 不一致 | ✅ **就是它** | 我的 Python `urllib` 脚本：只发 `cf_clearance`、请求的是**无 www** 的 host、缺 `Sec-Fetch-*` 等 Firefox 导航头 → 403。Go 客户端（完整 cookie + Firefox 头）→ 301 |
+| (c) 出口 IP 被提分 | ❌ 排除 | 同一 IP、同一时刻，带凭证能过（301），说明出口未被拉黑 |
+
+## 新发现的两个"调用方易踩点"（不是服务缺陷，但会让人误判）
+
+1. **cookie 的域可能比请求的 host 更具体**：epicgames 的 `cf_clearance`/`__cf_bm` 种在
+   `www.epicgames.com` 上，而请求写的是 `epicgames.com` → Go 客户端**严格按域过滤**，
+   直接报「没有适用于 "epicgames.com" 的 cookie（cookie_list 里无同域项）」而**拒绝发请求**。
+   → 这是**正确行为**（不能把 www 的凭证发给无 www 的主机），错误信息也足够清楚；
+   但**调用方必须使用求解时的最终 URL**（或跟随 302）来回放。
+2. **该站首页会 302 到 `store.epicgames.com/auth/login`，且成环**（Go 报 `stopped after 10 redirects`）。
+   → 这是**站点业务跳转**，不是 CF 拦截。判据：带凭证那一跳是 301/302 且 `challenge_page=false`。
+
+## 用法（以后复验严格站点就这一条命令）
+
+```bash
+go run ./examples/replaycheck -solver http://127.0.0.1:8878 -token <token> \
+    -target https://example.com/ -replay-url https://www.example.com/ -stop-redirect
+```
+
+判读：
+- `REPLAY_GO status=2xx/3xx 且 challenge_page=false` ⇒ 凭证有效、CF 已过；
+- `REPLAY_GO status=403` 且 `REPLAY_NOCOOKIE` 也是 403 ⇒ 看 `challenge_page`：true 是 CF 拦，false 要看站点业务；
+- `REPLAY_ERROR ... cookie_list 里无同域项` ⇒ **URL 的 host 与凭证的 cookie 域不匹配**，换最终 URL 再试。

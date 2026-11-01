@@ -1,0 +1,36 @@
+# 独立代码审查 · 第 2 轮复验（Verdict: **Approve**）
+
+> 同一独立进程通道（`claude -p`，只读，不继承主控推理）。第 1 轮 Request Changes →
+> 主控修 P1/P2 → 本轮复验：4 条 FIXED + 1 条 PARTIAL（注释与实现仍有出入）+ 4 条 P3。
+> 之后主控把 PARTIAL 与两条 P3 也修了（见 CHANGELOG 4.6.0）。
+
+---
+
+## 逐条复验
+
+1. **FIXED** | `solver/service.py:1325-1376` | 无条件的 `_account(True, …)` 已经删除，现在只会在两处失败分支之后、确实拿到 token（且 TTL > 0）时才于 `1376` 记一次成功；`not token`（1341）与 `ttl<=0`（1366）各自只记一次失败。单次请求的 `_account` 调用点共有 4 个，且互斥（成功 1 处、失败 3 处），一次失败只贡献 `solves+1 / failures+1`。
+
+2. **FIXED** | `solver/service.py:1271-1278 / 1282-1285 / 1303-1306`、`solver/backends.py:358-362` | 四条早退路径都会释放 claim：`_proxy_dict` 解析失败（1272-1273）、`_inflight.acquire` 被拒（1283-1284）、`except SolveError`（1304-1305，含随后的 `not token` / `ttl<=0` 两处释放），以及路由侧 `begin_backend_call()` 被拒（backends 359-362）。`service.py:689` 的 `release_claim_for` 确实存在，并且 key 推导（`_host_of` + `_entry_for` + `cache_key`）与 `claim_solve` 完全同源，因此 backends 侧修复不会静默空转。
+
+3. **FIXED** | `solver/service.py:1891-1905` | 拒绝分支改为自己调用 `_send(err.http_status, err.payload())` 并 `return`；`UNAUTHORIZED → 401`（`errors.py:50`），payload 带 `error_code/error/stage/hint`。`_handle_shutdown` 仍在 `do_POST` 的 try 之外被调用（1728-1730），但已经不再向上抛，调用方拿到的确实是 401 + JSON，而不是 traceback + 断连。另外，`body` 在鉴权/分发前已读完（1724），不会污染 keep-alive。
+
+4. **FIXED** | `solver/cfsolve_backend.py:179-183` | `expires_in` 与 `expires_at` 现在同为 300（turnstile）/ 120（recaptcha_v3），与 `challenges.py:64-67` 的 `NOMINAL_TTL`、camoufox（`service.py:1374-1377`）、pydoll（`pydoll_backend.py:212-213`）一致，`expires_at = 0` 的违约已消除。
+
+5. **PARTIAL** | `solver/cache.py:311-317` vs `414-420 / 440-447 / 488-501` | 新注释把「写路径」枚举为 `set/delete/try_claim/release_claim/purge/record_solve` 六条全部走 `_conn_lock`，实际只有 `set`(399)、`try_claim`(467)、`release_claim`(481) 加锁；`delete`、`purge_expired`、`record_solve` 在代码里**没有任何锁**。同时「读路径不取锁 —— 只读」对 `get()` 也不成立：366-385 在过期/解密失败/schema 不符时会调用 `self.delete(key)` 写入。方向对了（不再是"一把 RLock 串行化"的笼统描述），但枚举与实现仍然对不上，只是把模糊不一致换成了具体不一致。
+
+6. **FIXED（覆盖到位）** | `tests/test_governance.py:695-764` | 三条用例都打在了缺陷本身，不是边角：① `_submit` 打桩返回空 token 精确走 `if not token` 分支，旧实现下 `solves` 会是 2，断言必然失败；② 先用 `max_inflight=1` 占满 `_inflight`，再走 `BackendRouter._governed_solve` 的真实准入拒绝，旧实现下 claim 不释放 → `other.try_claim` 返回 False，断言必然失败；③ 起真实 `Server` + 真实 socket POST，旧实现下 `_handle_shutdown` 抛在 try 外 → 客户端拿到 `ConnectionResetError` 而非 `HTTPError(401)`，`pytest.raises(HTTPError)` 必然失败。三条都是"改前红、改后绿"的有效回归保护。
+
+## 新问题（若有）
+
+- **P3（同 5）** | `solver/cache.py:414 / 440 / 488` | 注释点名了三条实际未加锁的写方法；要么补上 `with self._conn_lock:`，要么把这三位从注释里删掉（`delete` 还有个隐患：`get()` 在无锁读路径里调用它）。这是文档准确性问题，`purge/record_solve/delete` 在 pysqlite 单连接内部互斥下不会破坏数据。
+- **P3** | `tests/test_governance.py:744-746` | 用例原地改写 `Handler.solver / token / router` 且不还原（`router` 还原了，另两个没有）；同文件既有用例（207/354/436/467）也是同样写法，属既有惯例而非本轮引入，但新用例是文件最后一条之后紧接着没有其它用例兜底，建议顺手加 `monkeypatch.setattr` 统一。
+- **P3** | `solver/cfsolve_backend.py:182-183` | `300/120` 是 `NOMINAL_TTL` 的第三份硬拷贝，建议改为查表，否则下次调名义寿命还会漏改一处。
+- **P3（覆盖缺口，非本轮 P1/P2）** | `solver/service.py:1272-1273` | `_proxy_dict` 解析失败这条 claim 释放路径没有任何用例（`tests/` 里无 `_proxy_dict` 相关测试）；`Solver.solve` 自身 inflight 被拒（1283-1284）也无直接用例，新用例只覆盖了路由侧同构路径。
+
+备注：本沙箱对 `python -m pytest` 需人工审批，故未实际执行测试；以上全部为 `静态确认`（Read/Grep 当前工作区代码 + 工作区 diff），测试结论依据"用例断言在旧实现下必然失败"的控制流推演，标注为 `合理推断`。
+
+## Verdict
+
+Approve
+
+[exited with code 0]
