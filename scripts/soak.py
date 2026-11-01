@@ -226,7 +226,9 @@ def main(argv: list[str] | None = None) -> int:
     checks = {
         "light_endpoint_errors": (light_errors == 0, light_errors, 0),
         "always_ready": (ready_failures == 0, ready_failures, 0),
-        "rss_growth_mb": (abs(rss_growth) <= args.max_rss_growth_mb, round(rss_growth, 1),
+        # 只看"涨"。内存回落（负数）不是缺陷 —— 早期版本用 abs() 把"RSS 降了 1107MB"
+        # 也判成失败，那是尺子的问题，不是系统的问题。
+        "rss_growth_mb": (rss_growth <= args.max_rss_growth_mb, round(rss_growth, 1),
                           args.max_rss_growth_mb),
         "handle_growth": (abs(handle_growth) <= args.max_handle_growth, handle_growth,
                           args.max_handle_growth),

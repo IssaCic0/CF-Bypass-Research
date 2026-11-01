@@ -2,6 +2,47 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [4.2.1] - 2026-11-02
+
+补丁版：修掉 1 小时 soak 抓出的**句柄泄漏**（v4.2.0 的 soak 判定因此是 FAIL，这是它存在的意义）。
+
+### 修复
+
+- **`/health` 每条新 TCP 连接泄漏约 3 个内核句柄，且永不释放**（P1，实测）。
+  - 现象：1 小时 soak 句柄 2787 → 4095（**+1308**），而**线程数全程不变**。
+  - 归因链：`+100 × GET /health` → **+300**（我们进程，浏览器 0）；`100 连接 × 1 请求` → +296，
+    而 `1 连接 × 100 请求` → +7 ⇒ **按连接计**；最小 `ThreadingHTTPServer` 同样 100 连接只 +16
+    ⇒ 泄漏在我们的代码里。
+  - 根因：`SqliteStore` 用 **thread-local** 持连接，而 HTTP handler 是"每连接一个线程"，
+    于是每条新连接都新建一条 SQLite 连接（WAL 下 3 个文件句柄：`db`/`-wal`/`-shm`），
+    线程退出后连接未及时关闭。触发点是 `/health` 每次都读 `cached_domains` →
+    `len(store)` → `_conn()`。
+  - 修法：全进程**共享一条连接**（`check_same_thread=False` + `RLock`），加 `_conn_creations`
+    计数便于回归断言；`tests/test_cache_sqlite.py::test_sqlite_store_uses_single_shared_connection`
+    断言"16 线程 × 5 次读写后只建 1 条连接"。
+  - 复测：同手法 `+100 /health` → **+0**，`+100 /metrics` → **+0**；
+    **15 分钟 soak 全绿**（句柄 2788 → 2746，净 **-42**；RSS 回落 396MB；0 错；全程 ready）。
+
+### 修复（工具自身）
+
+- `scripts/soak.py` 的 RSS 判据原来是 `abs(growth)`，把"内存回落"也判成失败 ——
+  已改为**只看增长**（负数不是缺陷）。这一条属于"尺子错了"，不是系统错了。
+
+### 修复（测试抖动，诚实记录）
+
+- `test_concurrent_first_boot_shares_one_salt` 在重负载（同时跑 soak）时偶发失败：
+  6 个子进程抢建 `salt.bin` 的等待窗口从 3s 放宽到 **10s（上限，正常路径一秒内完成）**。
+  **断言未改**（仍是"全部子进程成功且拿到同一份盐"）—— 这是把超时调成现实值，不是放宽断言。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| Python | **287 passed**（连跑两遍稳定），覆盖率 81.6% |
+| Go | 41 Test，`vet` + `-race` 绿 |
+| 句柄泄漏 | 修复前 +1308/小时 → 修复后 **-42/15min**（净减少） |
+| 15 分钟 soak | **passed: true**（0 错、全程 ready、RSS 回落、句柄不涨） |
+
 ## [4.2.0] - 2026-11-02
 
 主题：**稳定性收口**——把"优雅退出会掉请求"这个真实故障补掉，并把文档漂移一次清完。

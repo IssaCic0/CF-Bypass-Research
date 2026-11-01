@@ -317,3 +317,41 @@ def test_partial_salt_file_is_repaired(tmp_path):
 def test_build_store_memory_backend_explicit(tmp_path):
     store, kind = cache_mod.build_store(str(tmp_path), TOKEN, backend="memory")
     assert kind == "memory" and isinstance(store, cache_mod.MemoryStore)
+
+
+def test_sqlite_store_uses_single_shared_connection(tmp_path):
+    """全进程只允许建**一条** SQLite 连接。
+
+    这是实测抓到的句柄泄漏的回归保护：thread-local 时每条新 TCP 连接都会新建一条
+    SQLite 连接（WAL 下 3 个文件句柄），而 `/health` 每个请求都读 `cached_domains`
+    → 1 小时 soak 泄漏 1308 个内核句柄，线程数却不变。
+    """
+    import threading
+
+    store = cache_mod.SqliteStore(str(tmp_path), TOKEN)
+
+    def work(i: int) -> None:
+        for _ in range(5):
+            store.set(f"k{i}|default", entry(clearance=f"C{i}"))
+            store.get(f"k{i}|default")
+            len(store)
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+
+    assert store._conn_creations == 1, (
+        f"应当只建 1 条共享连接，实际建了 {store._conn_creations} 条"
+        "（thread-local 会在每个 handler 线程各建一条 → 句柄泄漏）")
+    assert len(store) == 16
+
+
+def test_sqlite_close_then_reopen_creates_new_connection(tmp_path):
+    """close() 之后再用要能自动重连（且计数如实增加）。"""
+    store = cache_mod.SqliteStore(str(tmp_path), TOKEN)
+    store.set("k|default", entry())
+    store.close()
+    assert len(store) == 1
+    assert store._conn_creations == 2

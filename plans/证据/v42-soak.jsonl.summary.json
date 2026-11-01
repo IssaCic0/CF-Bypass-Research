@@ -1,0 +1,39 @@
+{
+  "generated_at": "2026-11-02T00:58:27+08:00",
+  "kind": "soak",
+  "duration_sec": 3600.2,
+  "samples": 360,
+  "solve_count": 0,
+  "passed": false,
+  "rss_first_mb": 1534.7,
+  "rss_last_mb": 427.6,
+  "rss_max_mb": 1538.6,
+  "handles_first": 2787,
+  "handles_last": 4095,
+  "handles_max": 4325,
+  "health_ms_p50": 13.3,
+  "health_ms_p95": 24.8,
+  "probe_ms_p50": 499.6,
+  "checks": {
+    "light_endpoint_errors": {
+      "pass": true,
+      "actual": 0,
+      "limit": 0
+    },
+    "always_ready": {
+      "pass": true,
+      "actual": 0,
+      "limit": 0
+    },
+    "rss_growth_mb": {
+      "pass": false,
+      "actual": -1107.1,
+      "limit": 80.0
+    },
+    "handle_growth": {
+      "pass": false,
+      "actual": 1308,
+      "limit": 50
+    }
+  }
+}

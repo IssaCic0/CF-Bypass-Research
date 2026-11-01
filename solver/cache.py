@@ -290,28 +290,39 @@ class SqliteStore:
         self.path = os.path.join(self.dir, filename)
         self._max = max(1, int(max_files))
         self._fernet = _build_fernet(self.dir, token)   # 复用同一套 salt.bin + PBKDF2
-        self._local = threading.local()
-        self._write_lock = threading.Lock()             # 进程内串行化写，减少跨进程争抢
+        # **一条共享连接 + 一把锁**，而不是 thread-local 每线程一条。
+        # 实测教训：thread-local 时 HTTP 的每个连接都会新建一条 SQLite 连接
+        # （WAL 下每条约占 3 个文件句柄：db / -wal / -shm），而 `/health` 每个请求都读
+        # `cached_domains` → "每来一条新 TCP 连接就泄漏 3 个内核句柄"：
+        # 1 小时 soak 涨了 1308 个，线程数却不变（线程退了，连接没关）。
+        self._conn_lock = threading.RLock()
+        self._conn_obj = None
+        self._conn_creations = 0        # 供测试断言"只建过一次连接"
         self._init_schema()
 
     # -- 连接管理 ----------------------------------
     def _conn(self):
-        """每线程一个连接。
+        """**全进程共享一条连接**（`check_same_thread=False` + 自己的锁）。
 
-        sqlite3 的连接**不能跨线程共享**（默认 check_same_thread=True 会直接抛），
-        而本服务是多线程的（HTTP handler 线程 + worker 线程 + 保活线程），
-        所以用 thread-local 各自持有，而不是一把大锁串行化所有查询。
+        为什么不用 thread-local：HTTP handler 是**每连接一个线程**，
+        thread-local 等于"每条 TCP 连接开一条 SQLite 连接"（WAL 下 3 个文件句柄），
+        连接对象随线程死亡后句柄并不总被及时释放 —— 实测 1 小时泄漏 1308 个句柄。
+
+        为什么可以共享：本层只做毫秒级小读写，一把 RLock 串行化足够；
+        跨进程并发由 WAL + busy_timeout 处理（那是另一层问题）。
         """
         import sqlite3
 
-        conn = getattr(self._local, "conn", None)
-        if conn is None:
-            conn = sqlite3.connect(self.path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000.0)
-            conn.execute("PRAGMA journal_mode=WAL")      # 允许并发读 + 单写
-            conn.execute("PRAGMA synchronous=NORMAL")    # WAL 下的合理折中（掉电最多丢最后几条）
-            conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
-            self._local.conn = conn
-        return conn
+        with self._conn_lock:
+            if self._conn_obj is None:
+                conn = sqlite3.connect(self.path, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000.0,
+                                       check_same_thread=False)
+                conn.execute("PRAGMA journal_mode=WAL")      # 允许并发读 + 单写
+                conn.execute("PRAGMA synchronous=NORMAL")    # WAL 下的合理折中
+                conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+                self._conn_obj = conn
+                self._conn_creations += 1
+            return self._conn_obj
 
     def _init_schema(self) -> None:
         conn = self._conn()
@@ -373,7 +384,7 @@ class SqliteStore:
         blob = self._fernet.encrypt(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
         expires_at = float(value.get("expires_at", 0) or 0)
         egress = str(value.get("egress_id") or "")
-        with self._write_lock:
+        with self._conn_lock:
             conn = self._conn()
             conn.execute(
                 """
@@ -462,13 +473,13 @@ class SqliteStore:
             return 0
 
     def close(self) -> None:
-        conn = getattr(self._local, "conn", None)
+        with self._conn_lock:
+            conn, self._conn_obj = self._conn_obj, None
         if conn is not None:
             try:
                 conn.close()
             except Exception:  # noqa: BLE001
                 pass
-            self._local.conn = None
 
     # -- 内部 --------------------------------------
     def _prune(self, conn) -> None:
@@ -527,13 +538,16 @@ def _load_or_create_salt(path: str) -> bytes:
     if salt is not None:
         return salt
 
-    # 总等待窗口给到 ~3s：机器在高负载下（比如同时跑压测）6 个进程抢盐时，
-    # 原先 20 次 × 最长 50ms ≈ 0.5s 的窗口会偶发耗尽，表现为"并发首启偶发失败"。
-    deadline = time.monotonic() + 3.0
+    # 总等待窗口给到 10s。为什么会需要这么久：机器高负载时（压测/多 worker 同时起），
+    # 子进程"启动 + import + 抢文件"本身就可能花几秒；窗口太短会表现为
+    # "并发首启偶发失败"（实测在跑压测时 3s 窗口仍会偶发耗尽）。
+    # 窗口只是上限：正常情况下第一条路径就拿到盐，一秒都用不到。
+    WINDOW = 10.0
+    deadline = time.monotonic() + WINDOW
     attempt = 0
     while True:
         attempt += 1
-        if attempt > 200 or time.monotonic() > deadline:
+        if attempt > 2000 or time.monotonic() > deadline:
             break
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -546,13 +560,13 @@ def _load_or_create_salt(path: str) -> bytes:
             # 占位文件存在但内容为空、且已经空转了一段时间 ⇒ 对端在 open 与 write 之间崩了。
             # 这种"半成品盐"会让服务永远起不来，所以允许晚到的进程清理后重试；
             # 但必须用**墙钟**判断（而不是轮次），否则慢机器上会把对端正在写的文件删掉。
-            if time.monotonic() > deadline - 1.0:
+            if time.monotonic() > deadline - (WINDOW / 2):
                 try:
                     if os.path.getsize(path) == 0:
                         os.unlink(path)
                 except OSError:
                     pass
-                deadline = time.monotonic() + 3.0     # 清理后重新给一个窗口
+                deadline = time.monotonic() + WINDOW  # 清理后重新给一个窗口
                 attempt = 0
             continue
         except OSError:
