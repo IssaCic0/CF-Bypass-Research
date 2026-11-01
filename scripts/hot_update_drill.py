@@ -86,6 +86,48 @@ def _json(raw: bytes) -> dict:
         return {}
 
 
+def write_evidence(path: Path, task_id: str, results: list[dict], failed: list[dict],
+                   duration: float, cmd: str, limitations: list[str]) -> None:
+    """按 `evidence/README.md` 的必填字段落盘（同 `scripts/e2e_local.py`）。
+
+    自定义一个"看起来像证据"的 JSON 等于绕过仓库自己的门禁 —— 下次接手的人没法机器比对。
+    `raw_output_tail` 取的是**真实打印过的行**，不是预期结果。
+    """
+    try:
+        baseline = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                                  cwd=str(ROOT), capture_output=True, text=True,
+                                  timeout=10).stdout.strip()
+    except Exception:  # noqa: BLE001 —— 不在 git 仓库里跑也允许
+        baseline = ""
+    tail = "".join(
+        f"[{'PASS' if r['ok'] else 'FAIL'}] {r['name']}"
+        + (f"  — {r['detail']}" if r.get("detail") else "") + "\n"
+        for r in results[-12:]
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "task_id": task_id,
+        "status": "done" if not failed else "partial",
+        "result": "passed" if not failed else "failed",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "baseline_commit": baseline,
+        "duration_sec": round(duration, 1),
+        "commands_executed": [{"cmd": cmd, "exit_code": 0 if not failed else 1,
+                               "raw_output_tail": tail}],
+        "files_changed": [],
+        "tests": [{"name": r["name"], "type": "e2e", "status": "pass" if r["ok"] else "fail",
+                   "evidence": r.get("detail") or ""} for r in results],
+        "checks": results,
+        "coverage_summary": None,
+        "seams_touched": ["进程生命周期：启动 → ready → /shutdown(202) → 排空 → exit 0",
+                          "多 worker 可用性：逐个摘 vs 同时摘"],
+        "mock_scenarios_covered": [],
+        "browser_validation": None,
+        "limitations": limitations,
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+    print(f"结果已落盘：{path}", flush=True)
+
+
 class Worker:
     """一个 worker 进程，参数与 `docker-compose.yml` / `run.ps1` 保持一致。"""
 
@@ -414,19 +456,12 @@ def main() -> int:
         out = Path(args.json_out)
         if not out.is_absolute():
             out = ROOT / out
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps({
-            "task_id": "hot-update-drill",
-            "status": "passed" if not failed else "failed",
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "duration_sec": round(time.time() - started, 1),
-            "checks": RESULTS,
-            "limitations": [
-                "本机多进程语义：没有真负载均衡/反向代理，端口切换由操作者完成",
-                "未覆盖容器滚动（docker compose 的 --force-recreate 另行验证）",
-            ],
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"结果已落盘：{out}", flush=True)
+        write_evidence(out, "hot-update-drill", RESULTS, failed, time.time() - started,
+                       "python scripts/hot_update_drill.py"
+                       + (" --skip-slow" if args.skip_slow else ""),
+                       ["本机多进程语义：没有真负载均衡/反向代理，端口切换由操作者完成",
+                        "容器滚动另行验证：evidence/v47-container.md §5/§6",
+                        "--skip-slow 时 A 段（排空）未执行"])
 
     return 0 if not failed else 1
 

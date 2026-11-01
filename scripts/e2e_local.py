@@ -119,6 +119,51 @@ def json_or_empty(body: bytes) -> dict:
         return {}
 
 
+def write_evidence(path: Path, task_id: str, results: list[dict], failed: list[dict],
+                   duration: float, cmd: str, limitations: list[str]) -> None:
+    """按 `evidence/README.md` 的必填字段落盘。
+
+    为什么要这么啰嗦：那份 schema 是仓库自己定的
+    （`commands_executed` / `files_changed` / `tests` / `limitations` 都是必填），
+    自定义一个"看起来像证据"的 JSON 等于绕过了门禁 —— 下次接手的人没法机器比对。
+    `raw_output_tail` 取的是**真实打印过的行**，不是预期结果。
+    """
+    try:
+        baseline = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                                  cwd=str(ROOT), capture_output=True, text=True,
+                                  timeout=10).stdout.strip()
+    except Exception:  # noqa: BLE001 —— 不在 git 仓库里跑也允许
+        baseline = ""
+    tail = "".join(
+        f"[{'PASS' if r['ok'] else 'FAIL'}] {r['name']}"
+        + (f"  — {r['detail']}" if r.get("detail") else "") + "\n"
+        for r in results[-12:]
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "task_id": task_id,
+        "status": "done" if not failed else "partial",
+        "result": "passed" if not failed else "failed",
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "baseline_commit": baseline,
+        "duration_sec": round(duration, 1),
+        "commands_executed": [{"cmd": cmd, "exit_code": 0 if not failed else 1,
+                               "raw_output_tail": tail}],
+        # 本文件是**验收运行**的产物，不改仓库文件；改动清单见对应 commit。
+        "files_changed": [],
+        "tests": [{"name": r["name"], "type": "e2e", "status": "pass" if r["ok"] else "fail",
+                   "evidence": r.get("detail") or ""} for r in results],
+        "checks": results,
+        "coverage_summary": None,
+        "seams_touched": ["HTTP 契约：/health /metrics /detect /solve /shutdown",
+                          "真进程生命周期：启动 → ready → 排空 → 退出码"],
+        "mock_scenarios_covered": [],
+        "browser_validation": None,
+        "limitations": limitations,
+    }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+    print(f"结果已落盘：{path}", flush=True)
+
+
 def _traceback_excerpt(log: str) -> str:
     """日志里没有 Traceback 就给个行数；有就把**第一段** traceback 摘出来。"""
     if "Traceback" not in log:
@@ -502,19 +547,12 @@ def main() -> int:
         out = Path(args.json_out)
         if not out.is_absolute():
             out = ROOT / out
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(json.dumps({
-            "task_id": "e2e-local",
-            "status": "passed" if not failed else "failed",
-            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "duration_sec": round(time.time() - started, 1),
-            "checks": RESULTS,
-            "limitations": [
-                "离线验收：目标站是本地静态页，不能证明任何真实站点的过盾成功率",
-                "未覆盖多进程/多容器共享缓存（见 run.ps1 bench 与 docs/部署-容器.md）",
-            ],
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"结果已落盘：{out}", flush=True)
+        write_evidence(out, "e2e-local", RESULTS, failed, time.time() - started,
+                       f"python scripts/e2e_local.py --json-out {args.json_out}"
+                       + (" --skip-browser" if args.skip_browser else ""),
+                       ["离线验收：目标站是本地静态页，不能证明任何真实站点的过盾成功率",
+                        "未覆盖多进程/多容器共享缓存（见 run.ps1 bench 与 docs/部署-容器.md）",
+                        "--skip-browser 时 B06/B07（真浏览器路径）未执行"])
 
     return 0 if not failed else 1
 
