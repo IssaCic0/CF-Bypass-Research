@@ -648,6 +648,46 @@
           "locator": "§5 常见故障对照（Downloading addon 那一行）"
         }
       ]
+    },
+    {
+      "id": "F-039",
+      "verdict": "confirmed",
+      "severity": "critical",
+      "claim": "SqliteStore 的**读**路径（get/items/len/stats/host_stats）在 v4.2 改成共享连接后没有加锁，当时的注释称『并发安全由 sqlite3 内部互斥保证』——实测不成立：pysqlite 只把单次 C 调用串行化，两条线程在同一条连接上 execute() 之后**游标状态是共享的**，fetchone() 会互相踩。实测两种后果：(1) InterfaceError('bad parameter or other API misuse')；(2) fetchone() 拿到**别的语句**的行，即**别的键的条目** —— 16 线程压测里问 k9 拿到了 k10 的 cf_clearance（凭证缓存串域，P0）。同时 get() 对 expires_at 直接 float() 没有防御，畸形行会让 TypeError 冒到调用方。已修为四条读路径全部进 _conn_lock（RLock 可重入，get→delete 不会死锁），并对 expires_at 做类型防御。这一步之前一直是**绿**的：线程里的异常只变成 PytestUnhandledThreadExceptionWarning，用例照样通过。",
+      "evidence": [
+        {
+          "path": "solver/cache.py",
+          "locator": "get/items/__len__/stats/host_stats 的 with self._conn_lock"
+        },
+        {
+          "path": "tests/test_cache_sqlite.py",
+          "locator": "test_concurrent_reads_and_writes_never_corrupt_rows（16 线程 × 20 轮，断言读到的 cf_clearance 必须是自己的）"
+        },
+        {
+          "path": "evidence/v47-cache-concurrency.md",
+          "locator": "改前必红的失败输出"
+        }
+      ]
+    },
+    {
+      "id": "F-040",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "claim": "切 WAL 没有重试：`PRAGMA journal_mode=WAL` 拿不到锁时**不走 busy handler**，直接抛 `database is locked`。多进程冷启动（compose 3 worker / 测试里 6 个子进程同时首启空目录）实测约 1/10 概率有一个进程直接起不来，且 test_concurrent_first_boot_shares_one_salt 因此**间歇性红**（原始 HEAD 上 10 轮复现 1 次，与本次改动无关）。已修为有界重试（25 次 × 0.2~0.6s ≈ 最长 10s），仍失败则退回默认 journal 模式并**打印警告**、把真实模式暴露在 stats().journal_mode 里（可用性优先但不静默）。诚实边界：该竞态本身没能被用例确定性复现（同进程持锁/跨进程持锁/90 次裸构造均未稳定命中），回归用例只覆盖重试逻辑本身（mock 真实 SQLite 错误）。",
+      "evidence": [
+        {
+          "path": "solver/cache.py",
+          "locator": "_enable_wal（有界重试）+ _try_set_wal + stats().journal_mode"
+        },
+        {
+          "path": "tests/test_cache_sqlite.py",
+          "locator": "test_wal_switch_retries_when_database_is_locked / test_wal_degradation_is_loud_but_usable"
+        },
+        {
+          "path": "evidence/v47-cache-concurrency.md",
+          "locator": "原始 HEAD 上的间歇性红复现记录"
+        }
+      ]
     }
   ]
 }

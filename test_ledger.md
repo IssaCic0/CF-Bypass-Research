@@ -7,11 +7,11 @@
 
 | 层 | 数量 | 命令 | 最近结果 |
 |---|---|---|---|
-| Python 用例 | **304** | `python -m pytest tests/ -q` | 304 passed |
-| Python 覆盖率 | **82.06%**（`solver/service.py` 76%） | `... --cov=solver --cov-fail-under=80` | 门槛通过 |
+| Python 用例 | **307** | `python -m pytest tests/ -q` | 307 passed |
+| Python 覆盖率 | **81.95%**（`solver/service.py` 76%） | `... --cov=solver --cov-fail-under=80` | 门槛通过 |
 | Go 用例 | **41 个 Test** | `cd gocfsolve && go test -count=1 -race ./...` | 全部 PASS（8.3s） |
 | Go 静态检查 | — | `cd gocfsolve && go vet ./...` | 无输出 |
-| 结论库校验 | **38 条** | `node scripts/validate-findings.mjs` | exit 0 |
+| 结论库校验 | **40 条** | `node scripts/validate-findings.mjs` | exit 0 |
 | E2E 冒烟 | 3 个断言 | `.\run.ps1 smoke` | ✅ |
 | **E2E 真进程** | **29 项断言** | `.\run.ps1 e2e`（= `python scripts/e2e_local.py`） | **29/29**，落盘 `evidence/e2e-local.json` |
 | **热更新/滚动重启演练** | **17 项断言** | `python scripts/hot_update_drill.py` | **17/17**，落盘 `evidence/hot-update.json` |
@@ -58,6 +58,7 @@
 | F4 路由 HTTP 行为 | `test_http_auto_skips_browser_for_unprotected_site`（solves 保持 0）、`test_http_auto_rejects_unsupported_provider_without_waiting`、`test_http_without_route_keeps_v3_behaviour`、`test_http_rejects_unknown_route_value` | 同上 | pass |
 | T-33 失败原因分类 | `test_classify_failure`（7 参数）、`test_should_escalate`（5 参数） | `tests/test_route.py` | pass |
 | **F8 预算守恒** | `test_router_shares_deadline_between_backends`、`test_router_stops_when_budget_is_exhausted`、`test_router_reports_timeout_when_budget_too_small_to_try_any_backend` | `tests/test_backends.py` | pass |
+| **v4.7 缓存并发（P0 串域 / WAL 重试）** | `test_concurrent_reads_and_writes_never_corrupt_rows`、`test_wal_switch_retries_when_database_is_locked`、`test_wal_degradation_is_loud_but_usable` | `tests/test_cache_sqlite.py` | pass（改前必红，见 `evidence/v47-cache-concurrency.md`） |
 | **v4.7 早退路径审计完整性**（畸形/空 body 必须留审计行） | `test_malformed_json_is_rejected_and_still_audited`、`test_empty_body_is_rejected_and_still_audited` | `tests/test_governance.py` | pass（改前必红，见 `evidence/v47-early-exit-audit.md`） |
 | **v4.7 真进程交付链路**（16 + 13 = 29 断言） | `A01..A16` + `B01..B13` | `scripts/e2e_local.py` | pass 29/29 |
 | **v4.7 排空 / 滚动 / blue-green** | `A01..A06` + `B01..B07` + `C01..C04` | `scripts/hot_update_drill.py` | pass 17/17 |

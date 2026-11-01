@@ -72,17 +72,17 @@
 
 | 门禁 | 目标 | 实测 | 结论 |
 |---|---|---|---|
-| Python 全量测试 | 0 failed | **304 passed**（35.2s） | ✅ |
-| Python 覆盖率 | ≥80%（service.py ≥70%） | **82.06%**（service.py 76%） | ✅ |
+| Python 全量测试 | 0 failed | **307 passed**（35.5s，连跑 3 次稳定） | ✅ |
+| Python 覆盖率 | ≥80%（service.py ≥70%） | **81.95%**（service.py 76%） | ✅ |
 | Go 测试 | 0 failed 且 `-race` | **41 个 Test 全过，`-count=1 -race` 绿**（8.3s） | ✅ |
 | Go 静态检查 | `go vet` 无输出 | 无输出 | ✅ |
 | Python 语法 | compileall 退出 0 | 0 | ✅ |
-| 结论库 | `validate-findings.mjs` exit 0 | **38 条**（32/5/1）exit 0 | ✅ |
+| 结论库 | `validate-findings.mjs` exit 0 | **40 条**（34/5/1）exit 0 | ✅ |
 | 冒烟（E2E） | `/health` ready + `/detect` + SSRF 守卫 | 三项全绿（`run.ps1 smoke`） | ✅ |
 | **真进程 E2E** | 全绿 | **29/29**（`run.ps1 e2e`）· `evidence/e2e-local.json` | ✅ |
 | **热更新/滚动演练** | 全绿 | **17/17** · `evidence/hot-update.json` | ✅ |
 | **容器 E2E（3 worker）** | 就绪 + 6 端点 + 滚动 + 优雅退出 | 3s 就绪 / 6 项全过 / 150-0 失败 / 202+exit 0 · `evidence/v47-container.md` | ✅ |
-| 回放吞吐（E2） | ≥50 QPS | **5615.6 QPS**（p99 2.92ms，28088 请求 0 错） | ✅ |
+| 回放吞吐（E2） | ≥50 QPS | **5959.6 QPS**（p99 2.72ms，29807 请求 0 错） | ✅ |
 | 冷路径准入（E1/F2） | 不被拒、每请求 1 次求解 | 16/16 accepted，solves_per_request **1.0** | ✅ |
 | 多进程去重（G2/A3） | 先后 + 同时到达都只解 1 次 | sequential **3/3 轮**；burst **3 次**（1 次/轮） | ✅ |
 | 路由收益（G1 机制） | 无盾站不启浏览器 | `route=auto`：`no_challenge=true`、`solves` 计数不动、探测缓存命中后 `elapsed=0.0` | ✅ |
@@ -188,6 +188,9 @@
 | R9b | **glassdoor.co.uk 疑似出口 IP 已提分** | 已停止实验 | 同站当天被连打 12 次后 60s 解不出；换出口再验证，不要在同一出口反复打同一站 |
 | R10 | 缓存命中路径在 32 并发下 p99 ≈1s | 已量化 | 单进程建议 ≤16 并发；要更高稳态吞吐请加进程 |
 | R11 | geoip 已否决（有证据） | 决策完成 | camoufox `geoip=True` 会 `download_mmdb()` 下载外部数据库（`geolocation.py`），按指南 §8 否决 |
+| **R13** | **WAL 切换竞态未能确定性复现** | 已知边界（N-16 的另一半） | 试过同进程持锁 / 跨进程持锁 / 90 次裸构造，都没稳定命中那 1/10。已加有界重试把概率压到观察不到（10 轮 0 红），但**不能宣称"不可能再发生"**；回归用例只覆盖重试逻辑（mock 真实 SQLite 错误），见 `evidence/v47-cache-concurrency.md` |
+| **R14** | **测试侧 `ResourceWarning: unclosed database`** | 记录（P3） | 一批用例构造 `SqliteStore` 后没 `close()`；不影响正确性（进程退出即回收），但会把 warning 列表撑到 100+ 条，掩盖真信号。修法：加 autouse fixture 统一关闭，属于测试卫生，未在本轮做 |
+| **R15** | 读路径改为串行进锁 | 已量化，非阻塞 | 单进程内缓存读写现在严格串行。实测无退化（hot **5959.6 QPS / p99 2.72ms**，改前 5615.6 / 2.92ms），因为锁只覆盖 DB 调用（微秒级），求解是秒级 |
 
 ---
 
@@ -212,12 +215,14 @@
 
 这一轮**没有加新功能**，只做三件事：把"没验证过的"变成**可复现的断言**、修掉两个只有真跑才会暴露的缺陷、清掉文档里的过期结论。
 
-### 9.1 修掉的两个真缺陷
+### 9.1 修掉的四个真缺陷
 
 | # | 缺陷 | 怎么发现的 | 修法 | 证据 |
 |---|---|---|---|---|
-| **N-14** | `do_POST` 的三条早退路径（空 body / 畸形 JSON / 超大 body）在 `url` 赋值之前抛异常，而 `except` 无条件读 `url` → `UnboundLocalError` **打穿 `_log`**：响应仍是 400（所以状态码用例全绿），但**审计里一条都没有**，且每个畸形请求打一整段 traceback | 新写的**真进程 E2E** 在「服务日志不许出现 Traceback」上变红 | try 之前绑定 `url = ""`；两条「改前必红」用例 | `evidence/v47-early-exit-audit.md` |
-| **N-13** | 镜像承诺"运行期不联网下载浏览器"，但 camoufox 的 uBlock Origin **不在** `camoufox fetch` 产物里，是**首次启动**才下载（18MB）。离线环境浏览器永远起不来；slim 分支还有一句 `rm -rf addons/*/` 反向删掉它 | 容器 `docker logs` 里看到 `Downloading addon (UBO) 0%→100%` | build 阶段 headless 拉起一次浏览器预热插件（`PREWARM_ADDONS=1`）；删掉那句 rm | `evidence/v47-container.md` §2 |
+| **N-15**（P0） | **读路径不加锁 → 凭证缓存串域**。v4.2 把连接改成全进程共享修句柄泄漏，但只给**写**加了锁，读路径的注释写"并发安全由 sqlite3 内部互斥保证"——不成立：同一连接上游标状态共享，`fetchone()` 会互相踩。16 线程压测里**问 k9 拿到了 k10 的 `cf_clearance`**，另有 `InterfaceError` 与 `float(None)` 的 `TypeError` | `run.ps1 verify` 的 pytest 汇总里一条 `PytestUnhandledThreadExceptionWarning`（**304 个用例全绿**，线程里在抛异常） | 四条读路径（get/items/__len__/host_stats，外加 stats）全部进 `_conn_lock`（RLock 可重入）；`expires_at` 加类型防御 | `evidence/v47-cache-concurrency.md` · 用例 `test_concurrent_reads_and_writes_never_corrupt_rows`（改前必红） |
+| **N-16**（中） | 切 WAL 不带重试。`PRAGMA journal_mode=WAL` 拿不到锁时**不走 busy handler**，多进程冷启动约 **1/10** 有进程起不来（= compose 3 worker 冷启动偶发重启） | `test_concurrent_first_boot_shares_one_salt` 间歇性红；**在原始 HEAD 上用 git stash 复现过 1/10**，与本轮改动无关 | busy_timeout 提到切 WAL 之前；切 WAL 有界重试（25×0.2~0.6s）；仍失败则降级 + 打印警告 + `stats().journal_mode` 可见 | 同上 · 用例 `test_wal_switch_retries_when_database_is_locked` / `test_wal_degradation_is_loud_but_usable` |
+| **N-14**（高） | `do_POST` 的三条早退路径（空 body / 畸形 JSON / 超大 body）在 `url` 赋值之前抛异常，而 `except` 无条件读 `url` → `UnboundLocalError` **打穿 `_log`**：响应仍是 400（所以状态码用例全绿），但**审计里一条都没有**，且每个畸形请求打一整段 traceback | 新写的**真进程 E2E** 在「服务日志不许出现 Traceback」上变红 | try 之前绑定 `url = ""`；两条「改前必红」用例 | `evidence/v47-early-exit-audit.md` |
+| **N-13**（中） | 镜像承诺"运行期不联网下载浏览器"，但 camoufox 的 uBlock Origin **不在** `camoufox fetch` 产物里，是**首次启动**才下载（18MB）。离线环境浏览器永远起不来；slim 分支还有一句 `rm -rf addons/*/` 反向删掉它 | 容器 `docker logs` 里看到 `Downloading addon (UBO) 0%→100%` | build 阶段 headless 拉起一次浏览器预热插件（`PREWARM_ADDONS=1`）；删掉那句 rm | `evidence/v47-container.md` §2 |
 
 ### 9.2 新增的三个可重复验收件
 

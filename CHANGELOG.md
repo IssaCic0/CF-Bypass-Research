@@ -6,6 +6,29 @@
 
 主题：**不加功能，只把"没验证过的"变成可复现的断言，并修掉两个只有真跑才会暴露的缺陷。**
 
+### 修复：缓存层两个并发缺陷（P0，本轮挖出来的）
+
+- **N-15（P0）读路径不加锁 → 凭证缓存串域**。v4.2 为了修句柄泄漏把 sqlite 连接改成
+  **全进程共享一条**，但只给**写**路径加了锁，读路径的注释写的是"并发安全由 sqlite3
+  内部互斥保证"——**这不成立**：pysqlite 只把单次 C 调用串行化，两条线程在同一条连接上
+  `execute()` 之后**游标状态是共享的**，`fetchone()` 会互相踩。
+  16 线程压测里的实测后果：`InterfaceError('bad parameter or other API misuse')`、
+  `float(None)` 的 `TypeError`，以及最坏的一种——**问 k9 拿到了 k10 的 `cf_clearance`**。
+  凭证按域隔离是这套服务的底线，串域会让回放稳定 403，而且完全查不出来。
+  修法：四条读路径（`get`/`items`/`__len__`/`host_stats`，外加 `stats()`）全部进
+  `_conn_lock`（`RLock` 可重入，`get()` 内部调 `delete()` 不会死锁），锁只覆盖到 fetch
+  完成；顺带给 `expires_at` 加类型防御（坏行按未命中处理，不再把 TypeError 抛给调用方）。
+  **这个缺陷一直是"绿"的**：线程里的异常只变成 `PytestUnhandledThreadExceptionWarning`，
+  用例照样通过——所以它只在 `run.ps1 verify` 的 warning 区里露了半行。
+  用例：`test_concurrent_reads_and_writes_never_corrupt_rows`（改前必红）。
+- **N-16（中）切 WAL 不带重试**。`PRAGMA journal_mode=WAL` 拿不到锁时**不走 busy handler**，
+  直接返回 `database is locked`：多进程冷启动（compose 3 worker / 6 个子进程同时首启空目录）
+  实测约 **1/10** 概率有一个进程起不来，`test_concurrent_first_boot_shares_one_salt` 因此
+  **间歇性红**。已确认是**既有**缺陷（把本轮改动 `git stash` 掉后 10 轮仍复现 1 次）。
+  修法：`busy_timeout` 提到切 WAL 之前 + 有界重试（25×0.2~0.6s）+ 仍失败则降级并**打印警告**、
+  把真实模式暴露在 `stats().journal_mode`（可用性优先，但不静默）。
+  诚实边界：竞态本身没能被确定性复现，用例只覆盖重试逻辑（mock 真实 SQLite 错误）。
+
 ### 修复
 
 - **N-14（审计丢失 + 日志洪水）**：`do_POST` 的三条早退路径（空 body / 畸形 JSON / 超大 body）
@@ -56,20 +79,20 @@ un.ps1 xxx`。
 
 ### 结论库
 
-- `docs/findings.json` 29 → **38 条**：补登记历史缺陷 F-030…F-036（N-01 SSRF 绕过 /
+- `docs/findings.json` 29 → **40 条**：补登记历史缺陷 F-030…F-036（N-01 SSRF 绕过 /
   N-02 TTL 自相矛盾 / N-03 盐文件并发 / N-04 过期项虚高 / N-05 跨进程重复求解 /
-  N-06 覆盖 `Thread._stop` / N-07 假绿用例），加上本轮的 F-037(=N-14)、F-038(=N-13)。
+  N-06 覆盖 `Thread._stop` / N-07 假绿用例），加上本轮的 F-037(=N-14)、F-038(=N-13)、F-039(=N-15)、F-040(=N-16)。
 
 ### 验证（全部本机实跑）
 
 | 项 | 结果 |
 |---|---|
-| `pytest tests/ -q --cov=solver --cov-fail-under=80` | **304 passed / 82.06%** |
+| `pytest tests/ -q --cov=solver --cov-fail-under=80` | **307 passed / 81.95%**（连跑 3 次稳定） |
 | `go vet ./... && go test -count=1 -race ./...` | 无输出 / **41 Test 全过（8.3s）** |
-| `node scripts/validate-findings.mjs` | **38 条** exit 0 |
+| `node scripts/validate-findings.mjs` | **40 条** exit 0 |
 | `run.ps1 e2e` | **29/29** |
 | `hot_update_drill.py` | **17/17** |
-| `loadtest.py --mode hot/cold/share` | 5615.6 QPS 0 错 / 16-16 准入 / 3 次求解 |
+| `loadtest.py --mode hot/cold/share` | 5959.6 QPS 0 错 / 16-16 准入 / 3 次求解 |
 | 容器（compose 3 worker） | 3s 就绪、6 端点全过、滚动 150-0、`/shutdown` 202 + exit 0 |
 
 ### 未做（别读成已闭环）
