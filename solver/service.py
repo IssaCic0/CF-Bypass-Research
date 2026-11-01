@@ -1740,6 +1740,13 @@ class Handler(BaseHTTPRequestHandler):
         # 路由决策在 try 之外初始化：失败时也要把它带回给调用方
         # （实测：route=auto 求解失败时响应里完全没有 routed_by，排查时不知道"当时怎么判的"）。
         routed_by = None
+        # `url` 必须在 try **之前**就绑定：空 body / 坏 JSON / 超大 body 三条早退路径
+        # 都在 `url = req.get("url")` 之前就抛 SolveError，而下面的 except 会无条件读它。
+        # 实测后果（v4.7 抓到）：`UnboundLocalError` 把 `_log` 那行打穿 ——
+        # 响应仍是 400（只看状态码的用例全绿），但**审计里一条都没有**，
+        # 且 socketserver 会替每一个畸形请求打一整段 traceback（日志洪水）。
+        # 畸形输入恰恰是最需要审计的那一类，所以这里不是"兜个 None"而是修根。
+        url = ""
         try:
             if body_error:
                 raise SolveError(ErrorCode.INVALID_REQUEST, body_error, stage="validate")

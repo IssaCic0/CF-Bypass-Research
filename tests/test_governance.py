@@ -804,3 +804,51 @@ def test_claim_released_when_solver_admission_rejects(tmp_path):
         except ValueError:
             pass
         s.close()
+
+
+# ── 早退路径的审计完整性（v4.7：畸形 body 打穿了日志本身）────────────
+def _post_raw(base, raw: bytes):
+    """发**原始字节** body：`_post` 会先 json.dumps，构造不出畸形 JSON。"""
+    req = urllib.request.Request(
+        base + "/solve", data=raw,
+        headers={"Content-Type": "application/json", "Authorization": "Bearer t"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.status, json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        return e.code, json.loads(e.read().decode())
+
+
+def _solve_audits(audit):
+    lines = [x for x in audit.read_text(encoding="utf-8").splitlines() if x.strip()]
+    return [json.loads(x) for x in lines if json.loads(x).get("event") == "solve"]
+
+
+def test_malformed_json_is_rejected_and_still_audited(live_audit):
+    """畸形 body 也必须留下审计行。
+
+    回归的是 `do_POST` 的早退路径：`url` 在 `_parse_json()` **之后**才赋值，
+    而 `except SolveError` 里无条件读 `url` → `UnboundLocalError`。
+    后果很隐蔽：响应仍是 400（所以只看到状态码的用例全绿），
+    但 `_log` 那行没跑到 ⇒ **审计里一条都没有**，socketserver 还替每个
+    这样的请求打一整段 traceback。畸形输入恰恰是最需要审计的那一类。
+    """
+    base, audit = live_audit
+    code, body = _post_raw(base, b"{not json")
+    assert code == 400 and body.get("error_code") == "invalid-request", (code, body)
+    assert wait_until(lambda: audit.exists() and "solve" in audit.read_text(encoding="utf-8")), \
+        "畸形请求没有留下任何审计行（日志路径被 UnboundLocalError 打穿）"
+    recs = _solve_audits(audit)
+    assert recs and recs[-1]["error_code"] == "invalid-request", recs
+
+
+def test_empty_body_is_rejected_and_still_audited(live_audit):
+    """空 body 走的是同一段早退路径（`body_error` 在 `url` 赋值前就抛出）。"""
+    base, audit = live_audit
+    code, body = _post_raw(base, b"")
+    assert code == 400, (code, body)
+    assert wait_until(lambda: audit.exists() and "solve" in audit.read_text(encoding="utf-8")), \
+        "空 body 请求没有留下任何审计行"
+    recs = _solve_audits(audit)
+    assert recs and recs[-1]["error_code"] == "invalid-request", recs
