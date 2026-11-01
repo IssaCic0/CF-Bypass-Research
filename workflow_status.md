@@ -58,7 +58,7 @@
 |---|---|---|---|
 | **T-39** | CI 三 job（python 覆盖率门槛 / go vet+race / findings），全程离线 | **DONE** | `.github/workflows/ci.yml`、`requirements-dev.txt` · `evidence/T-39.json` |
 | **T-40** | `scripts/loadtest.py`（hot/cold/share）+ `scripts/doctor.py` | **DONE** | 实跑数据见 §4 · `evidence/T-40.json` |
-| **T-41** | 统一入口 `run.ps1`/`run.bat` + Dockerfile/compose | **DONE（Docker 部分未验证）** | `run.ps1` 实跑通过；镜像未构建（本机 Docker daemon 未运行）· `evidence/T-41.json` |
+| **T-41** | 统一入口 + Dockerfile/compose | 本会话 | **DONE** | 构建成功 1.61GB；容器 **5s 就绪**（修复前 110-120s）；`/health`/`/detect`/SSRF/401/`route=auto`/`/shutdown` 六项全过；优雅退出 `exit=0` · `evidence/v44-container.md` |
 | **C3** | 删除研究产物 + 修 findings 证据链 | **DONE** | `node-shim/`、`go-jseng/`、`go-replay/` 已 `git rm`；`validate-findings.mjs` exit 0 |
 | C1/C2 | 文档纠偏 / `docs/项目规格.md` | 本会话 | **DONE** | `docs/项目规格.md`（单一事实源）+ `docs/部署-容器.md` + `docs/运维-压测与自检.md` |
 | **T-42** | 发版 v4.0.0（tag + CHANGELOG + release） | **DONE** | 见 `git tag v4.0.0`、`CHANGELOG.md` |
@@ -117,6 +117,8 @@
 | V28 | **E5：崩溃隔离演练（真实杀进程）** | 摘除 **2s**（maxFailures=2 + 探活 2s）、回归 **28s**（受 30s downDuration 支配），其余节点全程 f=0 ✅ |
 | V29 | **跨进程去重** | `loadtest share` burst：**3 轮 3 次求解**（修复前 12 次） |
 | V30 | **route=auto 真机 3 站** | udemy 6.9s/459B、canva 4.7s/330B（solve）；**g2 → reject 1.3s**（DataDome，不再白等 45s） |
+| V31 | **容器化真跑** | build 1.61GB；容器 **5s 就绪**（修复前 110-120s）；六项端点全过；`/shutdown` → 202(peer=172.17.0.1) → `exit=0` |
+| V32 | **容器专属缺陷 N-11/N-12** | N-11 fetch 落 root HOME→每容器重下载（110s→5s）；N-12 `/shutdown` 仅回环在端口映射下失效（加 `--allow-remote-shutdown`+回归用例） |
 
 ---
 

@@ -39,6 +39,22 @@
 - `scripts/loadtest.py` 的 `share` 子进程改为模拟真实行为（先 `try_claim` 抢，抢不到等缓存），
   因此 burst 阶段现在也应当只解 1 次/轮 —— 一旦抢占回归，burst 会立刻从 1 次变回 4 次。
 
+### 容器化：从「未验证」到「真跑通」，并抓出 2 个容器专属缺陷
+
+| 项 | 结果 |
+|---|---|
+| `docker build` | ✅ 1.61 GB |
+| 容器就绪 | ✅ **5 s**（修复前 **110–120 s**） |
+| 端点 | ✅ `/health`、`/detect`（真出站）、SSRF 400、无 token 401、`route=auto` skip |
+| 优雅退出 | ✅ `POST /shutdown` → `202`（peer=172.17.0.1）→ **`exit=0`** + `在途请求已全部完成` |
+
+- **N-11**：build 期 `camoufox fetch` 落在 root 的 HOME，运行期用户是 `solver` ⇒ **每个新容器首次启动
+  重下载浏览器（白等 110s）**。修法：`ENV HOME=/home/solver` → fetch → `chown` → `USER solver`
+  （直接 `USER solver` 再 fetch 会因 fpgen 模型属主报错，构建失败）。
+- **N-12**：`/shutdown` 的「仅回环」判断在端口映射下不成立（客户端是 **docker 网关 172.17.0.1**）
+  ⇒ 滚动重启在容器里必失败。修法：抽出 `shutdown_allowed(peer)` + 新增 `--allow-remote-shutdown`
+  （compose 已带；token 仍是第一道门），并有回归用例 `test_shutdown_allowed_matrix`。
+
 ### 验证
 
 | 项 | 结果 |
@@ -47,6 +63,7 @@
 | Go | 41 + egress 4 个用例，`vet` + `-race` 绿 |
 | 跨进程去重 | burst 12 → **3**（1 次/轮） |
 | 路由证据 | 3 站 solve + 1 站 reject（1.3s） |
+| 容器 | 5s 就绪 / 六项端点全过 / 优雅退出 exit=0 |
 
 ## [4.3.0] - 2026-11-02
 

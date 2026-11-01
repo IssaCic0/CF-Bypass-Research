@@ -648,3 +648,25 @@ def test_solver_dedups_same_host_across_two_instances(tmp_path):
     finally:
         for s in solvers:
             s.close()
+
+
+# ── /shutdown 的来源判定（容器场景的回归保护）──────────
+def test_shutdown_allowed_matrix():
+    """默认只放行回环；`--allow-remote-shutdown` 才放行任意来源。
+
+    实测背景：容器 + 端口映射时客户端地址是 docker 网关（172.17.0.1），
+    只放行回环会让"滚动重启"在容器里直接失败（本轮真跑容器时抓到）。
+    """
+    old = svc.Handler.allow_remote_shutdown
+    try:
+        svc.Handler.allow_remote_shutdown = False
+        for peer in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"):
+            assert svc.Handler.shutdown_allowed(peer) is True, peer
+        for peer in ("172.17.0.1", "10.0.0.5", "203.0.113.9", ""):
+            assert svc.Handler.shutdown_allowed(peer) is False, peer
+
+        svc.Handler.allow_remote_shutdown = True
+        for peer in ("172.17.0.1", "203.0.113.9"):
+            assert svc.Handler.shutdown_allowed(peer) is True, peer
+    finally:
+        svc.Handler.allow_remote_shutdown = old

@@ -1735,6 +1735,19 @@ class Handler(BaseHTTPRequestHandler):
     audit_lock = threading.Lock()
     audit_fp = None
 
+    @staticmethod
+    def shutdown_allowed(peer: str) -> bool:
+        """谁能触发 `/shutdown`。
+
+        **实测教训（只有容器能暴露）**：容器 + 端口映射时，客户端地址是 docker 网关
+        （如 `172.17.0.1`），不是 `127.0.0.1` —— 只放行回环会让"滚动重启"在容器里直接失败。
+        所以默认只放行回环，但提供 `--allow-remote-shutdown` 给容器/编排场景；
+        无论哪种，**Bearer token 都是第一道门**。
+        """
+        if Handler.allow_remote_shutdown:
+            return True
+        return (peer or "") in ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1")
+
     @classmethod
     def enter_request(cls) -> None:
         with cls.inflight_lock:
@@ -2004,11 +2017,14 @@ class Handler(BaseHTTPRequestHandler):
           3. **异步返回**：先 202 再真正退出，调用方不会拿到"连接被重置"。
         """
         peer = (self.client_address or ("", 0))[0]
-        loopback = peer in ("127.0.0.1", "::1", "localhost")
-        if not loopback and not Handler.allow_remote_shutdown:
+        if not Handler.shutdown_allowed(peer):
             raise SolveError(
-                ErrorCode.UNAUTHORIZED, "只允许从回环地址触发优雅退出", stage="admit",
-                hint="跨机停服请用信号/编排器；确需远程触发请显式加 --allow-remote-shutdown",
+                ErrorCode.UNAUTHORIZED,
+                f"只允许从回环地址触发优雅退出（当前来源 {peer}）",
+                stage="admit",
+                hint=("容器/端口映射部署请显式加 --allow-remote-shutdown："
+                      "此时客户端地址是 docker 网关（如 172.17.0.1），不是 127.0.0.1，"
+                      "回环判断不成立。token 仍是第一道门。"),
             )
         self._send(202, {"ok": True, "state": "shutting-down", "peer": peer})
         self._log(event="shutdown", peer=peer)
@@ -2211,6 +2227,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--headed", action="store_true", help="有头模式（调试用）")
     ap.add_argument("--max-queue", type=int, default=DEFAULT_MAX_QUEUE, help="有界队列容量，满即 429")
     ap.add_argument("--max-inflight", type=int, default=DEFAULT_MAX_INFLIGHT, help="并发求解上限，满即 429")
+    ap.add_argument("--allow-remote-shutdown", action="store_true",
+                    help="允许非回环地址触发 POST /shutdown（容器/端口映射需要；token 仍是第一道门）")
     ap.add_argument("--audit-log", default="", help="审计日志（JSONL）路径；空=关闭。只记白名单字段，不含凭证")
     ap.add_argument("--detect-cache-ttl", type=float, default=DETECT_CACHE_TTL,
                     help="探测结果（/detect 与 route=auto）按域缓存的 TTL（秒）；0=关闭")
@@ -2315,6 +2333,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     Handler.solver = solver
     Handler.token = token
+    Handler.allow_remote_shutdown = bool(args.allow_remote_shutdown)
     Handler.audit_path = (args.audit_log or "").strip()
     if Handler.audit_path:
         try:

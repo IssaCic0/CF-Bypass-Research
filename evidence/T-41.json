@@ -1,29 +1,34 @@
 {
   "task_id": "T-41",
-  "status": "done_partial",
-  "timestamp": "2026-11-01T22:30:39+0800",
+  "status": "done",
+  "timestamp": "2026-11-02T02:42:36+0800",
   "baseline_commit": "d5a5f53",
   "goal": "统一入口 run.ps1/run.bat + 容器化（Dockerfile/compose）",
   "commands_executed": [
     {
-      "cmd": "PowerShell ParseFile('run.ps1')",
+      "cmd": "docker compose config -q",
       "exit_code": 0,
-      "raw_output_tail": "run.ps1 语法 OK"
+      "raw_output_tail": "compose config OK"
     },
     {
-      "cmd": ".\\run.ps1 go",
+      "cmd": "docker build -t cf-bypass-solver:4.4.0 .",
       "exit_code": 0,
-      "raw_output_tail": "ok gocfsolve 7.140s"
+      "raw_output_tail": "Camoufox v156.0.1-beta.36 installed. / naming to docker.io/library/cf-bypass-solver:4.4.0 / 1.61GB"
     },
     {
-      "cmd": ".\\run.ps1 verify",
+      "cmd": "docker run -d -p 8892:8878 -v cf-data44:/data ... --allow-remote-shutdown",
       "exit_code": 0,
-      "raw_output_tail": "全部通过（Python 227 / cov 80.47% / Go race 绿 / findings exit 0）"
+      "raw_output_tail": "就绪用时 5s；cache=sqlite:/data/cache；token 指纹已生成"
     },
     {
-      "cmd": ".\\run.ps1 smoke -Port 8911 -NoAuth",
+      "cmd": "curl /health, /detect, /detect(内网), /solve(无token), /solve(route=auto), /shutdown",
       "exit_code": 0,
-      "raw_output_tail": "OK /health ready(cache=sqlite:...) · OK /detect -> direct · OK SSRF 守卫拦住内网 URL"
+      "raw_output_tail": "state=ready / protected=false / invalid-request / 401 / no_challenge=true action=skip / 202 peer=172.17.0.1"
+    },
+    {
+      "cmd": "docker inspect --format '{{.State.Status}} exit={{.State.ExitCode}}' cf-v44",
+      "exit_code": 0,
+      "raw_output_tail": "exited exit=0；日志：优雅退出：在途请求已全部完成 / 已退出"
     }
   ],
   "files_changed": [
@@ -33,10 +38,17 @@
     "docker-compose.yml",
     ".dockerignore"
   ],
-  "tests": [],
+  "tests": [
+    {
+      "name": "test_shutdown_allowed_matrix",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "容器场景回归：docker 网关 172.17.0.1 默认拒绝、开 flag 后放行"
+    }
+  ],
   "limitations": [
-    "Docker 镜像未构建：本机 Docker daemon 未运行（docker version 连不上 npipe）",
-    "docker-compose.yml 未做 compose config 校验（同因）",
-    "Dockerfile 的 Debian 依赖包名按官方文档写，首次构建需复核"
+    "只在本机 Docker Desktop(linux) 上验证；K8s/其他发行版未验证",
+    "compose 只做 config -q + 单容器手工运行，未真起 3 个 worker",
+    "镜像 1.61GB 未瘦身（含浏览器二进制）"
   ]
 }

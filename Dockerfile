@@ -32,14 +32,24 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 关键：在镜像里把浏览器二进制装好，运行期不再联网
-RUN python -m camoufox fetch
-
 COPY solver/ ./solver/
 COPY scripts/ ./scripts/
 
 RUN useradd --create-home --uid 10001 solver \
     && mkdir -p /data/cache && chown -R solver:solver /data /app
+
+# 关键：让 fetch 落到**运行期用户的 HOME**，再把属主交给他。
+#
+# 两个实测教训（v4.4 真跑容器时抓到）：
+#  1. 直接在 USER solver 之前 fetch，浏览器会落进 root 的 HOME（/root/.cache/camoufox），
+#     而运行期用户是 solver（HOME=/home/solver）→ 缓存是空的 → **每个新容器首次启动
+#     都重新下载浏览器**（实测白等 110s、多占 ~150MB）。
+#  2. 单纯改成 `USER solver` 后 fetch，camoufox 的 fpgen 模型那一步会报
+#     "A model this user cannot read was installed by another account"（它按目录属主判权限）。
+# 所以：把 HOME 指到 solver 的家目录，以 root 完成 fetch，**再把属主整体交给 solver**。
+ENV HOME=/home/solver
+RUN python -m camoufox fetch && chown -R solver:solver /home/solver/.cache
+
 USER solver
 
 VOLUME ["/data"]

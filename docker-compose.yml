@@ -18,6 +18,11 @@ x-solver: &solver
     CF_SOLVE_TOKEN_FILE: /data/.env
     CF_CACHE_DIR: /data/cache
     CF_BROWSER_OS: windows      # 固定 persona：随机 UA 会让 IP 时区与指纹互相矛盾
+  # 容器/端口映射下客户端地址是 docker 网关（如 172.17.0.1），不是 127.0.0.1 ——
+  # 不放这行，`POST /shutdown`（滚动重启用）会一律 401。token 仍是第一道门。
+  command: ["python", "solver/service.py", "--host", "0.0.0.0", "--port", "8878",
+            "--cache-dir", "/data/cache", "--token-file", "/data/.env",
+            "--allow-remote-shutdown"]
   healthcheck:
     test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8878/health', timeout=4).status==200 else 1)"]
     interval: 30s
