@@ -405,8 +405,8 @@ class SqliteStore:
                 mode = _try_set_wal(conn)
             except Exception as e:  # noqa: BLE001 —— 只有"锁竞争"值得重试
                 last = f"{type(e).__name__}: {e}"
-                if not _is_lock_error(e):
-                    break                                   # 永久错误：不浪费 10s
+                if not _is_lock_error(e) or i == attempts - 1:
+                    break                                   # 永久错误 / 最后一次：不浪费 10s
                 time.sleep(delay * (1 + i % 3))
                 continue
             # **关键**：`PRAGMA journal_mode=WAL` 在"切不过去"时**未必抛异常** ——
@@ -435,7 +435,8 @@ class SqliteStore:
                 pass
             print(f"[cfsolve] 警告：未能启用 WAL（{last or '未知原因'}），"
                   f"当前 journal 模式={mode or '未知'}，synchronous 已退回 FULL；"
-                  f"并发写会退化为串行，功能不受影响", file=sys.stderr, flush=True)
+                  f"并发写会退化为串行。若这是永久性错误（不是锁竞争），"
+                  f"随后的建表会带着真实错误失败", file=sys.stderr, flush=True)
         return mode
 
     def _init_schema(self) -> None:
@@ -590,16 +591,25 @@ class SqliteStore:
             return 0
 
     def stats(self) -> dict:
+        alive, mode = 0, self._journal_mode
+        # 读路径同样必须进锁（共享连接 + 并发游标会串行/串数据，见 _conn 的说明）。
+        # 外层再包一层：`_conn()` 自己也可能抛（库文件被删/权限没了），
+        # stats() 是诊断接口，任何情况下都该返回结构而不是把调用方打挂。
         try:
-            # 读路径同样必须进锁（共享连接 + 并发游标会串行/串数据，见 _conn 的说明）。
             with self._conn_lock:
                 conn = self._conn()
-                alive = conn.execute(
-                    "SELECT COUNT(*) FROM entries WHERE expires_at > ?", (time.time(),)
-                ).fetchone()[0]
-                # 现读而不是回放建连时的快照：多进程下别的进程可能已经把库切成 WAL，
-                # 报一个陈旧值会让排障时"模式看起来是 delete，实际是 wal"。
-                mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0] or "").lower()
+                try:
+                    alive = conn.execute(
+                        "SELECT COUNT(*) FROM entries WHERE expires_at > ?", (time.time(),)
+                    ).fetchone()[0]
+                except Exception:  # noqa: BLE001
+                    alive = 0
+                try:
+                    # 现读而不是回放建连时的快照：多进程下别的进程可能已经把库切成 WAL，
+                    # 报一个陈旧值会让排障时"模式看起来是 delete，实际是 wal"。
+                    mode = str(conn.execute("PRAGMA journal_mode").fetchone()[0] or "").lower()
+                except Exception:  # noqa: BLE001 —— 只丢 mode，别把 entries 一起抹成 0
+                    mode = self._journal_mode
         except Exception:  # noqa: BLE001
             alive, mode = 0, self._journal_mode
         return {"backend": "sqlite", "entries": int(alive), "max_entries": self._max,

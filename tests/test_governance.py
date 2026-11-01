@@ -872,10 +872,22 @@ def test_oversized_body_is_rejected_and_still_audited(live_audit):
     """
     base, audit = live_audit
     big = b"{" + b"x" * (70 * 1024) + b"}"          # > MAX_BODY_BYTES(64KB)
-    code, body = _post_raw(base, big)
-    assert code == 400, (code, body)
-    assert body.get("error_code") == "invalid-request", body
-    assert "请求体超过" in str(body.get("error", "")), body
+    code, body = None, {}
+    try:
+        code, body = _post_raw(base, big)
+    except (urllib.error.URLError, ConnectionError) as e:
+        # 允许的一种平台差异：服务端 `_read_body_raw` 明确写了 close_connection（不读超大 body
+        # 就直接消失），某些内核/缓冲区组合下客户端会在"发完 body"之前先拿到
+        # ConnectionReset/RemoteDisconnected，而不是读到 400。这不是服务缺陷 ——
+        # 所以这里退一步：只要求"异常确实是连接级重置"，状态码断言跳过；
+        # 真正要钉的是下面那条「审计里必须有这一行」。
+        msg = str(e).lower()
+        assert any(k in msg for k in ("reset", "aborted", "10054", "remote end closed",
+                                      "connection")), f"意外的客户端异常：{e}"
+    assert code in (None, 400), (code, body)
+    if code == 400:
+        assert body.get("error_code") == "invalid-request", body
+        assert "请求体超过" in str(body.get("error", "")), body
     assert wait_until(lambda: audit.exists() and "solve" in audit.read_text(encoding="utf-8")), \
         "超大 body 请求没有留下审计行"
     recs = _solve_audits(audit)
