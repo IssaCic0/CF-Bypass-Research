@@ -80,26 +80,26 @@ class Prewarmer(threading.Thread):
         self._backoff_base = max(30.0, backoff_base)
         self._solve_timeout = solve_timeout
         self._rng = rng or random.Random()
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._lock = threading.Lock()
         self._hosts: list[HostState] = [HostState(url=_normalize(u)) for u in targets if _normalize(u)]
         self.stats = PrewarmStats(per_host={h.url: {"failures": 0, "last_error": ""} for h in self._hosts})
 
     # -- 生命周期 ----------------------------------
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def run(self) -> None:
         # 启动后先随机等一下，避免多进程同时开始续期（进程级抖动）
         if self._jitter:
-            self._stop.wait(self._rng.uniform(0, self._jitter))
-        while not self._stop.is_set():
+            self._stop_event.wait(self._rng.uniform(0, self._jitter))
+        while not self._stop_event.is_set():
             try:
                 self.run_once()
             except Exception as e:  # noqa: BLE001 —— 保活线程绝不能因单次异常退出
                 with self._lock:
                     self.stats.last_error = f"{type(e).__name__}: {str(e)[:120]}"
-            self._stop.wait(self._interval)
+            self._stop_event.wait(self._interval)
 
     # -- 单轮 --------------------------------------
     def run_once(self) -> None:
@@ -110,7 +110,7 @@ class Prewarmer(threading.Thread):
             hosts = list(self._hosts)
 
         for host in hosts:
-            if self._stop.is_set():
+            if self._stop_event.is_set():
                 return
             if host.next_attempt_at > time.time():
                 continue
@@ -127,7 +127,7 @@ class Prewarmer(threading.Thread):
             # 到期前的抖动：把续期时刻摊开，避免同一秒一起打
             if self._jitter and remaining >= 0:
                 time.sleep(self._rng.uniform(0, min(self._jitter, max(0.0, self._renew_before / 4))))
-                if self._stop.is_set():
+                if self._stop_event.is_set():
                     return
 
             try:

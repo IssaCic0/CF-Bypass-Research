@@ -97,6 +97,7 @@
 | V11 | 端到端服务（真实 camoufox） | 起服务 → `ready`，`cache_backend=sqlite:...`（证明 SQLite 缓存真的接上了生产路径） |
 | V12 | **`route=auto` 真机** | `POST /solve {url:https://example.com/, route:auto}` → `no_challenge:true, elapsed=0.55s`，`solves` 计数保持 0 |
 | V13 | 对照：同 URL 不传 route | 真去求解，20s 后 `unsolved`，`solves=1` ⇒ 路由收益 **0.55s vs 20s**（同一 URL、同一服务） |
+| V14 | **GitHub Actions 真跑** | 首轮 **红**：python(3.12) job 抓到 2 个本机发现不了的缺陷（N-06 prewarm 覆盖 `Thread._stop`、N-07 salt.bin 被 glob 命中）；覆盖率 81.11% 过门槛 |
 
 ---
 
@@ -109,6 +110,8 @@
 | **N-03** | **多进程首启争抢建盐文件时 `os.replace` 抛 `PermissionError`（WinError 5）**，4 worker 同启约 1/4 概率起不来 | 空缓存目录 + 多进程同时启动 | **已验证**（loadtest burst 阶段抓到）→ 已修为 `O_CREAT\|O_EXCL` 抢占 |
 | **N-04** | `FileStore.items()` 不过滤过期项 ⇒ `/health.cached_domains` 虚高 | 缓存里有过期项 | 已验证（新用例抓到）→ 已修 |
 | **N-05** | 多进程**同时**抢同一新域会各解一次（无跨进程互斥） | 4 worker 同时收到新域 | **已验证**（burst 12/12）→ **未修**，列为已知限制（见 §7） |
+| **N-06** | `Prewarmer` 用 `self._stop = threading.Event()` **覆盖了 `Thread._stop` 私有方法**，3.12 上线程收尾抛 `TypeError: 'Event' object is not callable` | 保活线程退出 | **已验证（CI, Linux/py3.12 抓到；本机 3.14 复现不出）** → 已改名 `_stop_event` |
+| **N-07** | `test_filestore_corrupt_file_*` 用 `glob("*.bin")` 取文件，Linux 上先拿到 `salt.bin` ⇒ 用例实际在弄坏盐而不是缓存条目 | 非 NTFS 目录序 | **已验证（CI, Linux 抓到）** → 改用排除盐的 `cache_files()` 助手 |
 
 ---
 

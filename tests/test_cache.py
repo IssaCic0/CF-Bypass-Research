@@ -86,7 +86,11 @@ def test_filestore_token_change_invalidates_all(tmp_path):
 def test_filestore_corrupt_file_is_treated_as_miss_and_cleaned(tmp_path):
     s = cache_mod.FileStore(str(tmp_path), TOKEN)
     s.set("host|default", entry())
-    target = next(tmp_path.glob("*.bin"))
+    # 必须排除 salt.bin：它也匹配 *.bin，Linux 上 glob 顺序会先返回它，
+    # 于是这条用例实际是把盐弄坏、而不是把缓存条目弄坏（CI 在 Linux 上抓到的真 bug）。
+    files = cache_files(tmp_path)
+    assert len(files) == 1
+    target = files[0]
     target.write_bytes(b"not-a-fernet-token")
     assert s.get("host|default") is None
     assert not target.exists(), "坏文件应被清理"
