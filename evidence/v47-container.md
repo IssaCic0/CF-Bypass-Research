@@ -105,6 +105,23 @@ $ docker wait cf-graceful     →  0
 容器日志尾部：`[cfsolve] 优雅退出：在途请求已全部完成` / `[cfsolve] 已退出`。
 即 **202 → 排空 → exit 0**，不是被 SIGKILL 砍掉。
 
+### 6.1 与 `restart: unless-stopped` 的配合（滚动重启的真实机制）
+
+文档说"滚动重启用 `/shutdown`，不要 `taskkill /F`"。这一步在本轮也真跑过：
+
+```
+before:  {"ok": true, "state": "ready", ...}                     # cf-solver-3
+$ curl -X POST .../shutdown  → HTTP=202  {"state":"shutting-down","peer":"172.18.0.1"}
+after 6s: {"ok": true, "state": "ready", ...}                     # 同一个端口，容器已被 compose 拉回来
+$ docker compose ps
+cf-solver-1 Up 8 minutes (healthy)
+cf-solver-2 Up 8 minutes (healthy)
+cf-solver-3 Up 4 seconds (health: starting)
+```
+
+即：**容器自己 exit 0 → compose 按 `restart: unless-stopped` 立刻重建 → 4s 内 ready**。
+这条路成立，"滚动重启不掉请求"才成立；否则只能 `kill -9`，在途请求直接吃连接重置。
+
 ## 7. 本机多进程热更新（不依赖 Docker，可重复）
 
 `scripts/hot_update_drill.py` → **17/17 通过**，Json 落盘 `evidence/hot-update.json`：

@@ -468,6 +468,186 @@
           "locator": "21 项离线测试"
         }
       ]
+    },
+    {
+      "id": "F-030",
+      "verdict": "confirmed",
+      "severity": "critical",
+      "claim": "配任一额外后端（--cfsolve-bin / --pydoll / --flaresolverr）时，/solve 的 SSRF 守卫被整体绕过：守卫原本只写在 Solver.solve() 内，而 handler 配了后端就走 BackendRouter 分支、根本不进该方法。实测用一个假 cfsolve 二进制收到了 --page http://127.0.0.1:<port>/health（即服务替调用方打了本机）。已修为在**选后端之前**于 do_POST 入口执行 _check_target，任何后端组合都拦得住。",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "do_POST 内入口守卫 self.solver._check_target(entry_host)（在 router 分支之前）"
+        },
+        {
+          "path": "tests/test_acceptance_v41.py",
+          "locator": "test_internal_url_rejected_before_any_backend_runs（4 种后端组合）"
+        },
+        {
+          "path": "workflow_status.md",
+          "locator": "§5 N-01"
+        }
+      ]
+    },
+    {
+      "id": "F-031",
+      "verdict": "confirmed",
+      "severity": "high",
+      "claim": "cfsolve / pydoll 后端返回的 expiry 自相矛盾：expires_in=300 但 expires_at=0.0。Go 客户端据此判定凭证已过期，于是每次回放都重新求解一次——缓存对这些后端等于完全失效，且指标上看不出异常。已修：expires_at 改为真实时间戳，名义寿命统一查 challenges.NOMINAL_TTL，不再保留第二份硬拷贝。",
+      "evidence": [
+        {
+          "path": "solver/cfsolve_backend.py",
+          "locator": "expires_at 计算（改用 challenges.NOMINAL_TTL）"
+        },
+        {
+          "path": "solver/pydoll_backend.py",
+          "locator": "expires_at 计算"
+        },
+        {
+          "path": "solver/challenges.py",
+          "locator": "NOMINAL_TTL"
+        },
+        {
+          "path": "workflow_status.md",
+          "locator": "§5 N-02"
+        }
+      ]
+    },
+    {
+      "id": "F-032",
+      "verdict": "confirmed",
+      "severity": "high",
+      "claim": "空缓存目录 + 多进程同时首启时，建盐文件用 os.replace 会抛 PermissionError（WinError 5），4 个 worker 同启约 1/4 概率有进程起不来（表现为容器反复重启、日志只有一行 traceback）。已修为 O_CREAT|O_EXCL 抢占：谁建成谁写，抢输的一方等文件出现后读赢家的盐。",
+      "evidence": [
+        {
+          "path": "solver/cache.py",
+          "locator": "盐文件创建 O_CREAT|O_EXCL 抢占"
+        },
+        {
+          "path": "tests/test_cache.py",
+          "locator": "盐文件并发创建用例"
+        },
+        {
+          "path": "workflow_status.md",
+          "locator": "§5 N-03"
+        }
+      ]
+    },
+    {
+      "id": "F-033",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "claim": "FileStore.items() 不过滤已过期条目，导致 /health.cached_domains 虚高——运维据此判断“缓存里有多少域可用”会系统性高估。已修为 items() 跳过过期项。",
+      "evidence": [
+        {
+          "path": "solver/cache.py",
+          "locator": "FileStore.items() 过期过滤"
+        },
+        {
+          "path": "tests/test_cache.py",
+          "locator": "过期项不计入用例"
+        },
+        {
+          "path": "workflow_status.md",
+          "locator": "§5 N-04"
+        }
+      ]
+    },
+    {
+      "id": "F-034",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "claim": "多进程同时遇到同一个新域时各解一次（无跨进程互斥），loadtest burst 实测 4 worker × 3 轮 = 12/12 次求解。v4.4 修法：SQLite claims 抢占（try_claim + 各早退路径释放），burst 降为 3 次（1 次/轮）。",
+      "evidence": [
+        {
+          "path": "solver/cache.py",
+          "locator": "SqliteStore.try_claim / release_claim"
+        },
+        {
+          "path": "tests/test_cache_sqlite.py",
+          "locator": "跨实例（跨进程语义）抢占用例"
+        },
+        {
+          "path": "workflow_status.md",
+          "locator": "§5 N-05 → §7 R12（已闭环）"
+        }
+      ]
+    },
+    {
+      "id": "F-035",
+      "verdict": "confirmed",
+      "severity": "high",
+      "claim": "Prewarmer 把退出事件存成 self._stop，覆盖了 threading.Thread._stop 私有方法；在 Python 3.12 上线程收尾时抛 TypeError: 'Event' object is not callable（GitHub Actions 的 linux/py3.12 作业抓到，本机 3.14 复现不出——这是“本机全绿”不等于“没问题”的直接证据）。已改名 _stop_event。",
+      "evidence": [
+        {
+          "path": "solver/prewarm.py",
+          "locator": "_stop_event（不再覆盖 Thread._stop）"
+        },
+        {
+          "path": "tests/test_prewarm.py",
+          "locator": "保活线程退出用例"
+        },
+        {
+          "path": "workflow_status.md",
+          "locator": "§5 N-06"
+        }
+      ]
+    },
+    {
+      "id": "F-036",
+      "verdict": "confirmed",
+      "severity": "low",
+      "claim": "test_filestore_corrupt_file_* 用 glob('*.bin') 取文件，在 Linux 的目录序下先拿到 salt.bin，于是用例实际在弄坏“盐”而不是缓存条目——一条假绿用例（本机 NTFS 顺序恰好没暴露）。已改为排除盐的 cache_files() 助手。",
+      "evidence": [
+        {
+          "path": "tests/test_cache.py",
+          "locator": "cache_files() 助手（排除盐文件）"
+        },
+        {
+          "path": "workflow_status.md",
+          "locator": "§5 N-07"
+        }
+      ]
+    },
+    {
+      "id": "F-037",
+      "verdict": "confirmed",
+      "severity": "high",
+      "claim": "do_POST 的三条早退路径（空 body / 畸形 JSON / 超大 body）都在 url 赋值之前就抛 SolveError，而 except 分支无条件读 url → UnboundLocalError 打穿 _log：响应仍是正确状态码（400），所以只看状态码的用例全绿，但**审计里一条都没有**，且 socketserver 会替每个畸形请求打印整段 traceback（畸形输入 = 日志洪水放大器）。畸形请求恰恰是最需要审计的一类。已修为在 try 之前绑定 url=''，并补两条「改前必红」用例；本仓库原来的 27 项 in-process 用例与 smoke 都没覆盖「响应正确但审计缺失」。",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "do_POST 开头 url = \"\"（早退路径不再引用未绑定变量）"
+        },
+        {
+          "path": "tests/test_governance.py",
+          "locator": "test_malformed_json_is_rejected_and_still_audited / test_empty_body_is_rejected_and_still_audited"
+        },
+        {
+          "path": "evidence/e2e-local.json",
+          "locator": "A11_solve_malformed_json_400 + A16_no_traceback_in_log"
+        }
+      ]
+    },
+    {
+      "id": "F-038",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "claim": "镜像声称『浏览器二进制在 build 阶段 fetch，运行期不联网』，但这条承诺对插件不成立：camoufox 的 uBlock Origin 不在 `camoufox fetch` 的产物里，而是在**浏览器首次启动**时下载解压。实测只 build 不预热时镜像内 addons/ 是空目录，每个新容器启动都刷 `Downloading addon (UBO) 0%→100%`（约 18MB）。离线/受限网络下浏览器因此永远起不来。另外 slim 分支里有一句 `rm -rf addons/*/`，为了省 2MB 把『离线可用』删掉，收益为负。已修为 build 阶段 headless 拉起一次浏览器预热插件（PREWARM_ADDONS=1）、删掉那句 rm；修复后 3 个新容器日志里插件下载次数为 0/0/0。",
+      "evidence": [
+        {
+          "path": "Dockerfile",
+          "locator": "ARG PREWARM_ADDONS=1 + build 阶段 headless 预热"
+        },
+        {
+          "path": "evidence/v47-container.md",
+          "locator": "§2 插件运行期下载 + §3 修复后日志 0/0/0"
+        },
+        {
+          "path": "docs/部署-容器.md",
+          "locator": "§5 常见故障对照（Downloading addon 那一行）"
+        }
+      ]
     }
   ]
 }

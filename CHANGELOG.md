@@ -2,6 +2,81 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [4.7.0] - 2026-11-02
+
+主题：**不加功能，只把"没验证过的"变成可复现的断言，并修掉两个只有真跑才会暴露的缺陷。**
+
+### 修复
+
+- **N-14（审计丢失 + 日志洪水）**：`do_POST` 的三条早退路径（空 body / 畸形 JSON / 超大 body）
+  在 `url` 赋值之前就抛 `SolveError`，而 `except` 分支无条件读 `url` → `UnboundLocalError`
+  **打穿了 `_log` 那一行**。后果很隐蔽：响应仍是正确的 `400`（所以只看状态码的用例全绿），
+  但**审计里完全没有这条请求**，且 socketserver 会替每个畸形请求打印一整段三段式 traceback
+  —— 畸形输入恰恰是最需要审计、也最容易用来刷日志的那一类。
+  修法：`url = ""` 绑定在 `try` 之前。用例：`test_malformed_json_is_rejected_and_still_audited`、
+  `test_empty_body_is_rejected_and_still_audited`（均「改前必红」）。
+  证据：`evidence/v47-early-exit-audit.md`。
+- **N-13（镜像与自己的承诺矛盾）**：`Dockerfile` 写着"浏览器在 build 阶段 fetch，运行期不联网"，
+  但 camoufox 的 uBlock Origin **不在** `camoufox fetch` 的产物里 —— 它是**浏览器首次启动**时
+  下载解压的（约 18MB）。实测镜像内 `addons/` 是空目录，每个新容器都刷
+  `Downloading addon (UBO) 0%→100%`；离线环境下浏览器永远起不来。
+  同时删掉 slim 分支里那句 `rm -rf addons/*/`（为省 2MB 把"离线可用"删掉，收益为负）。
+  修法：build 阶段 headless 拉起一次浏览器预热插件（`ARG PREWARM_ADDONS=1`，默认开）。
+  修复后：3 个新容器日志里插件下载 **0 次**，compose **3s** 就绪。
+
+### 新增
+
+- `scripts/e2e_local.py` + `run.ps1 e2e`：**真进程**端到端验收（29 项断言，离线 17s）。
+  覆盖 in-process 用例天然跳过的交付链路：起进程 → 读 `.env` 的 token → 401 响应体 →
+  `/metrics` 的 content-type → `/health` 免鉴权**不泄露**内部字段 → `route=auto` 不启浏览器 →
+  真跑一次浏览器拿结构化失败 → **审计文件里没有 token 原文** → `/shutdown` 202 + 退出码 0。
+- `scripts/hot_update_drill.py`：把 `policy.md` §6 的部署语义做成 17 项断言 ——
+  **排空**（在途 6.07s 的求解在 `/shutdown` 后仍拿到 200 + 结构化响应）、
+  **滚动期另一个 worker 零失败**（56 次请求全 200）、
+  **blue-green**（备用端口先就绪才摘旧进程）。
+- `run.ps1 verify` 现在包含 e2e（提交前必跑 = 测试 + 语法 + Go + findings + E2E）。
+
+### 文档纠偏（都是真漂移，不是排版）
+
+- `README.md` 里 7 条命令渲染成 `.un.ps1 xxx` —— 历史上的转义事故把 `
+` 写成了真的 CR 字节，
+  复制粘贴必然失败；已修回 `.
+un.ps1 xxx`。
+- `README.md` 的"已知限制"仍写着"4 个 worker 同时抢新域会各解一次（没有跨进程互斥）"——
+  那是 v4.4 之前的事实，`claims` 抢占早已修掉（burst 12 → 3）。
+- `README.md` 的"跑实验"仍在教 `cd node-shim` / `go run go-jseng|go-replay`，
+  而这三个目录已在 D-3 决策里 `git rm`。
+- `Dockerfile` / `docker-compose.yml` 顶部"⚠️ 未在本机验证"已过期；compose 的
+  `image:` 从 `4.0.0` 对齐到 `4.7.0`。
+- `test_ledger.md`：279 用例 / 81.39% → **304 / 82.06%**；§3 里"F3 CI、E4 内存、E5 崩溃隔离未测"
+  三项已闭环，改标实测值。
+- `workflow_status.md` §8 的五条"下一步"其实都已完成，换成真正未做的 N1–N5。
+- `docs/部署-容器.md` §5 新增两条**真踩过**的运维坑：Git Bash(MSYS) 把 `/data/...` 改写成
+  Windows 路径（表现是容器起来了但 token 不在 `/data/.env`）、以及运行期插件下载。
+
+### 结论库
+
+- `docs/findings.json` 29 → **38 条**：补登记历史缺陷 F-030…F-036（N-01 SSRF 绕过 /
+  N-02 TTL 自相矛盾 / N-03 盐文件并发 / N-04 过期项虚高 / N-05 跨进程重复求解 /
+  N-06 覆盖 `Thread._stop` / N-07 假绿用例），加上本轮的 F-037(=N-14)、F-038(=N-13)。
+
+### 验证（全部本机实跑）
+
+| 项 | 结果 |
+|---|---|
+| `pytest tests/ -q --cov=solver --cov-fail-under=80` | **304 passed / 82.06%** |
+| `go vet ./... && go test -count=1 -race ./...` | 无输出 / **41 Test 全过（8.3s）** |
+| `node scripts/validate-findings.mjs` | **38 条** exit 0 |
+| `run.ps1 e2e` | **29/29** |
+| `hot_update_drill.py` | **17/17** |
+| `loadtest.py --mode hot/cold/share` | 5615.6 QPS 0 错 / 16-16 准入 / 3 次求解 |
+| 容器（compose 3 worker） | 3s 就绪、6 端点全过、滚动 150-0、`/shutdown` 202 + exit 0 |
+
+### 未做（别读成已闭环）
+
+生产部署（本仓库无该环境）；A3 稳态命中率与 G1 同站双臂 A/B（受真机预算约束）；
+容器侧"浏览器并发求解"的稳态压测。详见 `workflow_status.md` §8 / §9.5。
+
 ## [4.6.0] - 2026-11-02
 
 主题：**独立审查终于拿到 Verdict（Request Changes），并按循环修完 P1/P2 后复验**。

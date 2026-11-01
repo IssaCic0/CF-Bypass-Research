@@ -277,13 +277,14 @@ cl, err := pool.Get(ctx, target)      // 同域永远打到同一个 worker
 ### 一键入口（v4.0，推荐）
 
 ```powershell
-.un.ps1 doctor     # 环境自检：依赖/浏览器二进制/端口/缓存目录/token + 起一次服务打 /health
-.un.ps1 test       # Python 全量测试 + 覆盖率门槛（≥80%，低于门槛直接红）
-.un.ps1 go         # Go: go vet + go test -race
-.un.ps1 smoke      # 起服务 → /health → /detect → SSRF 守卫，全链路冒烟
-.un.ps1 bench      # 离线压测三模式（hot 回放吞吐 / cold 准入 / share 多进程缓存）
-.un.ps1 verify     # 提交前必跑：以上全部
-.un.ps1 stop       # 停掉占着端口的进程
+.\run.ps1 doctor     # 环境自检：依赖/浏览器二进制/端口/缓存目录/token + 起一次服务打 /health
+.\run.ps1 test       # Python 全量测试 + 覆盖率门槛（≥80%，低于门槛直接红）
+.\run.ps1 go         # Go: go vet + go test -race
+.\run.ps1 smoke      # 起服务 → /health → /detect → SSRF 守卫，全链路冒烟
+.\run.ps1 e2e        # 真进程 E2E：鉴权/metrics/route=auto/审计/优雅退出（离线，约 17s）
+.\run.ps1 bench      # 离线压测三模式（hot 回放吞吐 / cold 准入 / share 多进程缓存）
+.\run.ps1 verify     # 提交前必跑：以上全部
+.\run.ps1 stop       # 停掉占着端口的进程
 ```
 
 `run.bat` 是同一套子命令的 cmd 包装。
@@ -306,9 +307,12 @@ python scripts/loadtest.py --mode share --processes 4              # 多进程�
 python scripts/loadtest.py --mode hot --dry-run                    # 只看计划
 ```
 
-> ⚠️ **已知限制（实测数据，别假设它不存在）**：多进程共享缓存只防"**先后**到达"的重复求解；
-> 4 个 worker **同时**抢同一个新域时会各解一次（当前实现没有跨进程互斥，见 `solver/cache.py` 的设计取舍）。
-> `share` 模式的 burst 阶段就是把这个数字量化出来的地方。
+> **多进程去重（v4.4 起）**：先后到达的重复求解由缓存挡掉；**同时**抢同一个新域由
+> `claims` 抢占挡掉（`SqliteStore.try_claim`，失败路径也会释放）。`share` 模式的 burst 阶段
+> 就是量化这件事的地方：修复前 4 worker × 3 轮 = **12 次**求解，现在 = **3 次**（1 次/轮）。
+>
+> ⚠️ 仍未覆盖：**不同缓存目录 / 不同 token** 的 worker 之间没有任何互斥
+> —— 那种部署下"扩容等于白扩"是配置问题，不是实现问题（用 compose 就不会踩）。
 
 ### 跑实验
 
@@ -326,16 +330,9 @@ CHROME_PATH=/path/to/chrome python scripts/probe_browser.py --headed
 # 4) Camoufox（唯一通过的方案）
 python scripts/probe_camoufox.py
 
-# 5) A1：纯 JS 引擎 + 伪造层
-cd node-shim && node run2.js
-
-# 6) A2：Go + goja
-CF_SCRIPT_PATH=/path/to/orchestrate_chl_page.js \
-CF_OPT_PATH=/path/to/chl_opt.js \
-go run go-jseng/main.go
-
-# 7) 回放验证
-CF_COOKIE_DIR=/path/to/dir go run go-replay/main.go   # 目录内需 cookie.txt / ua.txt
+# 5) A1/A2/A3 三轮"纯 JS 引擎"实验的**结论**保留在 docs/ 与 findings，
+#    实现目录（node-shim / go-jseng / go-replay）已按 D-3 决策 `git rm`
+#    —— 它们不在主链路上，留着只会让人误以为"还有第三条路可以跑"。
 ```
 
 ### 关于样本文件

@@ -1,7 +1,10 @@
-# Workflow Status — v4.0 施工状态（唯一事实源）
+# Workflow Status — 施工状态（唯一事实源）
 
-> 更新：2026-11-01 23:0x · 基线 commit `d5a5f53`（分支 `feat/solver-v2`）
+> 更新：2026-11-02 · 版本 **v4.7.0** · 基线 commit `dd35453`（`master`，已含 v4.6.0 的审查修复）
 > 施工图：`plans/下一步改进指南.md`（v3.0 → v4.0） · 门禁：`policy.md`
+>
+> **读这份文件的正确姿势**：§2 是任务卡状态，§3 是门禁实测值，§4 是验证日志，§7 是**还没闭环的东西**。
+> §7 里没关掉的项，任何地方都不许写成"已完成"。
 
 ---
 
@@ -65,21 +68,24 @@
 
 ---
 
-## 3. 验收标准表（v4.0 门禁）
+## 3. 验收标准表（v4.7 门禁，全部为本轮实跑）
 
 | 门禁 | 目标 | 实测 | 结论 |
 |---|---|---|---|
-| Python 全量测试 | 0 failed | **279 passed** | ✅ |
-| Python 覆盖率 | ≥80%（service.py ≥70%） | **81.39%**（service.py 75%） | ✅ |
-| Go 测试 | 0 failed 且 `-race` | **41 个 Test 全过，-race 绿** | ✅ |
+| Python 全量测试 | 0 failed | **304 passed**（35.2s） | ✅ |
+| Python 覆盖率 | ≥80%（service.py ≥70%） | **82.06%**（service.py 76%） | ✅ |
+| Go 测试 | 0 failed 且 `-race` | **41 个 Test 全过，`-count=1 -race` 绿**（8.3s） | ✅ |
 | Go 静态检查 | `go vet` 无输出 | 无输出 | ✅ |
 | Python 语法 | compileall 退出 0 | 0 | ✅ |
-| 结论库 | `validate-findings.mjs` exit 0 | 29 条（23/5/1）exit 0 | ✅ |
+| 结论库 | `validate-findings.mjs` exit 0 | **38 条**（32/5/1）exit 0 | ✅ |
 | 冒烟（E2E） | `/health` ready + `/detect` + SSRF 守卫 | 三项全绿（`run.ps1 smoke`） | ✅ |
-| 回放吞吐（E2） | ≥50 QPS | **2874.9 QPS**（p99 5.91ms，14382 请求 0 错） | ✅ |
-| 多进程缓存（G2/A3） | 先后到达只解 1 次 | sequential 3 轮 = 3 次求解（1 次/轮） | ✅ |
+| **真进程 E2E** | 全绿 | **29/29**（`run.ps1 e2e`）· `evidence/e2e-local.json` | ✅ |
+| **热更新/滚动演练** | 全绿 | **17/17** · `evidence/hot-update.json` | ✅ |
+| **容器 E2E（3 worker）** | 就绪 + 6 端点 + 滚动 + 优雅退出 | 3s 就绪 / 6 项全过 / 150-0 失败 / 202+exit 0 · `evidence/v47-container.md` | ✅ |
+| 回放吞吐（E2） | ≥50 QPS | **5615.6 QPS**（p99 2.92ms，28088 请求 0 错） | ✅ |
 | 冷路径准入（E1/F2） | 不被拒、每请求 1 次求解 | 16/16 accepted，solves_per_request **1.0** | ✅ |
-| **路由收益（G1 机制）** | 无盾站不启浏览器 | 真机 example.com：`route=auto` **0.55s / solves 0**；不传 route **20s / solves 1** | ✅ |
+| 多进程去重（G2/A3） | 先后 + 同时到达都只解 1 次 | sequential **3/3 轮**；burst **3 次**（1 次/轮） | ✅ |
+| 路由收益（G1 机制） | 无盾站不启浏览器 | `route=auto`：`no_challenge=true`、`solves` 计数不动、探测缓存命中后 `elapsed=0.0` | ✅ |
 
 ---
 
@@ -171,8 +177,8 @@
 |---|---|---|---|
 | R1 | `route=auto` 的 `prefer` 只是提示 | 部分闭环 | `prefer=pure/browser` 未实现"按偏好跳过某个后端"（后端链顺序仍由配置决定）；要真正跳过需要 `BackendRouter` 支持 skip 集合 |
 | R2 | **跨进程 thundering herd 未修** | 已知限制 | 4 worker 同时抢新域 = 4 次求解（实测 12/12）。修法：`O_EXCL` 锁文件当选主 / SQLite 里加 `claims` 表。**代价 **> 收益时不该急修**（稳态 ≈0.08 QPS，撞车概率低） |
-| R3 | **Docker 镜像未构建验证** | 未验证 | 本机 Docker daemon 未运行。文件已按官方文档写好并标注 ⚠️；首次构建需重新确认 camoufox 的 Debian 依赖包名 |
-| R4 | **无生产部署环境** | 无法执行 | 仓库没有服务器清单/云凭证/K8s。所谓"热更新"只做到本地多进程启停 + 健康检查 |
+| **R3** | ~~Docker 镜像未构建验证~~ | **已闭环（v4.7）** | 本机 Docker 29.9.2 真构建 `cf-bypass-solver:4.7.0` = 3.54GB，exit 0；3 worker compose 3s 就绪、6 端点全过、滚动 150 次请求 0 失败、`/shutdown` 202+exit 0。见 `evidence/v47-container.md` |
+| **R4** | ~~无生产部署环境~~ | **如实降级为"本机部署语义"** | 仓库确实没有服务器清单/云凭证，所以"上线"= 本机多进程 / compose 滚动。**这条不再是"未验证"，而是"它不是生产部署"**：`scripts/hot_update_drill.py` 把 policy §6 的三条语义（排空 / 逐个摘 / 新进程先行）做成了 17 项断言，可重复跑 |
 | R5 | 真机预算已用 ≈46/60 | 部分完成 | 剩余 ~14 次留给"真实 CF 站上的 route=auto 收益"；persona A/B 与 E2E 已完成（V16/V17） |
 | R6 | `docs/项目规格.md`（C2）未建 | 未闭环 | 成本 3h，收益是"跨会话不用重新考古"；优先级低于 T-32 |
 | R7 | `service.py` 仍 1846 行（>800 规范） | 记录 | 已降级为 P3（拆分风险 > 收益）；本次未动 |
@@ -185,10 +191,66 @@
 
 ---
 
-## 8. 下一步（按顺序）
+## 8. 下一步（v4.7 之后，按"收益 / 成本"排序）
 
-1. **T-34**：`route=auto` 现在每次都要探测（+0.5s）；按 host 缓存探测结果（默认 300s）即可摊薄；
-2. **T-37 `/metrics` 接线**（`host_stats` 数据源已就绪）；
-3. **C2 `docs/项目规格.md`**；
-4. **T-42 发版**：tag `v4.0.0` + CHANGELOG + findings 回填 F-030…F-036；
-5. R5 的 60 次预算实验（`route=auto` 的真实 CF 站路由收益，同站双臂）。
+> 上面 v4.0 时代的五条已经全部落地（T-34 探测缓存、T-37 指标接线、C2 项目规格、T-42 发版、
+> findings 回填 F-030…F-038）。下面是**真正还没做**的：
+
+| # | 事项 | 为什么现在不做 | 怎么做才算闭环 |
+|---|---|---|---|
+| N1 | **A3 稳态命中率 ≥95%** | 需要真实站点 + 保活长跑，受 §15 真机预算约束 | 起 4 worker + `--prewarm`，跑 24h，采样 `cache_hits / (hits+solves)` |
+| N2 | **G1 同站双臂 A/B**（route=auto 的收益） | 需要同一站点两组对照，预算已用大半 | 固定站点 + 固定 persona，A 组带 route、B 组不带，各 10 次 |
+| N3 | `solver/engines.py` 覆盖率 57% | cloakbrowser 二进制专有、本机未装 | 只测"缺依赖 → NOT_CONFIGURED + 安装提示"这条；已覆盖，剩余分支无法在本机跑 |
+| N4 | `service.py` 仍 2300+ 行（>800 规范） | 拆分风险 > 收益，历史上分过两次（probe/auth） | 按"请求解析 / 鉴权 / 路由 / 后端执行"四块继续下沉，每步保持 304 测试全绿 |
+| N5 | 超大 body 返回 `400` 而非 `413` | 文档未承诺 413，改了就是**扩大契约面** | 若要改：先定契约（`docs/API.md`）+ 改 `STATUS_BY_CODE` + 加用例，再改行为 |
+
+**不要做的事**：把 `route=auto` 默认打开（向后兼容第一优先级）；换掉 camoufox；引入 Redis/PG。
+
+---
+
+## 9. v4.7.0 本轮做了什么（2026-11-02）
+
+这一轮**没有加新功能**，只做三件事：把"没验证过的"变成**可复现的断言**、修掉两个只有真跑才会暴露的缺陷、清掉文档里的过期结论。
+
+### 9.1 修掉的两个真缺陷
+
+| # | 缺陷 | 怎么发现的 | 修法 | 证据 |
+|---|---|---|---|---|
+| **N-14** | `do_POST` 的三条早退路径（空 body / 畸形 JSON / 超大 body）在 `url` 赋值之前抛异常，而 `except` 无条件读 `url` → `UnboundLocalError` **打穿 `_log`**：响应仍是 400（所以状态码用例全绿），但**审计里一条都没有**，且每个畸形请求打一整段 traceback | 新写的**真进程 E2E** 在「服务日志不许出现 Traceback」上变红 | try 之前绑定 `url = ""`；两条「改前必红」用例 | `evidence/v47-early-exit-audit.md` |
+| **N-13** | 镜像承诺"运行期不联网下载浏览器"，但 camoufox 的 uBlock Origin **不在** `camoufox fetch` 产物里，是**首次启动**才下载（18MB）。离线环境浏览器永远起不来；slim 分支还有一句 `rm -rf addons/*/` 反向删掉它 | 容器 `docker logs` 里看到 `Downloading addon (UBO) 0%→100%` | build 阶段 headless 拉起一次浏览器预热插件（`PREWARM_ADDONS=1`）；删掉那句 rm | `evidence/v47-container.md` §2 |
+
+### 9.2 新增的三个可重复验收件
+
+| 件 | 覆盖什么（in-process 用例覆盖不到的） | 断言数 |
+|---|---|---|
+| `scripts/e2e_local.py` + `run.ps1 e2e` | **真进程交付链路**：起两个真服务（严格/宽松）、读 `.env` 的 token、401 响应体、`/metrics` content-type、`/health` 免鉴权**不泄露**内部字段、`route=auto` 不启浏览器、真跑一次浏览器拿结构化失败、**审计里没有 token**、`/shutdown` 202 + 退出码 0 | **29** |
+| `scripts/hot_update_drill.py` | policy §6 的部署语义：**排空**（在途 6.07s 请求在 `/shutdown` 后仍拿到 200）、**滚动期另一个 worker 零失败**、**blue-green**（新进程先就绪才摘旧的） | **17** |
+| 容器验收（compose 3 worker） | 3s 就绪 / 6 端点 / 滚动 150 次请求 0 失败 / `/shutdown` 202+exit 0 / 交叉 token 一致 | 见 `evidence/v47-container.md` |
+
+`run.ps1 verify` 现在把 e2e 也串进去了（提交前必跑 = 测试 + 语法 + Go + findings + **E2E**）。
+
+### 9.3 文档纠偏（这一轮清掉的"过期结论"）
+
+| 位置 | 原来写的 | 真实情况 |
+|---|---|---|
+| `README.md` ×7 | `.un.ps1 doctor`（`\r` 被写成了真的 CR 字节，命令根本敲不出来） | `.\run.ps1 doctor` |
+| `README.md` | "4 个 worker 同时抢新域会各解一次（没有跨进程互斥）" | v4.4 起 `claims` 抢占已修，burst 12 → **3**（1 次/轮） |
+| `README.md` | 「跑实验」教人 `cd node-shim` / `go run go-jseng` / `go run go-replay` | 这三个目录已在 D-3 决策里 `git rm` |
+| `Dockerfile` / `docker-compose.yml` | 「⚠️ 未在本机验证（Docker daemon 未运行）」 | 已在本机实测（§9.2） |
+| `docker-compose.yml` | `image: cf-bypass-solver:4.0.0` | 对齐 `4.7.0` |
+| `test_ledger.md` §1 | 279 用例 / 81.39% | **304** / **82.06%** |
+| `test_ledger.md` §3 | F3 CI / E4 内存 / E5 崩溃隔离"未测" | 三项均已闭环（run 41348212433 / 3.34GB / 摘除 2s 回归 28s） |
+| `workflow_status.md` §8 | 五条"下一步"其实都已完成 | 换成真正未做的 N1–N5 |
+| `docs/00-索引.md` | findings 29 条 | **38 条**（补 F-030…F-038：N-01…N-07 + N-13 + N-14） |
+
+### 9.4 findings 回填（§8 老版第 4 条的遗留）
+
+`docs/findings.json` 29 → **38 条**，把历史上只在 `workflow_status.md` 口口相传的 7 个缺陷
+（N-01 SSRF 绕过 / N-02 TTL 自相矛盾 / N-03 盐并发 / N-04 过期项虚高 / N-05 跨进程重复求解 /
+N-06 覆盖 `Thread._stop` / N-07 假绿用例）正式登记，并加上本轮两条。
+
+### 9.5 边界（仍然没做的，别读成"已闭环"）
+
+- 没有生产环境：本轮的"部署"是 compose + 本机多进程滚动，**不是**线上灰度/回滚；
+- A3 稳态命中率、G1 同站双臂 A/B 仍受真机预算约束（§8 N1/N2）；
+- 容器侧未压测"浏览器并发求解"的稳态吞吐（离线压测只覆盖回放与准入）。
