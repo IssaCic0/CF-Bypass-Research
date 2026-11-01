@@ -254,19 +254,35 @@ def run_cold(args) -> dict:
 
 # ── share：多进程共享缓存 ────────────────────────────
 _CHILD = r"""
-import sys, time, json
+import sys, time, json, os
 sys.path.insert(0, sys.argv[1])
 import cache
 store = cache.SqliteStore(sys.argv[2], "loadtest-token", max_files=256)
 key = "shared.example.com|default"
+
+def out(hit):
+    print(json.dumps({"pid": os.getpid(), "hit": hit}))
+
 hit = store.get(key)
 if hit is not None:
-    print(json.dumps({"pid": __import__("os").getpid(), "hit": True}))
+    out(True)
 else:
-    time.sleep(0.05)                      # 模拟一次真实求解的耗时
-    store.set(key, {"cf_clearance": "SHARED", "expires_at": time.time() + 600, "egress_id": "default"},
-              host="shared.example.com", backend="fake")
-    print(json.dumps({"pid": __import__("os").getpid(), "hit": False}))
+    # 模拟真实服务的行为：先抢"我来解这个域"，抢不到就等对端把缓存填好。
+    # 这一步就是"跨进程同时抢同一新域会各解一次"的修复点。
+    if store.try_claim(key, ttl=30):
+        time.sleep(0.05)                  # 模拟一次真实求解的耗时
+        store.set(key, {"cf_clearance": "SHARED", "expires_at": time.time() + 600, "egress_id": "default"},
+                  host="shared.example.com", backend="fake")
+        store.release_claim(key)
+        out(False)
+    else:
+        for _ in range(60):               # 最多等 6s
+            time.sleep(0.1)
+            if store.get(key) is not None:
+                out(True)
+                break
+        else:
+            out(False)                    # 对端没来及写：自己兜底解一次
 """
 
 
@@ -276,8 +292,9 @@ def run_share(args) -> dict:
     · **sequential**（错开 0.2s 起进程）：这是缓存的**文档承诺**——
       同一域先后到达时，只有第一个进程真的求解，其余命中。验收看这个。
     · **burst**（同时起进程）：测的是"同一个新域同时被 4 个 worker 抢到"。
-      当前实现**没有跨进程互斥**（`solver/cache.py` 的既定取舍），
-      所以 4 个进程会各解一次 —— 这是已知限制，本模式负责把它量化出来，而不是假装没有。
+      v4.3 起缓存层有 `claims` 抢占（`try_claim`）：抢到的真解，抢不到的等缓存，
+      所以 burst 也应当只解 1 次/轮。两阶段都跑，是为了**证明抢占真的生效**
+      （一旦回归，burst 会立刻从 1 次变回 4 次，比单测更直观）。
     """
     solver_dir = str(ROOT / "solver")
 
@@ -332,7 +349,7 @@ def run_share(args) -> dict:
         "sequential": {"solves": seq_solves, "hits": seq_hits, "failures": seq_fail,
                        "expected_solves": args.iterations},
         "burst": {"solves": burst_solves, "hits": burst_hits, "failures": burst_fail,
-                  "note": "同时到达同一新域；当前无跨进程互斥，各解一次属已知限制"},
+                  "note": "同时到达同一新域；已有 claims 抢占去重，应当也只解 1 次/轮"},
         # 验收口径 = 文档承诺（先后到达只解一次）
         "solves": seq_solves,
     }

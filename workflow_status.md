@@ -42,7 +42,7 @@
 | **T-45** | **句柄泄漏：缓存层 thread-local SQLite 连接 → 共享连接** | 本会话 | **DONE** | 1h soak 泄漏 +1308/线程数不变；归因到"每条新 TCP 连接 +3 句柄"；修复后 +100 连接 **+0**。见 `evidence/v42-handle-leak.md` |
 | **T-44** | 失败响应回传 `routed_by` | 本会话 | **DONE** | 真机 60s 未解出时 `routed_by` 全空 → 已修，用例 `test_routed_by_survives_failure` |
 | T-34 | `/detect` 结果按 host 短 TTL 缓存 | 本会话 | **DONE** | `--detect-cache-ttl`（默认 300s，0=关）；`fresh=1` 跳过；`tests/test_governance.py` 4 例 |
-| T-38b | 代理/出口绑定透传到 Go（`egress_test.go`） | 并行会话 | **DONE**（部分：只覆盖客户端侧，回放侧未接） |
+| **T-38b** | 代理/出口绑定透传到 Go 回放侧 | 本会话补文档+验证 | **DONE** | `egress_test.go` 4 用例（含『请求确实经过代理』与『未登记出口 fail closed』）；端到端配方（服务 --proxy → egress_id → WithEgressProxy）写进 `docs/部署-容器.md` §4.5 |
 
 ### W3 缓存与观测
 
@@ -115,6 +115,8 @@
 | V26 | **修复后 soak（15 分钟）** | **passed: true** — 0 错 / 全程 ready / RSS 回落 396.7MB / **句柄 2788→2746（净 -42）** |
 | V27 | **E4：4 worker 内存** | 合计 **3.34 GB**（855MB/worker，含浏览器进程树）≤ 3.5GB ✅ |
 | V28 | **E5：崩溃隔离演练（真实杀进程）** | 摘除 **2s**（maxFailures=2 + 探活 2s）、回归 **28s**（受 30s downDuration 支配），其余节点全程 f=0 ✅ |
+| V29 | **跨进程去重** | `loadtest share` burst：**3 轮 3 次求解**（修复前 12 次） |
+| V30 | **route=auto 真机 3 站** | udemy 6.9s/459B、canva 4.7s/330B（solve）；**g2 → reject 1.3s**（DataDome，不再白等 45s） |
 
 ---
 
@@ -165,6 +167,7 @@
 | R6 | `docs/项目规格.md`（C2）未建 | 未闭环 | 成本 3h，收益是"跨会话不用重新考古"；优先级低于 T-32 |
 | R7 | `service.py` 仍 1846 行（>800 规范） | 记录 | 已降级为 P3（拆分风险 > 收益）；本次未动 |
 | R8 | `engines.py` 覆盖率 57% | 记录 | cloakbrowser 二进制专有、本机未装，只能测到"缺依赖即失败"分支 |
+| **R12** | ~~跨进程同时抢同一新域各解一次~~（v4.4 已修） | 已闭环 | `claims` 抢占；burst 12→3（1 次/轮） |
 | R9 | ~~句柄长期增长~~（v4.2.1 已修） | 已闭环 | 见 T-45：缓存层改共享连接后不再随连接增长；仍建议生产按周看 `num_handles` 曲线 |
 | R9b | **glassdoor.co.uk 疑似出口 IP 已提分** | 已停止实验 | 同站当天被连打 12 次后 60s 解不出；换出口再验证，不要在同一出口反复打同一站 |
 | R10 | 缓存命中路径在 32 并发下 p99 ≈1s | 已量化 | 单进程建议 ≤16 并发；要更高稳态吞吐请加进程 |

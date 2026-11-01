@@ -2,6 +2,52 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [4.4.0] - 2026-11-02
+
+主题：把上一轮列出的"剩余风险"逐条打掉——跨进程重复求解、多出口回放、真实 CF 站路由证据、容器化。
+
+### 修复
+
+- **多个 worker 同时抢同一个新域会各解一次**（v4.2 之前量化过：4 进程 burst 12/12）。
+  根因：共享缓存只解决"先后到达"，不解决"同时到达"。
+  修法：`SqliteStore` 增加 `claims` 表 + `try_claim(key, ttl)`（`INSERT OR IGNORE` 原子抢占）/
+  `release_claim`；`Solver` 在解之前抢占，抢不到的进程**等对端填缓存**（最多 ~10s 或预算一半），
+  而不是各自启动浏览器。Solver 路径与路由后端路径**共用同一套**（`claim_solve`/`wait_for_peer`/
+  `release_claim_for`），避免两份实现漂移。
+  **实测：burst 3 轮从 12 次求解降到 3 次（1 次/轮，0 浪费）。**
+
+### 新增（文档）
+
+- **多出口部署的端到端配方**（`docs/部署-容器.md` §4.5）：服务端 `--proxy` → 响应里的
+  `egress_id`（形如 `px:529c4adb33a1`，不含凭据）→ 客户端 `WithEgressProxy(egress_id, proxyURL)`。
+  纪律写明：**一旦登记出口代理，回放就 fail closed**（拿到未登记的 egress_id 直接
+  `ErrNoEgressProxy`，绝不悄悄直连——直连的结果是静默 403，最难归因）。
+
+### 真实调用（3 站，消耗预算 3 次）
+
+| 站点 | 探测结论 | 路由决策 | 结果 |
+|---|---|---|---|
+| udemy.com | Cloudflare / managed | solve, prefer=pure | ✅ **6.9s / 459 字节** |
+| **g2.com** | **DataDome + Cloudflare** | **reject（unsupported-provider）** | ✅ **1.3s 就拒绝**（旧行为会白等一整个 45s 超时） |
+| canva.com | Cloudflare / managed | solve, prefer=pure | ✅ **4.7s / 330 字节** |
+
+累计真机预算 ≈56/60。**g2 这一条是本轮最有价值的证据**：真实站点上的诚实拒绝，
+把 45s 的无效等待压到 1.3s。
+
+### 变更
+
+- `scripts/loadtest.py` 的 `share` 子进程改为模拟真实行为（先 `try_claim` 抢，抢不到等缓存），
+  因此 burst 阶段现在也应当只解 1 次/轮 —— 一旦抢占回归，burst 会立刻从 1 次变回 4 次。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| Python | 295 passed，覆盖率 81.75% |
+| Go | 41 + egress 4 个用例，`vet` + `-race` 绿 |
+| 跨进程去重 | burst 12 → **3**（1 次/轮） |
+| 路由证据 | 3 站 solve + 1 站 reject（1.3s） |
+
 ## [4.3.0] - 2026-11-02
 
 主题：**把三件"设计上应该有、但从没验证过"的事变成实测数字**——4 worker 内存、

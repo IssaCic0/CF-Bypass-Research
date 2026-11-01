@@ -811,6 +811,73 @@ class Solver:
     # 于是它们既不进缓存、也不受 inflight 约束、还不进任何指标 —— 一个"热路径命中率
     # 归零 + 能被打穿 + 指标说一切正常"的组合。治理必须绑在**入口/路由**，不能绑在某个实现上。
 
+    # -- 跨进程去重（同一域同时被多个 worker 抢到）-------
+    def claim_solve(self, url: str, budget: float) -> bool:
+        """URL 级的跨进程抢占入口（供 Solver.solve 与 BackendRouter 共用）。"""
+        host = _host_of(url)
+        if not host:
+            return True
+        entry = self._entry_for(host) if self._pool is not None else None
+        return self._claim(self.cache_key(host, entry), budget)
+
+    def wait_for_peer(self, url: str, budget: float) -> dict | None:
+        """URL 级的"等对端填缓存"入口（同一条链路共用，避免两份实现漂移）。"""
+        host = _host_of(url)
+        if not host:
+            return None
+        entry = self._entry_for(host) if self._pool is not None else None
+        return self._wait_for_peer(self.cache_key(host, entry), budget)
+
+    def release_claim_for(self, url: str) -> None:
+        host = _host_of(url)
+        if not host:
+            return
+        entry = self._entry_for(host) if self._pool is not None else None
+        self._release_claim(self.cache_key(host, entry))
+
+    def _claim(self, key: str, budget: float) -> bool:
+        """抢占"我来解这个域"。没有抢占能力的存储（内存/文件）直接视为抢到。
+
+        内存存储本来就只服务单进程；文件存储在 `solver/cache.py` 里也明说不做跨进程互斥。
+        所以只有 SQLite（多进程共享）才需要/才有这一步。
+        """
+        fn = getattr(self._store, "try_claim", None)
+        if not callable(fn):
+            return True
+        try:
+            return bool(fn(key, ttl=max(5.0, min(120.0, float(budget)))))
+        except Exception:  # noqa: BLE001 —— 抢占出错就退化为不抢占，绝不阻断求解
+            return True
+
+    def _release_claim(self, key: str) -> None:
+        fn = getattr(self._store, "release_claim", None)
+        if callable(fn):
+            try:
+                fn(key)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _wait_for_peer(self, key: str, budget: float) -> dict | None:
+        """没抢到时等对端把缓存填好（最多 ~10s 或预算的一半）。
+
+        返回 None 表示"对端没能在预期时间内填好"——此时我们仍然自己去解：
+        宁可多解一次，也不能让请求永久挂住（对端可能已经崩了，claim 在 TTL 后自然过期）。
+        """
+        deadline = time.monotonic() + max(1.0, min(10.0, float(budget) / 2))
+        while time.monotonic() < deadline:
+            try:
+                cached = self._store.get(key)
+            except Exception:  # noqa: BLE001
+                cached = None
+            if cached and float(cached.get("expires_at", 0) or 0) > _now():
+                with self._lock:
+                    self._hits += 1
+                hit = dict(cached)
+                hit.update({"ok": True, "solved": True, "cached": True, "elapsed": 0.0})
+                return hit
+            time.sleep(0.1)
+        return None
+
     def cache_lookup(self, url: str) -> dict | None:
         """按「域名+出口」查缓存，命中则返回可直接对外返回的 dict（含 cached=True）。"""
         host = _host_of(url)
@@ -1330,6 +1397,16 @@ class Solver:
                 hit.update({"ok": True, "solved": True, "cached": True, "elapsed": 0.0})
                 return hit
 
+        # 跨进程抢占：多个 worker **同时**收到同一个新域时，只让一个真的去解，
+        # 其余去等缓存（实测不加这一步时 4 进程 burst 会各解一次 = 12/12）。
+        claimed = False
+        if cacheable and not force:
+            claimed = self._claim(key, budget)
+            if not claimed:
+                peer = self._wait_for_peer(key, budget)
+                if peer is not None:
+                    return peer
+
         # 先把代理字典算出来**再**拿信号量：解析失败时不能留下未释放的额度。
         # 同时保证错误消息里不出现凭据（parse_proxy_url 的原始报错会带 user:pass）。
         try:
@@ -1449,6 +1526,8 @@ class Solver:
             result["token_field"] = token_field     # 告诉调用方塞进哪个表单字段
         else:
             self._store.set(key, result)            # 只有 cookie 类落盘（IO 不持锁）
+            if claimed:
+                self._release_claim(key)            # 缓存已就绪，放行其它进程
         if self._pool is not None and proxy_entry is not None:
             self._pool.record_success(proxy_entry, elapsed)
         with self._lock:

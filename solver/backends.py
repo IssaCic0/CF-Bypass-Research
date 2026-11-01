@@ -337,11 +337,23 @@ class BackendRouter:
         want = str(kwargs.get("want") or "clearance").lower()
         cacheable = want in ("clearance", "awswaf")   # 一次性 token 绝不缓存（复用必失败）
 
+        claimed = False
         if cacheable and not force:
             hit = gov.cache_lookup(url)
             if hit is not None:
                 hit.setdefault("backend", backend.name())
                 return hit
+            # 跨进程去重：多个 worker 同时抢同一个新域时只让一个真的解，
+            # 其余等对端填好缓存（否则 4 进程 burst 会各解一次，实测 12/12）。
+            claim = getattr(gov, "claim_solve", None)
+            if callable(claim):
+                claimed = bool(claim(url, timeout))
+                if not claimed:
+                    wait = getattr(gov, "wait_for_peer", None)
+                    peer = wait(url, timeout) if callable(wait) else None
+                    if peer is not None:
+                        peer.setdefault("backend", backend.name())
+                        return peer
 
         if not gov.begin_backend_call():
             raise SolveError(
@@ -363,6 +375,10 @@ class BackendRouter:
         gov.end_backend_call(True, time.monotonic() - started, host=host, backend=backend.name())
         if cacheable and isinstance(out, dict):
             gov.remember(url, out)
+            if claimed:
+                release = getattr(gov, "release_claim_for", None)
+                if callable(release):
+                    release(url)      # 缓存已就绪，放行其它进程
         return out
 
     def solve(self, url: str, timeout: float, force: bool = False,

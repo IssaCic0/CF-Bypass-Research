@@ -586,3 +586,65 @@ def test_router_ignores_skip_when_it_would_skip_everything():
         assert only.calls == 1, "全跳过时应当忽略 skip 正常求解"
     finally:
         s.close()
+
+
+# ── 跨进程去重：同一域同时被多个 worker 抢到 ──────────
+def test_try_claim_is_atomic_and_expires(tmp_path):
+    """两个"进程"（两个 store 实例）抢同一个 key：只能有一个成功；过期后可以再抢。"""
+    a = cache_mod.SqliteStore(str(tmp_path), "claim-token")
+    b = cache_mod.SqliteStore(str(tmp_path), "claim-token")
+
+    assert a.try_claim("k|default", ttl=60) is True
+    assert b.try_claim("k|default", ttl=60) is False, "同 key 只能有一个抢占者"
+    a.release_claim("k|default")
+    assert b.try_claim("k|default", ttl=60) is True, "释放后应能再抢"
+
+    # 过期后可被重新抢占（对端崩了不能让这个域永久卡死）。
+    # 注意 ttl 有 1.0s 下限（防止有人传 0 把抢占变成摆设），所以这里要等过 1s。
+    b.release_claim("k|default")
+    assert a.try_claim("k|default", ttl=0.5) is True
+    time.sleep(1.2)
+    assert cache_mod.SqliteStore(str(tmp_path), "claim-token").try_claim("k|default", ttl=60) is True
+
+
+def test_solver_dedups_same_host_across_two_instances(tmp_path):
+    """模拟"两个 worker 进程共享缓存目录同时收到同一个新域"：只允许真的解一次。
+
+    实测背景：不抢占时 4 进程 burst 会各解一次（12/12）；这一步是那个问题的修复。
+    """
+    store_a = cache_mod.SqliteStore(str(tmp_path), "t")
+    store_b = cache_mod.SqliteStore(str(tmp_path), "t")
+    backend = FakeBackend(sleep=0.5)
+
+    solvers = []
+    for st in (store_a, store_b):
+        s = svc.Solver(browser_factory=factory_returning(FakeBrowser()),
+                       allow_private_hosts=True, store=st)
+        assert wait_until(lambda: s.health()[0] == 200)
+        solvers.append(s)
+
+    results: list[dict] = []
+    lock = threading.Lock()
+
+    def call(s):
+        router = be.BackendRouter([backend], governance=s)
+        try:
+            out = router.solve(HOST, timeout=30)
+        except SolveError as e:
+            out = {"ok": False, "error": str(e)}
+        with lock:
+            results.append(out)
+
+    threads = [threading.Thread(target=call, args=(s,)) for s in solvers]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=40)
+
+    try:
+        assert backend.calls == 1, f"同域并发只该真解 1 次，实际 {backend.calls} 次（跨进程去重失效）"
+        assert len(results) == 2 and all(r.get("ok") for r in results), results
+        assert sum(1 for r in results if r.get("cached")) >= 1, "后到者应当命中缓存"
+    finally:
+        for s in solvers:
+            s.close()

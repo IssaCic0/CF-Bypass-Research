@@ -344,6 +344,13 @@ class SqliteStore:
               solves   INTEGER NOT NULL DEFAULT 0,
               failures INTEGER NOT NULL DEFAULT 0
             );
+            -- 跨进程"正在解这个域"的占位：解决"多个 worker 同时抢同一个新域"
+            -- 时各解一次的问题（实测 4 进程 burst 会 4 次求解）。
+            CREATE TABLE IF NOT EXISTS claims (
+              key        TEXT PRIMARY KEY,
+              owner      TEXT NOT NULL,
+              expires_at REAL NOT NULL
+            );
             """
         )
         conn.commit()
@@ -441,6 +448,37 @@ class SqliteStore:
         except Exception:  # noqa: BLE001
             alive = 0
         return {"backend": "sqlite", "entries": int(alive), "max_entries": self._max, "path": self.path}
+
+    def try_claim(self, key: str, ttl: float = 120.0, owner: str = "") -> bool:
+        """跨进程抢占"我来解这个域"。**原子**（INSERT OR IGNORE），抢到返回 True。
+
+        为什么需要：共享缓存只解决"先后到达"，4 个 worker **同时**抢同一个新域时会各解一次
+        （实测 burst 12/12）。用一张 `claims` 表做抢占，抢不到的进程去等缓存，
+        而不是各自启动浏览器。
+        """
+        now = time.time()
+        owner = owner or f"pid{os.getpid()}"
+        try:
+            with self._conn_lock:
+                conn = self._conn()
+                conn.execute("DELETE FROM claims WHERE expires_at <= ?", (now,))
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO claims (key, owner, expires_at) VALUES (?, ?, ?)",
+                    (key, owner, now + max(1.0, float(ttl))),
+                )
+                conn.commit()
+                return int(cur.rowcount or 0) == 1
+        except Exception:  # noqa: BLE001 —— 抢占失败不该打断求解（退化为不抢占）
+            return False
+
+    def release_claim(self, key: str) -> None:
+        try:
+            with self._conn_lock:
+                conn = self._conn()
+                conn.execute("DELETE FROM claims WHERE key = ?", (key,))
+                conn.commit()
+        except Exception:  # noqa: BLE001
+            pass
 
     def record_solve(self, host: str, ok: bool) -> None:
         """按域累计求解结果（只放计数，不放任何凭证）。用于 `/metrics` 的按域维度。"""

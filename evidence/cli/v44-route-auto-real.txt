@@ -1,0 +1,5 @@
+# route=auto 在真实 CF 站上的路由决策（v4.4，消耗过盾预算）
+# 生成时间 2026-11-02 02:23:39+0800
+{"site": "https://udemy.com/", "http": 200, "solved": true, "backend": "camoufox", "elapsed": 6.9, "clearance_len": 459, "route_action": "solve", "route_reason": "cloudflare-managed", "prefer": "pure", "detect": {"protected": true, "providers": ["Cloudflare"], "challenge_type": "managed"}, "error": ""}
+{"site": "https://g2.com/", "http": 200, "solved": false, "backend": null, "elapsed": 1.3, "clearance_len": 0, "route_action": "reject", "route_reason": "unsupported-provider", "prefer": "any", "detect": {"protected": true, "providers": ["DataDome", "Cloudflare"], "challenge_type": "managed"}, "error": "该站使用的防护本服务不支持（unsupported-provider）"}
+{"site": "https://canva.com/", "http": 200, "solved": true, "backend": "camoufox", "elapsed": 4.7, "clearance_len": 330, "route_action": "solve", "route_reason": "cloudflare-managed", "prefer": "pure", "detect": {"protected": true, "providers": ["Cloudflare"], "challenge_type": "managed"}, "error": ""}
