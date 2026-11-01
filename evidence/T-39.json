@@ -1,6 +1,6 @@
 {
   "task_id": "T-39",
-  "status": "done_partial",
+  "status": "done",
   "timestamp": "2026-11-01T22:30:39+0800",
   "baseline_commit": "d5a5f53",
   "goal": "CI 三 job（python 覆盖率门槛 / go vet+race / findings），全程离线",
@@ -9,15 +9,46 @@
       "cmd": "python -c \"import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))\"",
       "exit_code": 0,
       "raw_output_tail": "YAML 解析通过"
+    },
+    {
+      "cmd": "gh run view 41317345648 --json status,conclusion,jobs",
+      "exit_code": 0,
+      "raw_output_tail": "conclusion=success; jobs: go=success, python(3.11)=success, python(3.12)=success, findings=success"
+    },
+    {
+      "cmd": "gh run view <首轮 run> --log-failed",
+      "exit_code": 1,
+      "raw_output_tail": "首轮红：tests/test_cache.py::test_filestore_corrupt_file_*（glob 命中 salt.bin）+ tests/test_prewarm.py::test_thread_survives_unexpected_exception（TypeError: 'Event' object is not callable）"
     }
   ],
   "files_changed": [
     ".github/workflows/ci.yml",
     "requirements-dev.txt"
   ],
-  "tests": [],
+  "tests": [
+    {
+      "name": "CI: python (3.11)",
+      "type": "ci",
+      "status": "pass"
+    },
+    {
+      "name": "CI: python (3.12)",
+      "type": "ci",
+      "status": "pass"
+    },
+    {
+      "name": "CI: go (vet + test -race)",
+      "type": "ci",
+      "status": "pass"
+    },
+    {
+      "name": "CI: findings 一致性",
+      "type": "ci",
+      "status": "pass"
+    }
+  ],
   "limitations": [
-    "未在 GitHub Actions 上真跑过（本地无法触发），F3 仍为待验证",
-    "pytest-cov 按本机实际版本锁 7.1.0"
+    "CI 只跑 Linux；Windows 专属行为（SO_REUSEADDR 语义、NTFS 权限）仍由本地测试覆盖",
+    "首轮 CI 抓到 2 个跨平台缺陷（N-06/N-07），已修复后转绿 —— 这次也算 CI 自己的价值证明"
   ]
 }

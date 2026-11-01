@@ -97,7 +97,8 @@
 | V11 | 端到端服务（真实 camoufox） | 起服务 → `ready`，`cache_backend=sqlite:...`（证明 SQLite 缓存真的接上了生产路径） |
 | V12 | **`route=auto` 真机** | `POST /solve {url:https://example.com/, route:auto}` → `no_challenge:true, elapsed=0.55s`，`solves` 计数保持 0 |
 | V13 | 对照：同 URL 不传 route | 真去求解，20s 后 `unsolved`，`solves=1` ⇒ 路由收益 **0.55s vs 20s**（同一 URL、同一服务） |
-| V14 | **GitHub Actions 真跑** | 首轮 **红**：python(3.12) job 抓到 2 个本机发现不了的缺陷（N-06 prewarm 覆盖 `Thread._stop`、N-07 salt.bin 被 glob 命中）；覆盖率 81.11% 过门槛 |
+| V14 | **GitHub Actions 真跑（首轮）** | **红**（这正是它存在的意义）：python(3.12) job 抓到 2 个本机发现不了的缺陷（N-06 prewarm 覆盖 `Thread._stop`、N-07 salt.bin 被 glob 命中） |
+| V15 | **GitHub Actions 真跑（修复后）** | **全绿**：`go` ✓ · `python (3.11)` ✓ · `python (3.12)` ✓ · `findings 一致性` ✓（run 41317345648，conclusion=success） |
 
 ---
 

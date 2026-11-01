@@ -59,7 +59,7 @@
 - 多进程共享缓存只防"**先后**到达"的重复求解；4 个 worker **同时**抢同一新域仍会各解一次（无跨进程互斥，实测 12/12）。
 - `route=auto` 的 `prefer=pure|browser` 目前只是提示，未实现"按偏好跳过后端"。
 - `route=auto` 每次都会探测一次（约 +0.5s），按 host 缓存探测结果（T-34）尚未实现。
-- Docker 镜像**未构建验证**（开发机 Docker daemon 未运行）；CI 工作流**未在 GitHub 上真跑过**。
+- Docker 镜像**未构建验证**（开发机 Docker daemon 未运行）；CI 已真跑：首轮抓到 2 个跨平台缺陷（见下），修复后全绿。
 - 本项目没有生产部署环境，"部署/热更新"只做到本地多进程启停 + 健康检查。
 
 ### 验证
@@ -71,6 +71,7 @@
 | Go 测试 | **41 个 Test，`go vet` + `go test -race` 全绿** |
 | 结论库一致性 | `node scripts/validate-findings.mjs` → 29 条，exit 0 |
 | E2E 冒烟 | `/health` ready · `/detect` → direct · SSRF 守卫拦住内网 URL |
+| CI（GitHub Actions） | **全绿**：python 3.11/3.12 + go(vet/test -race) + findings |
 | 回放吞吐（离线） | 2874.9 QPS，p99 5.91ms，14382 请求 0 错 |
 | 冷路径准入（离线） | 16/16 accepted，每请求 1 次求解 |
 | 多进程缓存 | sequential 每轮只解 1 次；burst 12/12（已知限制） |
