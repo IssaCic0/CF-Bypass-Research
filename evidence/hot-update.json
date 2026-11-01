@@ -1,13 +1,13 @@
 {
   "task_id": "hot-update-drill",
   "status": "passed",
-  "timestamp": "2026-11-02T06:39:45",
-  "duration_sec": 28.8,
+  "timestamp": "2026-11-02T06:44:25",
+  "duration_sec": 32.0,
   "checks": [
     {
       "name": "A01_worker_ready",
       "ok": true,
-      "detail": "port=40388"
+      "detail": "port=41036"
     },
     {
       "name": "A02_shutdown_returns_202",
@@ -22,7 +22,7 @@
     {
       "name": "A04_inflight_request_survived",
       "ok": true,
-      "detail": "status=200 elapsed=6.07s exception=None"
+      "detail": "status=200 elapsed=6.12s exception=None"
     },
     {
       "name": "A05_inflight_returns_structured_body",
@@ -37,12 +37,12 @@
     {
       "name": "B01_two_workers_ready",
       "ok": true,
-      "detail": "p1=40414 ready=True p2=40415 ready=True"
+      "detail": "p1=41078 ready=True p2=41079 ready=True"
     },
     {
       "name": "B02_shared_cache_and_token",
       "ok": true,
-      "detail": "token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-voumckhx\\cache"
+      "detail": "token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-uzog37yi\\cache"
     },
     {
       "name": "B03_restart_shutdown_202_exit0",
@@ -52,7 +52,7 @@
     {
       "name": "B04_restarted_worker_ready",
       "ok": true,
-      "detail": "port=40414"
+      "detail": "port=41078"
     },
     {
       "name": "B05_restarted_worker_serves",
@@ -62,12 +62,12 @@
     {
       "name": "B06_other_worker_zero_failures_during_roll",
       "ok": true,
-      "detail": "ok=60 fail=0 errors=[]"
+      "detail": "ok=73 fail=0 errors=[]"
     },
     {
       "name": "C01_spare_worker_ready",
       "ok": true,
-      "detail": "port=40547"
+      "detail": "port=41219"
     },
     {
       "name": "C02_old_still_serving_before_cutover",

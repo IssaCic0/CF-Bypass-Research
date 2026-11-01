@@ -165,6 +165,22 @@ class Worker:
                 continue
         return raw.decode("utf-8", "replace")
 
+    def stop(self, wait: float = 20.0) -> None:
+        """尽力优雅收尾，最后才硬杀。
+
+        为什么不能直接 kill：worker 下面挂着整个浏览器进程树（几百 MB）。
+        硬杀只杀掉父进程，浏览器可能变成孤儿 —— 脚本多跑几次就会攒一堆看不见的常驻进程，
+        而这台机器还要用来跑压测。所以先试 `/shutdown`（它会连浏览器一起关），
+        拿不到响应再退化到 kill。
+        """
+        try:
+            if self.proc.poll() is None:
+                self.shutdown(wait=wait)
+        except Exception:  # noqa: BLE001 —— 收尾失败不该盖住真正的断言结果
+            pass
+        finally:
+            self.kill()
+
     def kill(self) -> None:
         try:
             if self.proc.poll() is None:
@@ -260,7 +276,7 @@ def drill_drain(workdir: Path, site: Site) -> None:
         record("A06_no_traceback_in_log", "Traceback" not in w.log_text(),
                f"queue_depth_at_shutdown={queue_depth}")
     finally:
-        w.kill()
+        w.stop()
 
 
 # --------------------------------------------------------------------------- B / C
@@ -337,7 +353,7 @@ def drill_rolling(workdir: Path) -> None:
                 status, _b = call(f"{w1b.base}/metrics", token=w1b.token, timeout=5)
                 record("B05_restarted_worker_serves", status == 200, f"/metrics -> {status}")
             finally:
-                w1b.kill()
+                w1b.stop()
 
         # `ok > 10` 不是凑数：如果压测线程根本没跑起来（异常退出/0 次循环），
         # `fail == 0` 会假通过 —— "什么都没测"和"测了全对"必须能区分开。
@@ -357,13 +373,13 @@ def drill_rolling(workdir: Path) -> None:
             status, _b = call(f"{spare.base}/metrics", token=spare.token, timeout=5)
             record("C04_new_serving_after_cutover", status == 200, f"/metrics -> {status}")
         finally:
-            spare.kill()
+            spare.stop()
 
         record("B07_no_traceback_in_logs",
                "Traceback" not in w1.log_text() and "Traceback" not in w2.log_text(), "")
     finally:
-        w1.kill()
-        w2.kill()
+        w1.stop()
+        w2.stop()
 
 
 def main() -> int:

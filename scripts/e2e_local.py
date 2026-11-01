@@ -214,6 +214,21 @@ class Service:
                 continue
         return raw.decode("utf-8", "replace")
 
+    def stop(self, wait: float = 20.0) -> None:
+        """尽力优雅收尾，最后才硬杀。
+
+        为什么不能直接 kill：服务下面挂着整个浏览器进程树（几百 MB）。硬杀只杀父进程，
+        浏览器可能变孤儿 —— 脚本多跑几次，这台机器就悄悄少掉几个 G。
+        先试 `/shutdown`（它会连浏览器一起关），拿不到响应再退化到 kill。
+        """
+        try:
+            if self.proc.poll() is None:
+                self.shutdown(timeout=wait)
+        except Exception:  # noqa: BLE001 —— 收尾失败不该盖住真正的断言结果
+            pass
+        finally:
+            self.kill()
+
     def kill(self) -> None:
         try:
             if self.proc.poll() is None:
@@ -357,7 +372,7 @@ def phase_a(workdir: Path) -> None:
         # 必须抓现场：直接失败的用例不给出那几行，等于让人再跑一次 60s 去复现。
         record("A16_no_traceback_in_log", "Traceback" not in log, _traceback_excerpt(log))
     finally:
-        svc.kill()
+        svc.stop()
 
 
 def phase_b(workdir: Path, skip_browser: bool) -> None:
@@ -445,7 +460,7 @@ def phase_b(workdir: Path, skip_browser: bool) -> None:
         record("B12_shutdown_exit_code_0", code == 0, f"exit={code}")
         record("B13_no_traceback_in_log", "Traceback" not in svc.log_text(), "")
     finally:
-        svc.kill()
+        svc.stop()
 
 
 def main() -> int:
