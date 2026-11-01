@@ -1,0 +1,42 @@
+{
+  "task_id": "T-41",
+  "status": "done_partial",
+  "timestamp": "2026-11-01T22:30:39+0800",
+  "baseline_commit": "d5a5f53",
+  "goal": "统一入口 run.ps1/run.bat + 容器化（Dockerfile/compose）",
+  "commands_executed": [
+    {
+      "cmd": "PowerShell ParseFile('run.ps1')",
+      "exit_code": 0,
+      "raw_output_tail": "run.ps1 语法 OK"
+    },
+    {
+      "cmd": ".\\run.ps1 go",
+      "exit_code": 0,
+      "raw_output_tail": "ok gocfsolve 7.140s"
+    },
+    {
+      "cmd": ".\\run.ps1 verify",
+      "exit_code": 0,
+      "raw_output_tail": "全部通过（Python 227 / cov 80.47% / Go race 绿 / findings exit 0）"
+    },
+    {
+      "cmd": ".\\run.ps1 smoke -Port 8911 -NoAuth",
+      "exit_code": 0,
+      "raw_output_tail": "OK /health ready(cache=sqlite:...) · OK /detect -> direct · OK SSRF 守卫拦住内网 URL"
+    }
+  ],
+  "files_changed": [
+    "run.ps1",
+    "run.bat",
+    "Dockerfile",
+    "docker-compose.yml",
+    ".dockerignore"
+  ],
+  "tests": [],
+  "limitations": [
+    "Docker 镜像未构建：本机 Docker daemon 未运行（docker version 连不上 npipe）",
+    "docker-compose.yml 未做 compose config 校验（同因）",
+    "Dockerfile 的 Debian 依赖包名按官方文档写，首次构建需复核"
+  ]
+}

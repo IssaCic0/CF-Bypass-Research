@@ -1,0 +1,23 @@
+{
+  "task_id": "N-01",
+  "status": "found_and_reported",
+  "timestamp": "2026-11-01T22:30:39+0800",
+  "baseline_commit": "d5a5f53",
+  "goal": "记录 /solve 在配置额外后端时绕过 SSRF 守卫（后续由并行会话修复）",
+  "commands_executed": [
+    {
+      "cmd": "起服务 --cfsolve-bin <argv 记录型假二进制> 后 POST /solve {url:http://127.0.0.1:8903/health}",
+      "exit_code": 0,
+      "raw_output_tail": "attempts=[{cfsolve,unsolved,wait},{camoufox,invalid-request,validate}]；假 cfsolve 实收 argv=[--page http://127.0.0.1:8903/health ...] ⇒ 守卫只在第二个后端才生效"
+    },
+    {
+      "cmd": "curl /health 读计数",
+      "exit_code": 0,
+      "raw_output_tail": "solves=0 failures=0 ⇒ router 路径不进指标（监测盲区）"
+    }
+  ],
+  "files_changed": [],
+  "limitations": [
+    "复现用的是 argv 记录型假二进制（真实 cfsolve 会真的去取该 URL）"
+  ]
+}

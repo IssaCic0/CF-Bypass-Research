@@ -1,0 +1,23 @@
+{
+  "task_id": "T-39",
+  "status": "done_partial",
+  "timestamp": "2026-11-01T22:30:39+0800",
+  "baseline_commit": "d5a5f53",
+  "goal": "CI 三 job（python 覆盖率门槛 / go vet+race / findings），全程离线",
+  "commands_executed": [
+    {
+      "cmd": "python -c \"import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))\"",
+      "exit_code": 0,
+      "raw_output_tail": "YAML 解析通过"
+    }
+  ],
+  "files_changed": [
+    ".github/workflows/ci.yml",
+    "requirements-dev.txt"
+  ],
+  "tests": [],
+  "limitations": [
+    "未在 GitHub Actions 上真跑过（本地无法触发），F3 仍为待验证",
+    "pytest-cov 按本机实际版本锁 7.1.0"
+  ]
+}

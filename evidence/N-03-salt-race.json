@@ -1,0 +1,42 @@
+{
+  "task_id": "N-03",
+  "status": "fixed",
+  "timestamp": "2026-11-01T22:30:39+0800",
+  "baseline_commit": "d5a5f53",
+  "goal": "记录并修复多进程首启争抢建盐文件的竞态",
+  "commands_executed": [
+    {
+      "cmd": "4 个进程同时对空目录调用 cache.SqliteStore(...)（loadtest burst 场景）",
+      "exit_code": 1,
+      "raw_output_tail": "PermissionError: [WinError 5] 拒绝访问: '.salt-xxxx' -> 'salt.bin'（4 进程同时首启约 1/4 概率命中）"
+    },
+    {
+      "cmd": "python -m pytest tests/test_cache_sqlite.py -q -k salt",
+      "exit_code": 0,
+      "raw_output_tail": "2 passed（并发首启 6 进程全成功 + 半成品盐自愈）"
+    },
+    {
+      "cmd": "python scripts/loadtest.py --mode share --processes 4 --iterations 3",
+      "exit_code": 0,
+      "raw_output_tail": "burst failures=0（修复前该场景有子进程崩溃）"
+    }
+  ],
+  "files_changed": [
+    "solver/cache.py"
+  ],
+  "tests": [
+    {
+      "name": "test_concurrent_first_boot_shares_one_salt",
+      "type": "unit",
+      "status": "pass"
+    },
+    {
+      "name": "test_partial_salt_file_is_repaired",
+      "type": "unit",
+      "status": "pass"
+    }
+  ],
+  "limitations": [
+    "同一竞态在 POSIX 上不报错但可能让两个进程拿到不同盐（静默错）；修复后两种平台都只认先创建成功的那份"
+  ]
+}

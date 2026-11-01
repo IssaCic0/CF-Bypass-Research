@@ -1,0 +1,88 @@
+{
+  "task_id": "T-36",
+  "status": "done",
+  "timestamp": "2026-11-01T22:30:39+0800",
+  "baseline_commit": "d5a5f53",
+  "goal": "缓存层升级为 SQLite(WAL)，保留 FileStore/Memory 降级（决策 D-2）",
+  "commands_executed": [
+    {
+      "cmd": "python -m pytest tests/test_cache_sqlite.py tests/test_cache.py -q",
+      "exit_code": 0,
+      "raw_output_tail": "37 passed"
+    },
+    {
+      "cmd": "python -m pytest tests/ -q --cov=solver --cov-fail-under=80",
+      "exit_code": 0,
+      "raw_output_tail": "227 passed ... TOTAL 80% (80.47%)，cache.py 84%"
+    },
+    {
+      "cmd": "python scripts/doctor.py --offline",
+      "exit_code": 1,
+      "raw_output_tail": "落盘缓存(SQLite/WAL): 写读往返正常 / 缓存实现: sqlite(....sqlite3)"
+    },
+    {
+      "cmd": "python scripts/loadtest.py --mode share --processes 4 --iterations 3",
+      "exit_code": 0,
+      "raw_output_tail": "sequential {solves:3, hits:9, failures:0} verdict PASS"
+    }
+  ],
+  "files_changed": [
+    "solver/cache.py",
+    "tests/test_cache.py",
+    "tests/test_cache_sqlite.py"
+  ],
+  "tests": [
+    {
+      "name": "test_store_*(file|sqlite) 12 例契约双跑",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "两种实现的 get/set/过期/purge/上限/加密 行为一致"
+    },
+    {
+      "name": "test_sqlite_cross_process_visibility",
+      "type": "unit",
+      "status": "pass"
+    },
+    {
+      "name": "test_concurrent_first_boot_shares_one_salt",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "6 进程同时首启空目录 → 全部 rc=0，父进程能解开全部 6 条（同一份盐）"
+    },
+    {
+      "name": "test_sqlite_write_survives_concurrent_lock",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "他进程持写锁 0.2s → 本次 set 在 busy_timeout 内成功"
+    },
+    {
+      "name": "test_sqlite_purge_keeps_salt_file",
+      "type": "unit",
+      "status": "pass"
+    },
+    {
+      "name": "test_partial_salt_file_is_repaired",
+      "type": "unit",
+      "status": "pass"
+    },
+    {
+      "name": "test_store_encrypts_at_rest",
+      "type": "unit",
+      "status": "pass",
+      "evidence": "磁盘无明文 clearance"
+    }
+  ],
+  "coverage_summary": {
+    "python_total_pct": 80.47,
+    "cache_py_pct": 84,
+    "method": "pytest --cov=solver"
+  },
+  "seams_touched": [
+    "solver.Solver ↔ cache store",
+    "多进程共享 cache 目录"
+  ],
+  "limitations": [
+    "host/backend 元数据列已就绪，但 service.py 尚未传 host（该文件由并行会话持有），按域统计待接线",
+    "跨进程同时抢同一新域无互斥（burst 实测 12/12 各解一次），属已知限制"
+  ]
+}
