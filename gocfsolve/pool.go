@@ -11,10 +11,12 @@ package cfsolve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -23,6 +25,41 @@ const (
 	// 每个物理节点在环上的虚拟节点数：越多分布越均匀，但环查找常数也略大。
 	poolVirtualNodes = 64
 )
+
+// 终止性错误：换哪个节点结果都一样，且**不是节点的锅**。
+// 与 solver/backends.py 的 TERMINAL_CODES 一一对应，改一边必须改另一边。
+//
+// 为什么必须有这条：池原来对任意 error 都 markFail。一个调用方把 url 写错（400），
+// 或 token 配错（401），连续两次就会把**健康节点摘掉 30 秒**——池子会自我雪崩。
+var terminalCodes = map[string]bool{
+	"invalid-request": true,
+	"unauthorized":    true,
+}
+
+// 过载类错误：换节点有意义，但节点本身没坏（它只是忙）。
+var saturationCodes = map[string]bool{
+	"busy":         true,
+	"rate-limited": true,
+}
+
+// apiErrorCode 取出结构化错误码（非 *APIError 的网络错误返回 false）。
+func apiErrorCode(err error) (string, bool) {
+	var ae *APIError
+	if errors.As(err, &ae) {
+		return ae.Code, true
+	}
+	return "", false
+}
+
+func terminalError(err error) bool {
+	code, ok := apiErrorCode(err)
+	return ok && terminalCodes[code]
+}
+
+func saturationError(err error) bool {
+	code, ok := apiErrorCode(err)
+	return ok && saturationCodes[code]
+}
 
 type poolOptions struct {
 	token          string
@@ -271,8 +308,15 @@ func (p *Pool) getWithNode(ctx context.Context, target string) (*Clearance, *poo
 			node.markOK()
 			return cl, node, nil
 		}
-		node.markFail(err, p.opts.maxFailures, p.opts.downDuration)
 		lastErr = err
+		// 终止性错误：立刻上抛，既不 failover（换谁都一样），也不记节点故障
+		if terminalError(err) {
+			return nil, nil, err
+		}
+		// 过载（busy / rate-limited）：要 failover，但不是节点的锅
+		if !saturationError(err) {
+			node.markFail(err, p.opts.maxFailures, p.opts.downDuration)
+		}
 		// ctx 已取消/超时就没必要再换节点了
 		if ctx.Err() != nil {
 			return nil, nil, err
@@ -298,6 +342,16 @@ func (p *Pool) Do(ctx context.Context, req *http.Request) (*http.Response, error
 		node.markFail(err, p.opts.maxFailures, p.opts.downDuration)
 		return nil, err
 	}
+	// 回放被拦（403 / cf-mitigated）= 这个节点**给出的凭证**失效了，**不是节点坏了**。
+	// 所以正确的动作是"丢掉这份凭证，让下次请求重解"，而不是把节点摘除 30 秒：
+	// 目标站的业务性 403（地域封锁、需要登录、权限不足）也会命中这里，
+	// 一旦记成节点故障，两次这样的请求就能把一组健康的求解器全部摘掉 —— 自己制造故障。
+	// （对比：原来这里无条件 markOK，"凭证死了"的节点永远显示健康，那又是另一个极端。）
+	if resp.StatusCode == http.StatusForbidden ||
+		strings.Contains(strings.ToLower(resp.Header.Get("cf-mitigated")), "challenge") {
+		node.client.invalidate(node.client.cacheKey(req.URL.String()))
+		return resp, nil
+	}
 	node.markOK()
 	return resp, nil
 }
@@ -321,10 +375,17 @@ func (p *Pool) healthLoop() {
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				_, ready, err := n.client.Health(ctx)
 				cancel()
-				if err == nil && ready {
-					n.markOK()
-				} else if err != nil {
+				switch {
+				case err != nil:
 					n.markFail(err, p.opts.maxFailures, p.opts.downDuration)
+				case ready:
+					n.markOK()
+				default:
+					// HTTP 层成功但 ready=false —— 这正是"浏览器死了"在服务端的表现
+					// （503 + 合法 JSON，见 solver/service.py 的 /health 三态）。
+					// 原实现对这个分支什么都不做，等于探活永远看不见最该发现的故障。
+					n.markFail(errors.New("探活：服务端返回未就绪（ready=false）"),
+						p.opts.maxFailures, p.opts.downDuration)
 				}
 			}
 		}
