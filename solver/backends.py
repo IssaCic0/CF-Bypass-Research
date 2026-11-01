@@ -371,6 +371,10 @@ class BackendRouter:
             out = backend.solve(url, timeout=timeout, force=force, **kwargs)
         except BaseException:
             gov.end_backend_call(False, time.monotonic() - started, host=host, backend=backend.name())
+            if claimed:
+                release = getattr(gov, "release_claim_for", None)
+                if callable(release):
+                    release(url)      # 失败也要放行其它进程，别让它们白等 claim 的 TTL
             raise
         gov.end_backend_call(True, time.monotonic() - started, host=host, backend=backend.name())
         if cacheable and isinstance(out, dict):

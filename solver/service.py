@@ -1440,6 +1440,9 @@ class Solver:
                 budget,
             )
         except SolveError as e:
+            # 失败也要放掉抢占：否则别的进程会白等一个"永远不会来"的缓存（最多等满 claim TTL）
+            if claimed:
+                self._release_claim(key)
             # 失败也要记账：HELP 声明"含失败"，而旧实现只在成功路径 +1（指标说谎）。
             # 参数错误/队列满这类**没真正发起求解**的终止性错误不该算一次求解。
             if e.code not in (ErrorCode.INVALID_REQUEST, ErrorCode.BUSY, ErrorCode.UNAUTHORIZED):
@@ -1465,6 +1468,8 @@ class Solver:
         token_field = r.get("token_field") or ""
 
         if not token:
+            if claimed:
+                self._release_claim(key)
             self._account(False, elapsed, host=host, backend="camoufox")
             if self._pool is not None and proxy_entry is not None:
                 self._pool.record_failure(proxy_entry, "unsolved")
@@ -1491,6 +1496,8 @@ class Solver:
         if want_enum in CACHEABLE_WANTS:
             ttl = self._ttl_from_cookie_list(r["cookie_list"], cookie_name=COOKIE_FIELD[want_enum])
             if ttl <= 0:
+                if claimed:
+                    self._release_claim(key)
                 self._account(False, elapsed, host=host, backend="camoufox")
                 raise SolveError(
                     ErrorCode.UNSOLVED,

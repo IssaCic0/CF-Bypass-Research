@@ -2,6 +2,24 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [4.4.1] - 2026-11-02
+
+补丁版：自查发现"抢占在失败路径上没释放"。
+
+### 修复
+
+- **求解失败时没有释放 `claims` 抢占** → 同域的其它 worker 会白等一个永远不会出现的缓存
+  （最多等满 `_wait_for_peer` 的 10s，或 claim 的 TTL）。现在三条失败路径
+  （未取到凭证 / TTL 过短 / 抛 SolveError）与路由后端失败路径都会立刻释放。
+  回归用例：`test_claim_is_released_after_failure`。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| Python | 297 passed，覆盖率 81.82% |
+| Go | 41 + egress 4，vet + -race 绿 |
+
 ## [4.4.0] - 2026-11-02
 
 主题：把上一轮列出的"剩余风险"逐条打掉——跨进程重复求解、多出口回放、真实 CF 站路由证据、容器化。

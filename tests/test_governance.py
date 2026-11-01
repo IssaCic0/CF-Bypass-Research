@@ -670,3 +670,24 @@ def test_shutdown_allowed_matrix():
             assert svc.Handler.shutdown_allowed(peer) is True, peer
     finally:
         svc.Handler.allow_remote_shutdown = old
+
+
+def test_claim_is_released_after_failure(tmp_path):
+    """求解失败也必须放掉抢占 —— 否则同域的其它 worker 会白等一个永远不会出现的缓存。"""
+    store = cache_mod.SqliteStore(str(tmp_path), "t")
+    s = svc.Solver(browser_factory=factory_returning(FakeBrowser()),
+                   allow_private_hosts=True, store=store)
+    assert wait_until(lambda: s.health()[0] == 200)
+    try:
+        backend = FakeBackend(raises=SolveError(ErrorCode.UNSOLVED, "boom", stage="wait"))
+        router = be.BackendRouter([backend], governance=s)
+        with pytest.raises(SolveError):
+            router.solve(HOST, timeout=10)
+
+        # 失败后抢占应当已释放：另一个"进程"能立刻抢到
+        other = cache_mod.SqliteStore(str(tmp_path), "t")
+        entry = s._entry_for("example.com")
+        key = s.cache_key("example.com", entry)
+        assert other.try_claim(key, ttl=30) is True, "失败后抢占未释放，对端会白等"
+    finally:
+        s.close()
