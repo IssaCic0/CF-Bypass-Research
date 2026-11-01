@@ -215,14 +215,16 @@ scripts/
   probe_browser.py      # Playwright headless / headed 过盾对照实验
   probe_camoufox.py     # Camoufox 过盾实验（当前唯一通过）
   diag_challenge.py     # 挑战页 DOM 诊断：iframe / checkbox / 按钮 / 截图
-node-shim/
-  shims.js              # 12 项浏览器能力伪造层（WebGL/Audio/WebRTC/Worker/fonts…）
-  run2.js               # A1 主程序：jsdom + shims 跑 CF 挑战脚本
-go-jseng/
-  main.go               # A2：Go + goja 执行 CF 混淆编排脚本（语法哨兵，非行为验证）
-go-replay/
-  main.go               # Go 原生 net/http 回放 cf_clearance（已有 cookie 时的零依赖路径）
 requirements.txt        # 精确锁版本的运行期依赖
+requirements-dev.txt    # 开发/CI 依赖（pytest-cov）
+run.ps1 / run.bat       # ★ 统一入口：doctor / test / go / smoke / bench / verify（v4.0）
+policy.md               # 质量门禁（覆盖率 80%、证据门禁、提交规则），写死数值
+workflow_status.md      # 任务契约 / 验收表 / 验证日志 / 审查记录
+test_ledger.md          # 测试台账：每个验收项对应哪些用例
+evidence/               # 验收证据（真实命令 + 真实输出），一个任务卡一个 json
+.github/workflows/ci.yml# CI：python(覆盖率门槛) + go(vet/test -race) + findings 三 job，全程离线
+Dockerfile              # 容器镜像（camoufox 二进制在 build 阶段 fetch）
+docker-compose.yml      # 多 worker + 共享缓存卷
 plans/
   下一步改进指南.md      # 施工图（任务卡 + 验收门禁）
 ```
@@ -234,14 +236,15 @@ plans/
 ### 环境
 
 - Python 3.11+（版本见 `requirements.txt`，**已锁版本**）
-- Node 18+（`jsdom`、`canvas`，仅 A1 实验需要）
-- Go 1.21+（`goja`，仅 A2 实验需要）
+- Go 1.21+（仅 `gocfsolve/` 客户端与测试需要）
+- Node 18+（仅 `scripts/validate-findings.mjs` 需要）
 
 ```bash
-pip install -r requirements.txt         # 含 pytest（跑测试用）与 cryptography（落盘加密缓存用）
-python -m camoufox fetch                # 必需：拉 Camoufox 的 Firefox 二进制
-# A1 实验（可选）
-cd node-shim && npm i jsdom canvas
+pip install -r requirements.txt -r requirements-dev.txt   # 运行期 + 测试依赖（版本已锁）
+python -m camoufox fetch                                  # 必需：拉 Camoufox 的 Firefox 二进制
+
+# 装完先自检（会起一次服务做 /health 探活，20 秒内给结论）
+python scripts/doctor.py
 ```
 
 ### 多进程部署（要吞吐就看这一节）
@@ -271,13 +274,41 @@ defer pool.Close()
 cl, err := pool.Get(ctx, target)      // 同域永远打到同一个 worker
 ```
 
+### 一键入口（v4.0，推荐）
+
+```powershell
+.un.ps1 doctor     # 环境自检：依赖/浏览器二进制/端口/缓存目录/token + 起一次服务打 /health
+.un.ps1 test       # Python 全量测试 + 覆盖率门槛（≥80%，低于门槛直接红）
+.un.ps1 go         # Go: go vet + go test -race
+.un.ps1 smoke      # 起服务 → /health → /detect → SSRF 守卫，全链路冒烟
+.un.ps1 bench      # 离线压测三模式（hot 回放吞吐 / cold 准入 / share 多进程缓存）
+.un.ps1 verify     # 提交前必跑：以上全部
+.un.ps1 stop       # 停掉占着端口的进程
+```
+
+`run.bat` 是同一套子命令的 cmd 包装。
+
 ### 跑测试（离线，不联网、不起浏览器）
 
 ```bash
 python -m pytest tests/ -q                      # Python 侧（注入假浏览器）
-cd gocfsolve && go test ./...                   # Go 侧（httptest）
+python -m pytest tests/ -q --cov=solver --cov-fail-under=80   # 带覆盖率门槛
+cd gocfsolve && go vet ./... && go test -race ./...           # Go 侧（httptest + 竞态检测）
 node scripts/validate-findings.mjs              # 校验研究结论的证据链
 ```
+
+### 压测与缓存共享演练（默认离线，不打真实站点）
+
+```bash
+python scripts/loadtest.py --mode hot   --workers 8 --duration 5   # 稳态回放吞吐（E2）
+python scripts/loadtest.py --mode cold  --workers 16               # 冷路径准入 + 去重（E1/F2）
+python scripts/loadtest.py --mode share --processes 4              # 多进程同域只解一次（G2/A3）
+python scripts/loadtest.py --mode hot --dry-run                    # 只看计划
+```
+
+> ⚠️ **已知限制（实测数据，别假设它不存在）**：多进程共享缓存只防"**先后**到达"的重复求解；
+> 4 个 worker **同时**抢同一个新域时会各解一次（当前实现没有跨进程互斥，见 `solver/cache.py` 的设计取舍）。
+> `share` 模式的 burst 阶段就是把这个数字量化出来的地方。
 
 ### 跑实验
 

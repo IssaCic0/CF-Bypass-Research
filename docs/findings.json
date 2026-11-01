@@ -25,18 +25,11 @@
       "severity": "high",
       "evidence": [
         {
-          "path": "node-shim/shims.js",
-          "locator": "12 项伪造层"
-        },
-        {
-          "path": "go-jseng/main.go",
-          "locator": "假体与执行上限"
-        },
-        {
           "path": "docs/Cloudflare过盾方案可行性侦察报告.md",
-          "locator": "§9 A1/A2 输出"
+          "locator": "§9 A1/A2 结论与原始输出"
         }
-      ]
+      ],
+      "note": "原实现 node-shim/shims.js 与 go-jseng/main.go 已按 plans/下一步改进指南.md 决策 D-3 删除；历史可查：git show d5a5f53:node-shim/shims.js、git show d5a5f53:go-jseng/main.go"
     },
     {
       "id": "F-003",

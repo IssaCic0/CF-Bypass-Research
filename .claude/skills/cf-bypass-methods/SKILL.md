@@ -31,6 +31,20 @@ description: 当需要选择/新增/评估"过 Cloudflare 盾"的方法时使用
 `page has no .cf-turnstile container` —— 那说明**没有可解的挑战**，不是方案不行。
 选站时要先确认目标站真的会弹挑战（用 Camoufox 访问看是否 403 + `cf-mitigated`）。
 
+## 一点五、第一步永远是"先探测"
+
+别上来就求解。先跑一次探测（只发一次普通 GET，秒级）：
+
+```bash
+python scripts/detect.py https://target/          # 或 POST /detect
+```
+
+它会告诉你：有没有盾、哪家厂商、置信度、**CF 挑战类型**，以及**建议走哪条路**
+（`direct` / `browser` / `pure_protocol_may_work` / `browser_token` / `browser_unsupported`）。
+
+规则来自 `scrapfly/Antibot-Detector`（33 个厂商字面特征）+ 我们补的 5 条强特征。
+详见 `docs/检测-防护识别.md`。
+
 ## 二、四条硬约束（任何方法都逃不掉，先检查这个再调参）
 
 1. **同出口 IP**：求解与回放必须同一出口 → 缓存键要含出口标识，代理要用一致性哈希粘性

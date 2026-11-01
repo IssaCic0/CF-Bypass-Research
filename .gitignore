@@ -37,3 +37,11 @@ Thumbs.db
 
 # graft's local graph cache — regenerable, not committed (run `graft build`).
 /graft/
+
+# 覆盖率产物（会随测试生成）
+.coverage
+coverage.xml
+htmlcov/
+
+# codegraph 本地索引缓存（可重建：codegraph index）
+.codegraph/

@@ -38,6 +38,32 @@ $TOKEN = (Select-String -Path .env -Pattern '^CF_SOLVE_TOKEN=(.+)$').Matches[0].
 | `sitekey` | string | `turnstile`/`recaptcha_v3` 必填 | — | 从页面取：`data-sitekey`，或 reCAPTCHA 的 `api.js?render=<sitekey>` |
 | `action` | string | 否 | — | Turnstile / reCAPTCHA v3 的 action，要**与目标站一致**（不一致拿到的 token 会被判无效） |
 | `cdata` | string | 否 | — | Turnstile 的 customer data（目标站用了就且要一致） |
+| `route` | string | 否 | `fixed` | **v4.0 新增**：`fixed`（默认，v3 行为）/ `auto`（先探测再决策）/ `direct`（不求解）/ `pure`（纯协议优先）/ `browser`（浏览器优先） |
+
+#### `route=auto` 的语义与响应变化
+
+`auto` 会先发**一次普通 GET** 探测目标（复用 `/detect` 的能力与 SSRF 逐跳守卫，独立并发闸门，失败不影响求解），然后：
+
+| 探测结论 | 行为 | 响应 |
+|---|---|---|
+| 未命中任何防护特征 | **不求解**，直接告诉调用方去请求目标站 | `200 {"ok":true,"solved":false,"no_challenge":true,"route":"auto",…}` |
+| Cloudflare `managed`/`jsd` | 照常求解，**纯协议优先**（零浏览器） | 正常成功响应 + `routed_by` |
+| Cloudflare `turnstile`/`recaptcha` | 照常求解，浏览器优先（token 必须在浏览器内取） | 正常成功响应 + `routed_by` |
+| AWS WAF | 照常求解，浏览器优先；要 token 请把 `want` 设为 `awswaf` | 正常成功响应 + `routed_by` |
+| 其它厂商（DataDome / PerimeterX / Kasada …） | **直接拒绝**：`200 {"ok":false,"error_code":"unsolved","stage":"detect"}`，不白等一整个超时 | 带 `routed_by.detail.unsupported` |
+| 探测失败 / 闸门满 | 退回 `fixed`，照常求解 | 正常成功响应 + `routed_by.reason="detect-unavailable"` |
+
+成功的求解响应会多一个字段（老客户端忽略即可）：
+
+```json
+"routed_by": {
+  "mode": "auto", "action": "solve", "reason": "cloudflare-managed", "prefer": "pure",
+  "detect": {"protected": true, "providers": ["Cloudflare Bot Management"],
+             "challenge_type": "managed", "route": "browser"}
+}
+```
+
+> **不传 `route` 时行为与 v3 完全一致**，且**不会**产生任何额外探测请求（有用例锁死这条）。
 
 ### Response（成功）
 
@@ -153,15 +179,29 @@ curl -s -X POST http://127.0.0.1:8878/solve \
 - `503` + `state: starting` —— 首次启动中（浏览器还没起来）
 - `503` + `state: degraded` —— 曾经好过，现在挂了；`last_error` 说明原因。worker 会指数退避自愈
 
+### 两级视图（**免鉴权只给最小集**）
+
+`/health` 免鉴权，但**返回字段取决于你有没有带 token**：
+
+| 调用方 | 返回 |
+|---|---|
+| 不带 token（容器探活、负载均衡） | `ok` / `state` / `browser_alive` / `worker_alive` **四个字段** |
+| 带 `Authorization: Bearer <token>` | 完整运维视图（下面这一坨） |
+
+为什么：完整视图里有 `last_error`（可能带被拦截子资源的主机名）、代理地址与评分、
+缓存域数、UA 指纹、persona —— 这些对"这个容器要不要被摘掉"没用，对同网段的其他人却有用。
+健康检查只需要状态码 + `state`。
+
 ```json
 {
   "ok": true,
-  "browser": "camoufox",
   "state": "ready",
   "browser_alive": true,
   "worker_alive": true,
+  "browser": "camoufox",
+  "backends": ["cfsolve", "camoufox"],
   "egress_id": "default",
-  "cache_backend": "file:/var/lib/cfsolve/cache",
+  "cache_backend": "sqlite:/var/lib/cfsolve/cache",
   "browser_os": "windows",
   "ua_fingerprint": "64898c51c64b",
   "cached_domains": 1,
@@ -196,6 +236,10 @@ curl -s -X POST http://127.0.0.1:8878/solve \
   }
 }
 ```
+
+`backends` 是**实际生效的后端链**（按尝试顺序）。⚠️ 注意语义边界：上面的三态
+（`ready`/`starting`/`degraded`）只反映**本地 Camoufox worker**，不反映链上其它后端的可用性
+（cfsolve 的二进制被删、pydoll 的 Chrome 被系统更新挪走，都不会让 `state` 变）。
 
 `proxies` 只在配置了代理池时出现，且**永远不含用户名/密码**（只给脱敏后的 `scheme://host:port`）。
 
@@ -233,11 +277,26 @@ GET  /detect?url=https://target/
        "providers":[{"name":"Cloudflare","confidence":100,"hits":[…]}, …],
        "cloudflare_challenge_type":"managed",
        "recommendation":{"route":"browser","reason":"…","hint":"…"},
+       "final_url":"https://target/",
        "backend":"detect"}
 ```
 
 `recommendation.route` 取值：`direct` / `direct_unless_blocked` / `browser` / `pure_protocol_may_work`
 / `browser_token` / `browser_cookie` / `unsupported_or_browser`。
+
+**`final_url` 是实际拿到响应的那个 URL**（跟随重定向之后）。注意每条跳转都会被独立校验（见下）。
+
+### 与「防护识别」相关的两条硬约束
+
+1. **重定向逐跳校验**：`/detect` 会跟随最多 3 跳（`PROBE_MAX_REDIRECTS`），
+   但**每一跳**都过 SSRF 守卫（`guard_hop`）。非 http(s) 协议、解析到私网/回环/云元数据的跳转一律 400。
+   超跳数直接 502 `transport`（防止重定向环把 handler 线程挂住）。
+2. **独立准入闸门**：`/detect` 有**自己的**并发上限（`--max-detect`，默认 4），与求解的
+   `--max-inflight` 分开计。满了立刻 `429 busy` —— 探测是一次同步出站请求，没有背压就等于
+   给调用方一个免费的流量放大器。
+
+探测发出的 `User-Agent` **与求解侧同一身份**：浏览器已就绪时用它的真实 UA，
+否则按 `--browser-os` 对应的 persona 推。用另一套身份探出来的"有没有盾"和真实求解时看到的并不一致。
 
 ## GET /stats — 需要 token
 
@@ -276,6 +335,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8878/metrics
 | `--ttl` | `1500` | 缓存有效期**上限**（秒）；真实值取 cookie 的 `expires`，且不超过该值 |
 | `--max-queue` | `16` | 有界队列容量。满了立刻 429 `busy`，**不排队等** |
 | `--max-inflight` | `8` | 并发求解闸门。单进程仍串行求解，这个值限制的是"允许多少请求进来等" |
+| `--max-detect` | `4` | **探测（`/detect`）**并发闸门，与求解额度**分开计**。满了立刻 429 `busy` |
 | `--egress-id` | `default` | 无代理池时本进程的出口标识。**换出口必须换它** |
 | `--cache-dir` | 空（内存） | 落盘缓存目录（多进程共享）。落盘失败会降级为内存并在启动日志与 `/health` 里写明原因 |
 | `--proxy` | 空 | 代理出口，可重复。按域一致性哈希做粘性 |
@@ -294,6 +354,21 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8878/metrics
 | `--no-auth` | 关 | 关闭鉴权，**仅限本机调试** |
 | `--allow-private-hosts` | 关 | 允许访问私网/回环目标，**仅限本机联调** |
 | `--headed` | 关 | 有头模式，调试用 |
+
+### 两个启动即失败的硬冲突（不是警告）
+
+1. **`--proxy` 与 `--cfsolve-bin` / `--pydoll` 不能同时启用。**
+   这两个后端在各自进程里直连（cfsolve 自带 BoringSSL、pydoll 自带 Chrome），走不了代理池
+   ⇒ 它们发出的 `cf_clearance` 绑的是**本机直连 IP**，而 Go 侧回放会按凭证的 `egress_id` 走代理
+   ⇒ 求解与回放出口不一致 ⇒ 稳定的静默 403。与其上线后表现为"随机 403"，不如启动就拒绝。
+2. **`--engine` 指定的引擎缺依赖 → 直接退出并打印安装命令**（不静默退回其它引擎）。
+   静默退回会让运维以为在跑 A 其实在跑 B，排查成本极高。
+
+### 请求体编码
+
+只接受带 `Content-Length` 的请求体（上限 64 KB）。**不支持 `Transfer-Encoding: chunked`**：
+收到时返回 400 并**主动关闭连接** —— 因为 `http.server` 不解析 chunked，未读的 chunk 字节会留在
+socket 里被当成下一个请求的开头（请求走私/反序列化面），而这段逻辑在鉴权之前就会被执行。
 
 ### SSRF 防护的范围与残留风险（诚实披露）
 
@@ -319,3 +394,45 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8878/metrics
 - 写入用"同目录临时文件 + 原子替换"，多进程共享目录时读者不会看到半截文件。
 - ⚠️ **Windows 上无法用 chmod 落实 0600/0700**（NTFS ACL 另算）。所以 Windows 部署时
   "文件权限"这一层保护实际是弱的，真正的保护来自加密 + 目录本身不对外。Linux 上会生效。
+
+---
+
+## 后端契约（新后端必须遵守，否则整套缓存会静默失效）
+
+任何一个 cookie 类后端返回的结果都必须满足：
+
+| 字段 | 要求 | 违反后果 |
+|---|---|---|
+| `expires_in` | **> 0** | `0` 会让 Go 侧 `expiresAt()` 立刻判过期，**每次回放都重新求解** |
+| `expires_at` | 绝对时间戳，且在未来 | 服务端 `FileStore` 按 `expires_at <= now` 直接删文件，等于不缓存 |
+| `egress_id` | **本进程真实的出口标识**（不要写死后端名） | Go 侧按它选代理；写假的会让"出口一致性"校验形同虚设 |
+| `cookie_list` | 结构化（含 domain/path/expires） | 回放要按域过滤 + CF 的 host-only/父域同名去重 |
+
+统一实现是 `solver/backends.py::derive_ttl()` —— **不要再在别处自己算 TTL**。
+这条契约历史上被违反过两次（cfsolve、pydoll 各一次），每次的表现都是"缓存看起来有，其实全无效"。
+不变量测试：`tests/test_backends.py` 的 `derive_ttl` 系列 + `tests/test_strategies.py` 的两个 TTL 用例。
+
+## Go 客户端（`gocfsolve`）关键选项
+
+```go
+cli := cfsolve.New(
+    "http://127.0.0.1:8878",
+    cfsolve.WithToken(token),
+    cfsolve.WithEgressID("default"),
+    // 配了代理池时**必须**逐个登记出口，否则回放会 fail closed
+    cfsolve.WithEgressProxy("ip:203.0.113.7", "http://user:pass@gw1.example.net:8080"),
+    cfsolve.WithRevalidate(true),              // 回放遇 403/挑战页 → 失效并重解一次（默认开）
+    cfsolve.WithRevalidateConcurrency(2),      // 跨域重解并发上限（默认 2）
+    cfsolve.WithCacheLimit(1024),              // 本地缓存条目上限（默认 1024）
+)
+```
+
+行为要点（每条都对应一个曾经真实会咬人的问题）：
+
+1. **同一域的并发 `Get` 只求解一次**（per-key 单飞）。没有它，50 个并发冷域 = 50 次求解。
+2. **回放自愈**：403 / `cf-mitigated` / 200 但正文是挑战页 ⇒ 丢缓存 + 重解一次 + 重放。
+   **只重试一次**，绝不循环。带 body 且不可重放的请求（`GetBody == nil`）不重试。
+3. **出口绑定**：只要登记过任何 `WithEgressProxy`，回放就按 `clearance.EgressID` 选代理；
+   选不到 → `ErrNoEgressProxy`（**fail closed**，不会"悄悄直连试试"）。
+4. **探活/统计用 5s 超时客户端**，不跟求解的 240s 一起挂。
+5. 缓存命中返回**深拷贝**（`CookieList`/`Cookies`），调用方改它不会污染缓存。
