@@ -365,9 +365,18 @@ class BackendRouter:
             gov.remember(url, out)
         return out
 
-    def solve(self, url: str, timeout: float, force: bool = False, **kwargs) -> dict:
+    def solve(self, url: str, timeout: float, force: bool = False,
+              *, skip: frozenset[str] | set[str] | None = None, **kwargs) -> dict:
+        """按顺序试后端。`skip` 是本次请求**明确要跳过**的后端名（来自 route=auto 的 prefer）。
+
+        安全阀：如果 skip 把整条链都跳完了，则**忽略 skip** 并记录原因 ——
+        否则调用方传个 `route=pure` 就会得到"没有任何可用后端"，那是自己制造的故障。
+        """
         attempts: list[dict] = []
         last_error: SolveError | None = None
+        skip_set = {str(x) for x in (skip or ())}
+        if skip_set and all(b.name() in skip_set for b in self._backends if b.is_configured()):
+            skip_set = set()          # 全被跳完 → 放弃跳过，正常尝试
         # `timeout` 是整条链的总预算：按墙钟 deadline 切分给每个后端，而不是每个都给满。
         # 这样最坏耗时 ≈ timeout（+ 单后端的排队余量），不会把客户端的超时先撞穿。
         deadline = time.monotonic() + max(MIN_BACKEND_BUDGET, float(timeout or 0))
@@ -376,6 +385,9 @@ class BackendRouter:
             name = backend.name()
             if not backend.is_configured():
                 attempts.append({"backend": name, "skipped": True, "reason": "not-configured"})
+                continue
+            if name in skip_set:
+                attempts.append({"backend": name, "skipped": True, "reason": "prefer-skip"})
                 continue
             remaining = deadline - time.monotonic()
             if remaining < MIN_BACKEND_BUDGET:

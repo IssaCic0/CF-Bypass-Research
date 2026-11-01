@@ -2,6 +2,49 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [4.3.0] - 2026-11-02
+
+主题：**把三件"设计上应该有、但从没验证过"的事变成实测数字**——4 worker 内存、
+崩溃隔离时延，以及补上审计日志。
+
+### 新增
+
+- **审计日志 `--audit-log <path>`**（JSONL，字段**白名单**）。
+  每次 `solve`/`detect`/`shutdown` 落一行，含 `host/backend/route/ok/elapsed/error_code/stage/peer` 等；
+  **刻意不含** clearance / token / cookies —— 审计回答"谁在什么时候打了哪个站、结果如何"，
+  不回答"凭证是什么"。写盘失败只降级（打 `audit-write-failed`），**不会让请求失败**。
+- **`gocfsolve/examples/pooldrill`**：池演练程序，每秒打印节点健康快照，
+  配合外部脚本杀/启 worker，用来量 E5 的摘除与回归时延。
+
+### 变更
+
+- **`prefer` 现在真的影响选路**（此前只是响应里的一个字符串，名不副实）：
+  `prefer=pure` 跳过 pydoll/flaresolverr；`prefer=browser` 跳过 cfsolve；
+  被跳过的后端在 `attempts[]` 里标 `reason=prefer-skip`。
+  安全阀：若 skip 会把整条链跳完，则**忽略 skip** 正常求解（不制造"没有可用后端"）。
+
+### 实测（E4/E5，此前只有"设计上应该"）
+
+| 项 | 目标 | 实测 |
+|---|---|---|
+| E4 4 worker 内存 | ≤ 3.5 GB | **3.34 GB**（855 MB/worker，含浏览器进程树；总句柄 10827） |
+| E5 崩溃摘除 | ≤ 20 s | **2 s**（maxFailures=2 + 探活 2s） |
+| E5 自动回归 | ≤ 60 s | **28 s**（受 30s `downDuration` 支配；其余 3 节点全程 `f=0`） |
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| Python | **293 passed**，覆盖率 **81.69%** |
+| Go | 41 Test，`vet` + `-race` 绿；`pooldrill` 可构建 |
+| 审计 | 3 个用例：含"白名单外的凭证字段不落盘"与"写盘失败不打断请求" |
+
+### 未完成（诚实披露）
+
+- **Docker 镜像仍未构建验证**：本机 Docker daemon 未启动（`dockerDesktopLinuxEngine` 连不上）。
+- 代理/出口绑定只覆盖 Go 客户端侧，**回放侧**仍未接线。
+- 真机预算本轮 0 新增（E4/E5 全部本地），累计 ≈53/60。
+
 ## [4.2.1] - 2026-11-02
 
 补丁版：修掉 1 小时 soak 抓出的**句柄泄漏**（v4.2.0 的 soak 判定因此是 FAIL，这是它存在的意义）。

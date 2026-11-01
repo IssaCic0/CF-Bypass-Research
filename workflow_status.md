@@ -42,7 +42,7 @@
 | **T-45** | **句柄泄漏：缓存层 thread-local SQLite 连接 → 共享连接** | 本会话 | **DONE** | 1h soak 泄漏 +1308/线程数不变；归因到"每条新 TCP 连接 +3 句柄"；修复后 +100 连接 **+0**。见 `evidence/v42-handle-leak.md` |
 | **T-44** | 失败响应回传 `routed_by` | 本会话 | **DONE** | 真机 60s 未解出时 `routed_by` 全空 → 已修，用例 `test_routed_by_survives_failure` |
 | T-34 | `/detect` 结果按 host 短 TTL 缓存 | 本会话 | **DONE** | `--detect-cache-ttl`（默认 300s，0=关）；`fresh=1` 跳过；`tests/test_governance.py` 4 例 |
-| T-38 | 代理/出口绑定透传到 Go（`egress_test.go`） | 并行会话 | **DONE**（部分：客户端侧） |
+| T-38b | 代理/出口绑定透传到 Go（`egress_test.go`） | 并行会话 | **DONE**（部分：只覆盖客户端侧，回放侧未接） |
 
 ### W3 缓存与观测
 
@@ -50,7 +50,7 @@
 |---|---|---|---|---|
 | **T-36** | 缓存层 SQLite(WAL) + FileStore 降级 | 本会话 | **DONE** | `solver/cache.py::SqliteStore`、`tests/test_cache_sqlite.py`（17 例）· `evidence/T-36.json` |
 | T-37 | 指标升级（后端维度/按域统计/口径修正） | 本会话 | **DONE** | `/metrics` 新增 `cfsolve_backend_total{backend,result}`、`cfsolve_host_solves_total`（top-20 截断）；`solves_total` 口径改为"含失败" |
-| T-38 | 审计日志 | 待做 | **TODO** |
+| **T-38** | 审计日志（`--audit-log`，JSONL + 字段白名单） | 本会话 | **DONE** | 3 用例（白名单不含凭证 / 白名单外字段丢弃 / 写失败不打断请求）· `evidence/v43-acceptance.md` §3 |
 
 ### W4 工程化
 
@@ -113,6 +113,8 @@
 | V24 | **句柄泄漏归因** | 100×`/health` → +300；100 连接×1 请求 → +296；1 连接×100 请求 → +7；最小 stdlib 服务 +100 连接 → +16 ⇒ 泄漏在我们代码：`SqliteStore` thread-local 连接（WAL 每连接 3 个文件句柄） |
 | V25 | **修复后复测** | 同一手法：+100 `/health` → **+0**；+100 `/metrics` → **+0** |
 | V26 | **修复后 soak（15 分钟）** | **passed: true** — 0 错 / 全程 ready / RSS 回落 396.7MB / **句柄 2788→2746（净 -42）** |
+| V27 | **E4：4 worker 内存** | 合计 **3.34 GB**（855MB/worker，含浏览器进程树）≤ 3.5GB ✅ |
+| V28 | **E5：崩溃隔离演练（真实杀进程）** | 摘除 **2s**（maxFailures=2 + 探活 2s）、回归 **28s**（受 30s downDuration 支配），其余节点全程 f=0 ✅ |
 
 ---
 

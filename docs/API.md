@@ -38,7 +38,7 @@ $TOKEN = (Select-String -Path .env -Pattern '^CF_SOLVE_TOKEN=(.+)$').Matches[0].
 | `sitekey` | string | `turnstile`/`recaptcha_v3` 必填 | — | 从页面取：`data-sitekey`，或 reCAPTCHA 的 `api.js?render=<sitekey>` |
 | `action` | string | 否 | — | Turnstile / reCAPTCHA v3 的 action，要**与目标站一致**（不一致拿到的 token 会被判无效） |
 | `cdata` | string | 否 | — | Turnstile 的 customer data（目标站用了就且要一致） |
-| `route` | string | 否 | `fixed` | **v4.0 新增**：`fixed`（默认，v3 行为）/ `auto`（先探测再决策）/ `direct`（不求解）/ `pure`（纯协议优先）/ `browser`（浏览器优先） |
+| `route` | string | 否 | `fixed` | **v4.0 新增**：`fixed`（默认，v3 行为）/ `auto`（先探测再决策）/ `direct`（不求解）/ `pure`（纯协议优先）/ `browser`（浏览器优先）。**v4.3 起 `prefer` 真的影响选路**：`pure` 跳过 pydoll/flaresolverr，`browser` 跳过 cfsolve，被跳过的后端在 `attempts` 里标 `reason=prefer-skip` |
 
 #### `route=auto` 的语义与响应变化
 
@@ -363,6 +363,14 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8878/metrics
 ```
 
 ---
+
+## 审计日志（`--audit-log`，v4.3）
+
+`--audit-log <path>` 开启 JSONL 审计：每次 `solve` / `detect` / `shutdown` 落一行。
+**字段白名单**：`event/req_id/host/ok/cached/elapsed/clearance_len/ms/error_code/stage/backend/route/reason/peer/ts`。
+刻意**不含** clearance / token / cookies —— 审计回答"谁在什么时候打了哪个站、结果如何"，
+不回答"凭证是什么"。写盘失败只降级（打一条 `audit-write-failed` 到 stdout），**不会让请求失败**。
+轮转交给外部（logrotate / 容器日志驱动），服务内不做。
 
 ## 启动参数（与契约相关的部分）
 

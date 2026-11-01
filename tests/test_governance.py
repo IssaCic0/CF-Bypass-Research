@@ -455,3 +455,134 @@ def test_routed_by_survives_failure(monkeypatch):
         srv.server_close()
         svc.Handler.router = None
         s.close()
+
+
+# ── T-38 审计日志 ───────────────────────────────────
+@pytest.fixture
+def live_audit(tmp_path):
+    browser = FakeBrowser()
+    s = svc.Solver(browser_factory=factory_returning(browser), allow_private_hosts=True)
+    assert wait_until(lambda: s.health()[0] == 200)
+    fake = FakeBackend(out=clearance_out("AUDIT-CLEARANCE-VALUE"))
+    svc.Handler.solver = s
+    svc.Handler.token = "t"
+    svc.Handler.router = be.BackendRouter([fake], governance=s)
+    audit = tmp_path / "audit.jsonl"
+    # 先把可能残留的句柄关掉：Handler 的审计句柄是类级缓存的，
+    # 上一条用例没关就会把这次的内容写进上一条的临时文件（本用例第一版就栽在这）。
+    if svc.Handler.audit_fp is not None:
+        try:
+            svc.Handler.audit_fp.close()
+        finally:
+            svc.Handler.audit_fp = None
+    old_path, svc.Handler.audit_path = svc.Handler.audit_path, str(audit)
+    srv = svc.Server(("127.0.0.1", 0), svc.Handler)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_address[1]}", audit
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        svc.Handler.router = None
+        svc.Handler.audit_path = old_path
+        if svc.Handler.audit_fp is not None:
+            try:
+                svc.Handler.audit_fp.close()
+            finally:
+                svc.Handler.audit_fp = None
+        s.close()
+
+
+def test_audit_log_records_request_without_credentials(live_audit):
+    """审计要能回答"谁在什么时候打了哪个站、结果如何"，但**绝不能**留下凭证。"""
+    base, audit = live_audit
+    code, body = _post(base, {"url": HOST, "timeout": 10})
+    assert code == 200 and body.get("ok") is True
+
+    # 审计行是在响应发出**之后**写的（`_log` 在 `_send` 后调用），所以这里要等一小会儿。
+    # 这不是测试妥协：线上同样存在"响应已回、审计还没落盘"的毫秒级窗口。
+    assert wait_until(lambda: audit.exists() and "solve" in audit.read_text(encoding="utf-8")),         "审计行没有落盘"
+    lines = [json.loads(x) for x in audit.read_text(encoding="utf-8").splitlines() if x.strip()]
+    solves = [r for r in lines if r.get("event") == "solve"]
+    assert solves, f"应当有一条 solve 审计，实际 {lines}"
+    rec = solves[-1]
+    assert rec["host"] == "example.com"
+    assert rec["ok"] is True and rec["backend"] == "fake"
+
+    raw = audit.read_text(encoding="utf-8")
+    assert "AUDIT-CLEARANCE-VALUE" not in raw, "审计文件里出现了 clearance 明文"
+    assert "Bearer" not in raw and "cf_clearance" not in raw
+
+
+def test_audit_log_drops_unknown_fields(tmp_path):
+    """白名单之外的字段一律不落盘（防未来有人往 _log 里塞凭证）。"""
+    import service as svc_mod
+    audit = tmp_path / "a.jsonl"
+    old_path, svc_mod.Handler.audit_path = svc_mod.Handler.audit_path, str(audit)
+    try:
+        h = svc_mod.Handler.__new__(svc_mod.Handler)     # 不真正起服务，只测写盘
+        h._audit_write({"event": "x", "host": "h", "cf_clearance": "SECRET",
+                        "token": "SECRET2", "cookies": {"cf_clearance": "SECRET3"}})
+        raw = audit.read_text(encoding="utf-8")
+        assert "SECRET" not in raw, f"白名单失效，写进了敏感字段: {raw}"
+        assert '"host": "h"' in raw and '"event": "x"' in raw
+    finally:
+        svc_mod.Handler.audit_path = old_path
+        if svc_mod.Handler.audit_fp is not None:
+            svc_mod.Handler.audit_fp.close()
+            svc_mod.Handler.audit_fp = None
+
+
+def test_audit_log_write_failure_does_not_break_request(live_audit):
+    """审计是旁路：写盘失败（磁盘满/文件被占）不许让请求失败。"""
+    base, _audit = live_audit
+    svc.Handler.audit_path = "/nonexistent-dir/cannot/open/audit.jsonl"
+    try:
+        code, body = _post(base, {"url": HOST, "timeout": 10})
+        assert code == 200 and body.get("ok") is True
+    finally:
+        pass
+
+
+# ── prefer 现在真的影响选路（此前只是提示字段）──────────────
+def test_skip_backends_mapping():
+    import route as rt
+
+    assert rt.skip_backends("pure") == frozenset({"pydoll", "flaresolverr"})
+    assert rt.skip_backends("browser") == frozenset({"cfsolve"})
+    assert rt.skip_backends("") == frozenset()
+    assert rt.skip_backends("any") == frozenset()
+
+
+def test_router_skips_backends_by_prefer():
+    s = make_solver()
+    try:
+        pure = FakeBackend()          # 用名字代表"纯协议"
+        heavy = FakeBackend()         # 用名字代表"重后端"
+        pure.name = lambda: "cfsolve"          # type: ignore[method-assign]
+        heavy.name = lambda: "flaresolverr"    # type: ignore[method-assign]
+        # 顺序很关键：把"被跳过"的那个放前面，才能证明它**真的被跳过**而不是
+        # "还没轮到就已经成功了"（跳过是惰性的：前面的后端成功就不再看后面的）。
+        router = be.BackendRouter([heavy, pure], governance=s)
+
+        out = router.solve(HOST, timeout=10, skip={"flaresolverr"})
+        assert out["backend"] == "cfsolve"
+        assert pure.calls == 1 and heavy.calls == 0, "被 skip 的后端不该被调用"
+        assert any(a.get("reason") == "prefer-skip" for a in out["attempts"]), \
+            f"attempts 里要能看出跳过了谁（否则线上查不出路由决策）: {out['attempts']}"
+    finally:
+        s.close()
+
+
+def test_router_ignores_skip_when_it_would_skip_everything():
+    """安全阀：skip 把整条链都跳完时必须放弃跳过，而不是报"没有可用后端"。"""
+    s = make_solver()
+    try:
+        only = FakeBackend()
+        only.name = lambda: "cfsolve"          # type: ignore[method-assign]
+        router = be.BackendRouter([only], governance=s)
+        out = router.solve(HOST, timeout=10, skip={"cfsolve"})
+        assert out["ok"] is True and out["backend"] == "cfsolve"
+        assert only.calls == 1, "全跳过时应当忽略 skip 正常求解"
+    finally:
+        s.close()

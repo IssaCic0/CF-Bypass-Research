@@ -181,3 +181,18 @@ NO_ESCALATION_REASONS = frozenset({REASON_NO_CHALLENGE, REASON_IP_BLOCKED})
 def should_escalate(reason: str) -> bool:
     """该不该换下一个后端。"""
     return reason not in NO_ESCALATION_REASONS
+
+
+#: `prefer` → 需要**跳过**的后端名。
+#: 之前 `prefer` 只是个提示字段，语义名不副实（叫 prefer 却不影响选谁）。
+#: 现在真的跳：纯协议优先时不要先花 45s 试 pydoll/flaresolverr；
+#: 浏览器优先时不要先用纯协议去撞（turnstile 这类纯协议根本拿不到 token）。
+_PREFER_SKIPS = {
+    "pure": frozenset({"pydoll", "flaresolverr"}),
+    "browser": frozenset({"cfsolve"}),
+}
+
+
+def skip_backends(prefer: str) -> frozenset[str]:
+    """按 `prefer` 返回本次请求应当跳过的后端名集合（空集=不跳）。"""
+    return _PREFER_SKIPS.get((prefer or "").strip().lower(), frozenset())

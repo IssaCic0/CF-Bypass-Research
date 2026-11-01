@@ -76,6 +76,7 @@ try:  # 作为包导入（tests / 未来 solver 包）
         ROUTE_MODES,
         classify_failure as route_classify_failure,
         decide as route_decide,
+        skip_backends as route_skip_backends,
     )
     from .challenges import (
         CACHEABLE_WANTS,
@@ -113,6 +114,7 @@ except ImportError:  # 直接以脚本运行：python solver/service.py
         ROUTE_MODES,
         classify_failure as route_classify_failure,
         decide as route_decide,
+        skip_backends as route_skip_backends,
     )
     from challenges import (  # type: ignore[no-redef]
         CACHEABLE_WANTS,
@@ -173,6 +175,15 @@ LATENCY_BUCKETS = (1.0, 3.0, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0)
 DETECT_CACHE_TTL = 300.0
 #: 探测缓存的条目上限：域名是调用方可控输入，必须封顶。
 DETECT_CACHE_MAX = 256
+
+#: 审计日志（`--audit-log`）允许落盘的字段**白名单**。
+#: 用白名单而不是黑名单：黑名单一旦漏了某个新字段，凭证就可能被写进审计文件。
+#: 这里刻意**不含** clearance / token / cookies / cookie_list —— 审计只回答
+#: "谁在什么时候打了哪个站、结果如何"，不回答"凭证是什么"。
+AUDIT_FIELDS = (
+    "event", "req_id", "host", "ok", "cached", "elapsed", "clearance_len", "ms",
+    "error_code", "stage", "backend", "route", "reason", "peer", "ts",
+)
 
 #: `/metrics` 里按域指标只保留前 N 个域。
 #: 域名是**调用方可控输入**，直接当标签用会让 Prometheus 的基数失控（几万个 series），
@@ -1640,6 +1651,10 @@ class Handler(BaseHTTPRequestHandler):
     inflight_requests = 0
     #: 是否允许非回环地址触发 `/shutdown`（默认禁止：这是一个能停服的高危端点）
     allow_remote_shutdown = False
+    #: 审计日志路径（空=关闭）。由 `--audit-log` 注入。
+    audit_path = ""
+    audit_lock = threading.Lock()
+    audit_fp = None
 
     @classmethod
     def enter_request(cls) -> None:
@@ -1662,6 +1677,27 @@ class Handler(BaseHTTPRequestHandler):
     def _log(self, **fields) -> None:
         fields.setdefault("ts", round(_now(), 3))
         print(json.dumps(fields, ensure_ascii=False), flush=True)
+        self._audit_write(fields)
+
+    def _audit_write(self, fields: dict) -> None:
+        """把事件写进审计文件（`--audit-log`）。**只写白名单字段**，且失败绝不打断服务。
+
+        为什么单列一个方法：审计是"事后追责/取证"，它是**旁路**，
+        写盘失败（磁盘满 / 文件被占用）不应该让求解失败——但必须留痕到 stdout。
+        """
+        if not Handler.audit_path:
+            return
+        record = {k: fields[k] for k in AUDIT_FIELDS if k in fields}
+        line = json.dumps(record, ensure_ascii=False)
+        try:
+            with Handler.audit_lock:
+                if Handler.audit_fp is None:
+                    Handler.audit_fp = open(Handler.audit_path, "a", encoding="utf-8")
+                Handler.audit_fp.write(line + "\n")
+                Handler.audit_fp.flush()
+        except Exception as e:  # noqa: BLE001 —— 审计写失败只降级，不打断请求
+            print(json.dumps({"event": "audit-write-failed", "error": f"{type(e).__name__}: {str(e)[:100]}"},
+                             ensure_ascii=False), flush=True)
 
     def _send(self, code: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode()
@@ -1840,6 +1876,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.router.solve(
                     url, timeout=_clamp_timeout(timeout), force=bool(force_raw),
                     want=want_enum.value, sitekey=sitekey, action=action, cdata=cdata,
+                    # route=auto 的 prefer 现在**真的**影响选路（此前只是提示字段）
+                    skip=route_skip_backends((routed_by or {}).get("prefer", "")) if routed_by else None,
                 )
             else:
                 result = self.solver.solve(
@@ -1852,6 +1890,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, result)
             self._log(event="solve", req_id=req_id, host=_host_of(url), ok=True,
                       cached=result.get("cached"), elapsed=result.get("elapsed"),
+                      backend=result.get("backend"),
+                      route=(routed_by or {}).get("mode") if routed_by else None,
                       clearance_len=len(result.get("cf_clearance", "")),
                       ms=round((time.monotonic() - started) * 1000))
         except SolveError as e:
@@ -1860,8 +1900,10 @@ class Handler(BaseHTTPRequestHandler):
                 # 却不知道它探测到了什么、选了哪条路。
                 e.extra = {**(getattr(e, "extra", None) or {}), "routed_by": routed_by}
             self._send(e.http_status, e.payload())
-            self._log(event="solve", req_id=req_id, ok=False, error_code=e.code.value,
-                      stage=e.stage, ms=round((time.monotonic() - started) * 1000))
+            self._log(event="solve", req_id=req_id, host=_host_of(url), ok=False,
+                      error_code=e.code.value, stage=e.stage,
+                      route=(routed_by or {}).get("mode") if routed_by else None,
+                      ms=round((time.monotonic() - started) * 1000))
         except Exception as e:  # noqa: BLE001
             traceback.print_exc()
             err = SolveError(ErrorCode.INTERNAL, f"{type(e).__name__}: {str(e)[:160]}",
@@ -2090,6 +2132,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--headed", action="store_true", help="有头模式（调试用）")
     ap.add_argument("--max-queue", type=int, default=DEFAULT_MAX_QUEUE, help="有界队列容量，满即 429")
     ap.add_argument("--max-inflight", type=int, default=DEFAULT_MAX_INFLIGHT, help="并发求解上限，满即 429")
+    ap.add_argument("--audit-log", default="", help="审计日志（JSONL）路径；空=关闭。只记白名单字段，不含凭证")
     ap.add_argument("--detect-cache-ttl", type=float, default=DETECT_CACHE_TTL,
                     help="探测结果（/detect 与 route=auto）按域缓存的 TTL（秒）；0=关闭")
     ap.add_argument("--max-detect", type=int, default=DEFAULT_MAX_DETECT,
@@ -2193,6 +2236,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     Handler.solver = solver
     Handler.token = token
+    Handler.audit_path = (args.audit_log or "").strip()
+    if Handler.audit_path:
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(Handler.audit_path)) or ".", exist_ok=True)
+            with open(Handler.audit_path, "a", encoding="utf-8"):
+                pass
+            print(f"[cfsolve] 审计日志已启用：{Handler.audit_path}", flush=True)
+        except OSError as e:
+            Handler.audit_path = ""
+            print(f"[cfsolve] 警告：审计日志不可写（{e}），已关闭", flush=True)
     # 后端优先级：纯协议（若配置）→ 本地浏览器 → 自托管 FlareSolverr
     backends = []
     if args.cfsolve_bin and args.cfsolve_profile:
