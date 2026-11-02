@@ -1,0 +1,15 @@
+[cfsolve] 监听 http://127.0.0.1:8971 (camoufox, ttl=1500s, egress=default, auth=generated, cache=sqlite:C:\Users\Administrator.DESKTOP-EGNE9ND\Desktop\CF-Bypass-Research\plans\证据\soak-run\cache, proxies=0)
+[cfsolve] 浏览器引擎：camoufox
+[cfsolve] token 指纹 5a038c98d7ed（来源 generated；完整 token 见 plans\证据\soak-run\.env 或环境变量 CF_SOLVE_TOKEN）
+{"event": "solve", "req_id": "8d74b37a", "host": "example.com", "ok": true, "cached": false, "route": "auto", "reason": "no-protection", "ms": 0, "ts": 1793647298.898}
+{"event": "solve", "req_id": "8140d7e7", "host": "example.com", "ok": true, "cached": false, "route": "auto", "reason": "no-protection", "ms": 0, "ts": 1793647302.925}
+{"event": "solve", "req_id": "87a2aa38", "host": "example.com", "ok": true, "cached": false, "route": "auto", "reason": "no-protection", "ms": 0, "ts": 1793647361.234}
+{"event": "solve", "req_id": "4b095b51", "host": "example.com", "ok": true, "cached": false, "route": "auto", "reason": "no-protection", "ms": 0, "ts": 1793647961.231}
+{"event": "solve", "req_id": "74d3274d", "host": "example.com", "ok": true, "cached": false, "route": "auto", "reason": "no-protection", "ms": 0, "ts": 1793648561.224}
+{"event": "solve", "req_id": "f94dad3f", "host": "example.com", "ok": true, "cached": false, "route": "auto", "reason": "no-protection", "ms": 0, "ts": 1793649161.237}
+{"event": "solve", "req_id": "98dcba34", "host": "example.com", "ok": true, "cached": false, "route": "auto", "reason": "no-protection", "ms": 0, "ts": 1793649761.203}
+{"event": "solve", "req_id": "c3c7eb3b", "host": "example.com", "ok": true, "cached": false, "route": "auto", "reason": "no-protection", "ms": 0, "ts": 1793650361.2}
+{"event": "solve", "req_id": "86cfa697", "host": "example.com", "ok": true, "cached": false, "route": "auto", "reason": "no-protection", "ms": 0, "ts": 1793650961.236}
+{"event": "solve", "req_id": "47745092", "host": "example.com", "ok": true, "cached": false, "route": "auto", "reason": "no-protection", "ms": 0, "ts": 1793651561.18}
+{"event": "solve", "req_id": "2fbd6446", "host": "example.com", "ok": true, "cached": false, "route": "auto", "reason": "no-protection", "ms": 0, "ts": 1793652161.231}
+{"event": "solve", "req_id": "ba43a28e", "host": "example.com", "ok": true, "cached": false, "route": "auto", "reason": "no-protection", "ms": 0, "ts": 1793652761.251}

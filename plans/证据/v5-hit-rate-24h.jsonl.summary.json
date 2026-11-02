@@ -1,0 +1,21 @@
+{
+  "kind": "soak-shortened",
+  "note": "用户主动缩短：原计划 24h，实际运行 ~90 分钟后停止。此 summary 由已采样本补写，非 soak.py 自动生成。",
+  "planned_duration_sec": 86400,
+  "actual_duration_sec": 5400.0,
+  "samples": 19,
+  "passed_light_checks": true,
+  "always_ready": true,
+  "rss_first_mb": 701.1,
+  "rss_last_mb": 382.8,
+  "rss_min_mb": 382.8,
+  "handles_first": 2771,
+  "handles_last": 2720,
+  "handle_delta": -51,
+  "hit_rate_steady": null,
+  "limitations": [
+    "时长不足，命中率稳态数字不具统计意义，标记 None（如实）",
+    "句柄 Δ=+-51，满足 T-45 基线 Δ≤+50",
+    "RSS 701→697→431MB，无增长趋势"
+  ]
+}
