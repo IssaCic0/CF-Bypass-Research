@@ -1,0 +1,81 @@
+# cfsolve 新版 CF 适配补丁 (2026-11-03)
+# 打通: obj[helper.key] 字符串别名 -> payload 构建成功 -> POST 200
+# 用法: 先应用 windows-and-capture-fixes.patch, 再 git apply 本补丁
+diff --git a/src/challenge/expression.rs b/src/challenge/expression.rs
+index 0d0b1f2..684f58b 100644
+--- a/src/challenge/expression.rs
++++ b/src/challenge/expression.rs
+@@ -3,8 +3,8 @@
+ 
+ use anyhow::{Context, Result, bail, ensure};
+ use swc_core::ecma::ast::{
+-    AssignExpr, AssignTarget, BinExpr, BinaryOp, BlockStmt, Expr, Lit, SimpleAssignTarget, Stmt,
+-    UnaryOp,
++    AssignExpr, AssignTarget, BinExpr, BinaryOp, BlockStmt, Expr, Lit, MemberProp,
++    SimpleAssignTarget, Stmt, UnaryOp,
+ };
+ 
+ use crate::js::{self, JsValue, Options, Window, ast};
+@@ -215,7 +215,22 @@ pub(crate) fn evaluate(
+             }
+         }
+         Expr::Member(member) => {
+-            let key = ast::member_str(&member.prop).context("unsupported computed property")?;
++            // A computed key whose expression has a static string value is the same read as a
++            // literal one. Newer obfuscators alias strings through helper objects, so
++            // `object[alias.name]` must resolve before being rejected as unsupported.
++            let key = match ast::member_str(&member.prop) {
++                Some(key) => key.to_owned(),
++                None => match &member.prop {
++                    MemberProp::Computed(computed) => evaluate(&computed.expr)?,
++                    _ => None,
++                }
++                    .and_then(|value| match value {
++                        JsValue::String(text) => Some(text),
++                        _ => None,
++                    })
++                    .context("unsupported computed property")?,
++            };
++            let key = &*key;
+             match &*member.obj {
+                 object if is_options(object) => options.get(key).cloned(),
+                 Expr::Ident(_) => globals.get(key).cloned(),
+diff --git a/src/deobfuscate/analysis/properties.rs b/src/deobfuscate/analysis/properties.rs
+index e2cda94..afb84d3 100644
+--- a/src/deobfuscate/analysis/properties.rs
++++ b/src/deobfuscate/analysis/properties.rs
+@@ -189,6 +189,11 @@ impl Collect<'_> {
+             None if access == Access::Read && constant_index(&member.prop).is_some() => {
+                 uses.indexed = true;
+             }
++            // A computed key that is itself a static member read (`obj.helper.key`) becomes a
++            // literal once helper-object inlining runs. Treating it as dynamic here would make
++            // the object opaque, which blocks the inlining that would have resolved the key —
++            // newer obfuscators alias every payload-field name this way.
++            None if access == Access::Read && is_static_member_key(&member.prop) => {}
+             None => uses.computed = true,
+         }
+         uses.written_through |= access == Access::Assign;
+@@ -357,6 +362,22 @@ pub(crate) fn member_key(property: &MemberProp) -> Option<Atom> {
+         .map(Atom::from)
+ }
+ 
++/// Whether a computed member key is a static member read (`obj.key`), whose value a later
++/// inlining pass can turn into a literal. Matches only identifier objects with static keys.
++#[must_use]
++fn is_static_member_key(property: &MemberProp) -> bool {
++    match property {
++        MemberProp::Computed(computed) => match &*computed.expr {
++            Expr::Member(member) => {
++                member.obj.as_ident().is_some()
++                    && matches!(&member.prop, MemberProp::Ident(_))
++            }
++            _ => false,
++        },
++        _ => false,
++    }
++}
++
+ /// The own property an object-literal key defines (see [`member_key`]).
+ #[must_use]
+ pub(crate) fn prop_key(key: &PropName) -> Option<Atom> {

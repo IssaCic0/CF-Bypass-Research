@@ -1,0 +1,10 @@
+{
+ "date": "2026-11-03",
+ "what": "computed-property 补丁打通 payload 构建+POST 200（第一次对新版 CF 打穿到 stage2）",
+ "patch1": "challenge/expression.rs: Member 求值分支支持静态可求值的计算属性 key",
+ "patch2": "deobfuscate/analysis/properties.rs: is_static_member_key 放宽, obj[helper.key] 不再标记 computed",
+ "result": "nowsecure.nl: deobfuscate OK → 46-field payload built → POST 200 / 1.97MB response saved",
+ "next_blocker": "stage2/analysis/envelope.rs:37 'record counter field not found' — CF 新版 probe 程序的 VM 形状变化, 属 stage2 深层分析器适配",
+ "remaining_risk": "stage2 有 6+ 硬性结构断言(dispatcher/collection fn/probe state/counter/token/input), CF 改版后每一处都可能再变, 是长尾跟随工程",
+ "artifacts": "C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cf-diag4-VATT"
+}
