@@ -270,3 +270,35 @@ N-06 覆盖 `Thread._stop` / N-07 假绿用例）正式登记，并加上本轮�
 - 没有生产环境：本轮的"部署"是 compose + 本机多进程滚动，**不是**线上灰度/回滚；
 - A3 稳态命中率、G1 同站双臂 A/B 仍受真机预算约束（§8 N1/N2）；
 - 容器侧未压测"浏览器并发求解"的稳态吞吐（离线压测只覆盖回放与准入）。
+
+---
+
+## v5.0.0 施工记录（2026-11-03，本节由本轮会话追加）
+
+### W1/W3 完成情况
+
+| 任务卡 | 状态 | 证据 |
+|---|---|---|
+| T-50 prefer 真跳过 | **复核确认 v4.x 已实现**（skip 参数+空链安全阀+映射+测试），未重复施工 | `backends.py:solve(skip=)`、`route.py:skip_backends`、`test_governance.py:571` |
+| T-51/52 413 契约 | DONE（契约先行） | `evidence/v50-w1.json`；3 单测+E2E A13b |
+| T-53 24h soak | **运行中**（管线缺陷已修：token/resume/hit_rate_steady） | `plans/证据/v5-hit-rate-24h.jsonl`（实时追加） |
+| T-54 G1 双臂 A/B | **未执行**（真机预算 ~14 次 + R9b 同站提分风险，需单独授权排期） | — |
+| T-55 测试卫生 | DONE（ResourceWarning 100+→0） | conftest.py + cache.py 句柄修复 |
+| T-56 service.py 下沉 | DONE（2329→2073 行；metrics.py 95% cov；bootstrap.py） | 每步 314 全绿 |
+| T-57 发版 | DONE | tag v5.0.0 + release；SHA 6642d36 |
+
+### 门禁实测（2026-11-03）
+
+Python 314 passed / cov 81.90% / Go -race 绿 / E2E 30/30 / 热更新 11/11 / 压测 5589.3 QPS p99 2.93ms 0 错 / findings 40 条 exit 0
+
+### 推送与发行
+
+- push: `4b43a69..6642d36 master → master`（无 force）
+- tag: `v5.0.0`；release: https://github.com/lza6/CF-Bypass-Research/releases/tag/v5.0.0
+
+### 剩余（如实）
+
+- T-53 24h soak 数字未出（运行中，断点续采可续）
+- T-54 未跑（需真机预算授权）
+- engines.py 57% / pydoll 40% 覆盖率：能力边界（二进制专有），非欠账
+- 本项目无生产环境；"部署"= 本机 compose 滚动（hot_update_drill 11/11 已验）
