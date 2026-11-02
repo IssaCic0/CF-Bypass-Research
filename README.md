@@ -2,25 +2,31 @@
 
 > 对 Cloudflare 挑战体系（jsd / managed challenge）做的实证研究：**纯协议能不能行、纯算能算到哪一步、浏览器方案贵在哪**。所有结论都来自本机真实运行输出，不是推断。
 
-**一句话结论**：CF 的挑战脚本我们用**纯 JS 引擎（Node/jsdom 与 Go/goja）都能完整执行**，WebGL / Audio / WebRTC 的指纹返回值也能伪造到自洽；但**拿不到 `cf_clearance`**。卡点不是算力，是"环境真实性"——CF 校验的是这个环境像不像一台真的浏览器。目前唯一实测通过的路线是 C++ 层指纹篡改的 Camoufox。
+**一句话结论**：CF 的挑战脚本我们用**纯 JS 引擎（Node/jsdom 与 Go/goja）都能完整执行**，WebGL / Audio / WebRTC 的指纹返回值也能伪造到自洽；但**现场编造环境拿不到 `cf_clearance`**。卡点不是算力，是"环境真实性"。实测可行的两条路：**① 纯协议 cfsolve（Rust 自带 JS VM + 回放真实浏览器录制的环境快照，同站 A/B 18.43s 最快）**；② C++ 层指纹篡改的 Camoufox。生产架构 = 纯协议优先、浏览器兜底的有序回落链。
 
 ---
 
-## ✅ 最终方案（已实现，已端到端跑通）
+## ✅ 最终方案（已实现，已端到端跑通，v5.0.0）
 
-**Camoufox 求解 sidecar + Go 原生 HTTP 回放。**
+**多后端有序回落链：纯协议 cfsolve → pydoll → Camoufox → FlareSolverr + Go 原生 HTTP 回放。**
 
 ```
-Go 网关(gocfsolve.Client) ──POST /solve──► solver/service.py (:8878, Camoufox)
-          ◄── cf_clearance + user_agent ──┘
+Go 网关(gocfsolve.Client/Pool) ──POST /solve──► solver/service.py (:8878)
+          │                    route=auto: 探测 → 无盾站直接放行(不启任何后端)
+          │                    有序链: cfsolve(纯协议) → pydoll → Camoufox → FlareSolverr
+          ◄── cf_clearance + user_agent + attempts 轨迹 ──┘
           │
           └─ net/http + 同 UA + 同 Cookie + 同出口 IP ──► 目标站 200
+             (缓存命中热路径: 零 Python 参与, 离线压测 5589 QPS / p99 2.93ms)
 ```
 
 | 组件 | 路径 | 状态 |
 |---|---|---|
-| 求解服务（Camoufox，按域缓存，`/solve` `/health` `/stats`） | `solver/service.py` | ✅ 已实现并运行 |
-| Go 客户端（缓存 + 提前续期 + `Do()` 自动回放） | `gocfsolve/cfsolve.go` | ✅ 已实现 |
+| 求解服务（多后端回落链，按域缓存，`/solve` `/detect` `/health` `/stats` `/metrics` `/shutdown`） | `solver/service.py` | ✅ 已实现并运行 |
+| **纯协议后端（cfsolve，Rust，无浏览器进程）** | `solver/cfsolve_backend.py` + `tools/cfsolve-patches/` | ✅ 同站 A/B 18.43s 最快（快于 Camoufox 19.56s） |
+| pydoll 后端（零 WebDriver CDP 直连 Chrome） | `solver/pydoll_backend.py` | ✅ steamdb/udemy 通过 |
+| Go 客户端（缓存 + 提前续期 + 403 自愈 + `Do()` 自动回放） | `gocfsolve/cfsolve.go` | ✅ 已实现 |
+| 多进程池（按域一致性哈希 + 失败摘除/自动回归） | `gocfsolve/pool.go` + `scripts/run-pool.ps1` | ✅ 摘除 2s / 回归 28s 实测 |
 | 端到端验证程序 | `gocfsolve/examples/endtoend/main.go` | ✅ 跑通 |
 
 **真机实测结果**：
@@ -74,12 +80,14 @@ cd gocfsolve && go run ./examples/endtoend -target https://steamdb.info/
 |---|---|---|---|
 | 纯算：离线算出 token | ❌ | 挑战 VM 每轮重新混淆下发、绑运行时、在隐藏 realm 采集 | — |
 | 纯 HTTP + TLS 指纹（curl_cffi 级） | ⚠️ 只能**回放**已有 cookie | 三种 TLS 指纹回放均返回 200 | 极低 |
-| 纯 JS 引擎 + 自写 shim | ❌ | 脚本执行到运行时注入阶段，但仍报错、无 cookie | 自建浏览器 |
+| 纯 JS 引擎 + 自写 shim（现场编造环境） | ❌ | 脚本执行到运行时注入阶段，但仍报错、无 cookie（22 项能力缺 12 项） | 自建浏览器 |
+| **纯协议 cfsolve（回放录制的真实环境快照）** | ✅ | 同站 A/B **18.43s 最快**；`--pure-only` 72MB 内存无浏览器 | 低（需一次 profile 录制） |
 | **浏览器收割（Camoufox）** | ✅ **2/2 站点** | steamdb 19.6s / glassdoor 14.5s | ≈700 MB/实例 |
 
-> **四条路线可切换**：纯协议 `cfsolve` / Camoufox（默认）/ CloakBrowser / patchright。
+> **四条后端可切换**：纯协议 `cfsolve`（默认首选）/ pydoll / Camoufox（浏览器兜底）/ FlareSolverr。
 > 选型、成本、许可证与实测数据见 **[docs/方案矩阵.md](docs/方案矩阵.md)**；
-> 三个参考仓库的深度调研见 **[docs/参考仓库深度调研.md](docs/参考仓库深度调研.md)**。
+> 三个参考仓库的深度调研见 **[docs/参考仓库深度调研.md](docs/参考仓库深度调研.md)**；
+> 纯协议的构建与 profile 录制见 **[docs/纯协议-cfsolve.md](docs/纯协议-cfsolve.md)**。
 
 **当前支持四类产物**（同一个浏览器求解路径，`want` 参数区分）：
 
@@ -146,7 +154,7 @@ _cf_chl_opt 键数: 25            ← 脚本确实执行到了运行时注入阶
 **A3｜Go + v8go（真 V8）**：本机不可行（`CGO_ENABLED=1` 但无 gcc）。
 即便装上，它给的仍是"JS 引擎 + 无 DOM"，与 A2 撞同一堵墙——**换 V8 不改变结论**。
 
-**B｜Camoufox（对照组，唯一通过）**
+**B｜Camoufox（浏览器对照组，通过；后被纯协议 cfsolve 在同站 A/B 中以 18.43s vs 19.56s 超越）**
 
 | 目标 | 引擎 | 首访 | cf_clearance | 耗时 |
 |---|---|---|---|---|
@@ -172,6 +180,8 @@ https://steamdb.info/  →  status=200  len=201391  challenge_page=false  elapse
 
 **四条硬边界**（违反即失效）：同出口 IP、同 UA、约 30 分钟时效、按域隔离。
 
+**v5.0.0 稳定性实测（90 分钟 soak，19 样本）**：全程 `ready`、0 错误、句柄 Δ=-51（T-45 基线 Δ≤+50 内）、RSS 701→383MB 回落（`plans/证据/v5-hit-rate-24h.jsonl.summary.json`）。完整 SLO 表见 `docs/项目规格.md` §6。
+
 ### 4. 依赖可获得性（都是实测装的结果）
 
 | 库 | 用途 | 结果 |
@@ -188,45 +198,65 @@ https://steamdb.info/  →  status=200  len=201391  challenge_page=false  elapse
 
 ```
 solver/
-  service.py            # ★ 最终方案：Camoufox 求解服务（/solve /health /stats /metrics）
+  service.py            # ★ 服务主体：HTTP 层 + Solver 状态机（v5.0 下沉后 2073 行）
+  bootstrap.py          # CLI 装配（参数解析 + 组件装配 + 信号处理，v5.0 下沉）
+  metrics.py            # Prometheus 文本渲染（v5.0 下沉，覆盖率 95%）
   errors.py             # 错误码与 SolveError（对外契约，HTTP 状态映射在此）
-  cache.py              # 缓存层：MemoryStore / FileStore（加密+原子写+过期+上限）
-  proxypool.py          # 代理池：按域一致性哈希粘性 + 评分 + 冷却退避
+  cache.py              # 缓存层：SqliteStore(WAL，多进程共享) / FileStore / MemoryStore
+  auth.py               # Bearer 鉴权 + token 首启自动生成（0600/指纹日志）
+  probe.py              # route=auto 探测：无盾站识别 + 按域短 TTL 缓存
+  route.py              # 后端有序链决策（skip/固定/auto 映射）
   backends.py           # 多后端接缝：BackendId 白名单 + 有序路由 + attempts 轨迹
+  cfsolve_backend.py    # ★ 纯协议后端：cfsolve CLI 包装（无浏览器进程）
+  pydoll_backend.py     # pydoll 后端（零 WebDriver CDP 直连 Chrome）
+  engines.py            # 浏览器引擎：camoufox / cloakbrowser / patchright
+  prewarm.py            # 保活：过期前主动续期，把贵操作挪出请求路径
+  proxypool.py          # 代理池：按域一致性哈希粘性 + 评分 + 冷却退避
+  challenges.py         # 挑战类型判据
+  detect.py             # /detect 端点实现
 gocfsolve/
-  cfsolve.go            # ★ 最终方案：Go 客户端（缓存 + 提前续期 + Do() 自动回放）
+  cfsolve.go            # ★ Go 客户端：缓存 + 提前续期 + 403 自愈 + Do() 自动回放
+  pool.go               # 多 worker 池：按域一致性哈希 + 失败摘除/自动回归
   cfsolve_test.go       # Go 侧离线测试（httptest，不联网）
+  revalidate_test.go    # 403 自愈回归（13 例）
   examples/endtoend/    # 端到端验证程序（求解 → 回放 → 校验 200）
-tests/
-  test_service.py       # 服务契约/准入/健康/鉴权（注入假浏览器）
-  test_cache.py         # 落盘缓存：加密、原子写、过期、上限、跨进程共享
-  test_proxypool.py     # 代理池：粘性、扩容影响面、冷却、凭据不外泄
-  test_backends.py      # 多后端路由与 FlareSolverr 契约
-docs/
-  API.md                # ★ 接口契约（参数/响应/错误码表）
-  findings.json         # 研究结论的机器可读清单（带 verdict 与证据路径）
-  challenges/           # 按挑战类型拆分的排查手册（jsd / managed / turnstile）
-  最终方案与实现结果.md                 # ★ 选型理由 / 实测数据 / 部署 / 踩坑
-  Cloudflare过盾方案可行性侦察报告.md   # 完整侦察报告（15 节，含全部原始输出）
+tools/cfsolve-patches/  # cfsolve 的 Windows 构建补丁 + profile 录制工具
 scripts/
+  run-pool.ps1          # 多 worker 启动（共享缓存目录 + 可选 prewarm）
+  e2e_local.py          # 真进程 E2E（30 断言，离线）
+  hot_update_drill.py   # 热更新演练（17 断言）
+  soak.py               # 长跑采样（--resume 断点续采、--token）
+  loadtest.py           # 离线压测三模式（hot/cold/share）
+  doctor.py             # 环境自检（起一次服务打 /health）
   validate-findings.mjs # 校验 docs/findings.json（证据路径必须存在 + 定级规则）
   analyze.py            # 静态分析 jsd main.js：字符串字面量 / 码表 / 关键字命中
   scan_ctype.py         # 50 站采样，统计 CF 挑战类型 cType 分布
   probe_browser.py      # Playwright headless / headed 过盾对照实验
-  probe_camoufox.py     # Camoufox 过盾实验（当前唯一通过）
+  probe_camoufox.py     # Camoufox 过盾实验
   diag_challenge.py     # 挑战页 DOM 诊断：iframe / checkbox / 按钮 / 截图
+tests/                  # 314 项 Python 测试（注入假浏览器/假后端，离线）
+docs/
+  项目规格.md            # ★ 单一事实源：是什么/边界/承诺什么/不承诺什么
+  API.md                # ★ 接口契约（参数/响应/错误码表）
+  方案矩阵.md            # 四条后端选型对比
+  纯协议-cfsolve.md     # ★ 纯协议路线：构建 + Windows 补丁 + profile 录制
+  findings.json         # 研究结论的机器可读清单（带 verdict 与证据路径）
+  challenges/           # 按挑战类型拆分的排查手册（jsd / managed / turnstile）
+  最终方案与实现结果.md                 # 选型理由 / 实测数据 / 部署 / 踩坑
+  部署-容器.md / 运维-压测与自检.md / 检测-防护识别.md / 对接-new-api.md
+  Cloudflare过盾方案可行性侦察报告.md   # 完整侦察报告（15 节，含全部原始输出）
 requirements.txt        # 精确锁版本的运行期依赖
 requirements-dev.txt    # 开发/CI 依赖（pytest-cov）
-run.ps1 / run.bat       # ★ 统一入口：doctor / test / go / smoke / bench / verify（v4.0）
+run.ps1 / run.bat       # ★ 统一入口：doctor / test / go / smoke / e2e / bench / verify / stop（v4.0）
 policy.md               # 质量门禁（覆盖率 80%、证据门禁、提交规则），写死数值
 workflow_status.md      # 任务契约 / 验收表 / 验证日志 / 审查记录
 test_ledger.md          # 测试台账：每个验收项对应哪些用例
 evidence/               # 验收证据（真实命令 + 真实输出），一个任务卡一个 json
 .github/workflows/ci.yml# CI：python(覆盖率门槛) + go(vet/test -race) + findings 三 job，全程离线
-Dockerfile              # 容器镜像（camoufox 二进制在 build 阶段 fetch）
+Dockerfile              # 容器镜像（camoufox 二进制在 build 阶段 fetch；3.54GB 含插件预热）
 docker-compose.yml      # 多 worker + 共享缓存卷
 plans/
-  下一步改进指南.md      # 施工图（任务卡 + 验收门禁）
+  下一步改进指南*.md     # 施工图（任务卡 + 验收门禁），plans/证据/ 存真机证据
 ```
 
 ---
@@ -327,7 +357,7 @@ python scripts/scan_ctype.py
 CHROME_PATH=/path/to/chrome python scripts/probe_browser.py
 CHROME_PATH=/path/to/chrome python scripts/probe_browser.py --headed
 
-# 4) Camoufox（唯一通过的方案）
+# 4) Camoufox（浏览器兜底方案）
 python scripts/probe_camoufox.py
 
 # 5) A1/A2/A3 三轮"纯 JS 引擎"实验的**结论**保留在 docs/ 与 findings，
@@ -376,7 +406,8 @@ CF 的 `chl_page` 三者全中。这就是"离线纯算"走不通的机理说明
 
 ## 💡 工程建议
 
-1. **生产用浏览器收割路线**：Camoufox（REST 服务）+ Go 原生回放，已实测贯通两端。
+1. **生产用多后端回落链**：纯协议 cfsolve（首选，72MB 无浏览器）→ pydoll → Camoufox（浏览器兜底）
+   + Go 原生回放，已实测贯通两端。缓存命中热路径零 Python 参与。
 2. **别丢掉纯 JS 引擎**：goja 67ms 跑通 575 KB 混淆脚本，很适合做 **CF 版本变更探针**——
    定时抓脚本比对结构，一变就告警，比等线上注册失败强得多。成本 ≈50 MB / 一次 67ms。
 3. **优先"绕开"而不是"过"**：很多场景换入口域名 / 上游 API 直连比过盾便宜一个数量级。
@@ -397,8 +428,14 @@ CF 的 `chl_page` 三者全中。这就是"离线纯算"走不通的机理说明
 <details>
 <summary><b>纯协议为什么不行？</b></summary>
 
-因为 CF 校验的不是算法，是**环境真实性**。挑战脚本我们能在 jsdom 和 goja 里完整执行（语法层），
-但 CF 在隐藏 realm 里对 DOM/WebGL/Audio/WebRTC 的属性做交叉校验，纯 JS 假体给不出自洽答案。
+分两层回答：
+- **现场编造环境（jsdom 自写 shim / goja 裸跑）**：不行。CF 校验的不是算法，是**环境真实性**——
+  隐藏 realm 里对 DOM/WebGL/Audio/WebRTC 的属性做交叉校验，纯 JS 假体给不出自洽答案
+  （实测 22 项能力缺 12 项）。
+- **纯协议 cfsolve（回放真实浏览器录制的环境快照）**：✅ **可行且已接入生产回落链**——
+  同站 A/B 18.43s 最快（快于 Camoufox 19.56s），`--pure-only` 72MB 内存无浏览器进程。
+  构建与 profile 录制见 [docs/纯协议-cfsolve.md](docs/纯协议-cfsolve.md)。
+
 详见 [docs/challenges/managed-challenge.md](docs/challenges/managed-challenge.md)。
 </details>
 
