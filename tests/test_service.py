@@ -835,3 +835,29 @@ def test_proxy_pool_conflicts_with_direct_egress_backends(capfd):
     assert rc == 2
     out = capfd.readouterr().out
     assert "配置冲突" in out and "--proxy" in out
+
+
+def test_oversized_body_returns_413_and_is_audited(live_server):
+    """T-51 (v5.0)：超大 body 应返回 413 payload-too-large（可重试语义），
+    而不是 400 invalid-request（请求坏了不该重试）。改前必红。"""
+    oversized = b'{"url":"' + b"a" * (service.MAX_BODY_BYTES + 1) + b'"}'
+    status, body = _post(live_server, "/solve", oversized, token="test-token")
+    assert status == 413, f"expected 413, got {status}: {body}"
+    assert body["error_code"] == "payload-too-large"
+    assert "hint" in body  # 告诉调用方阈值与解决方向
+
+
+def test_oversized_body_on_detect_also_413(live_server):
+    """T-52：/detect 与 /solve 对齐 413 契约。"""
+    oversized = b'{"url":"' + b"a" * (service.MAX_BODY_BYTES + 1) + b'"}'
+    status, body = _post(live_server, "/detect", oversized, token="test-token")
+    assert status == 413, f"expected 413, got {status}"
+    assert body["error_code"] == "payload-too-large"
+
+
+def test_oversized_body_hint_mentions_max_body_bytes(live_server):
+    """413 的 hint 必须可执行：告诉调用方阈值与解决方向。"""
+    oversized = b'{"url":"' + b"a" * (service.MAX_BODY_BYTES + 1) + b'"}'
+    status, body = _post(live_server, "/solve", oversized, token="test-token")
+    assert status == 413
+    assert "--max-body-bytes" in body.get("hint", "")

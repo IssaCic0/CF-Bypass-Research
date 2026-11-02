@@ -1,0 +1,47 @@
+{
+  "task_id": "v5.0.0-W1+W3",
+  "status": "done",
+  "timestamp": "2026-11-03T04:05:00+08:00",
+  "baseline_commit": "4b43a69",
+  "summary": "T-50复核(已实现) + T-51/52 413契约 + T-55测试卫生 + T-56两块下沉 + soak管线修复",
+  "commands_executed": [
+    {"cmd": "python -m pytest tests/ -q -p no:cacheprovider", "exit_code": 0, "raw_output_tail": "314 passed in 36.33s"},
+    {"cmd": "python -m pytest tests/ -q --cov=solver --cov-fail-under=80", "exit_code": 0, "raw_output_tail": "Total coverage: 81.90%; 314 passed"},
+    {"cmd": "cd gocfsolve && go test -race -count=1 ./...", "exit_code": 0, "raw_output_tail": "ok github.com/lza6/CF-Bypass-Research/gocfsolve 7.523s"},
+    {"cmd": "python scripts/e2e_local.py --json-out evidence/e2e-local.json", "exit_code": 0, "raw_output_tail": "30/30 通过（含新 A13b_solve_oversized_body_413）"},
+    {"cmd": "python scripts/hot_update_drill.py --json-out evidence/hot-update.json --skip-slow", "exit_code": 0, "raw_output_tail": "11/11 通过"},
+    {"cmd": "python scripts/loadtest.py --mode hot --duration 30 --json", "exit_code": 0, "raw_output_tail": "qps=5589.3 p99=2.93ms errors=0 PASS"},
+    {"cmd": "node scripts/validate-findings.mjs", "exit_code": 0, "raw_output_tail": "40 条结论，全部可定位"},
+    {"cmd": "python -m pytest tests/test_cache_sqlite.py -q -W error::ResourceWarning 前后对比", "exit_code": 0, "raw_output_tail": "ResourceWarning 100+ → 0（cache.py 文件句柄修复 + conftest fixture）"}
+  ],
+  "files_changed": [
+    {"file": "docs/API.md", "change": "T-51：新增 payload-too-large(413) 契约行（先于代码 commit 的契约变更）"},
+    {"file": "solver/errors.py", "change": "注册 PAYLOAD_TOO_LARGE=413"},
+    {"file": "solver/service.py", "change": "T-51 超大 body 转 413（/solve 与 /detect 对齐，url 绑定纪律保持）；T-56 metrics_text/bootstrap main 下沉（service.py 2329→2073 行）"},
+    {"file": "solver/metrics.py", "change": "T-56 新增：Prometheus 渲染下沉（115 行，覆盖率 95%）"},
+    {"file": "solver/bootstrap.py", "change": "T-56 新增：CLI 装配下沉（292 行）；service.main 再导出，脚本入口行为不变"},
+    {"file": "solver/cache.py", "change": "修复 4 处 open() 未关闭句柄（ResourceWarning 源头）"},
+    {"file": "tests/conftest.py", "change": "T-55 新增：autouse fixture 跟踪并统一 close SqliteStore/FileStore"},
+    {"file": "tests/test_service.py", "change": "T-51 新增 3 个改前必红用例"},
+    {"file": "tests/test_governance.py", "change": "既有超大 body 用例按新契约更新为 413"},
+    {"file": "scripts/e2e_local.py", "change": "新增 A13b 413 E2E 断言"},
+    {"file": "scripts/soak.py", "change": "T-53 前置：--resume 断点续采 + --token/--token-file（修复 /solve /detect /metrics 全 401 的管线缺陷）+ hit_rate_steady 统计"}
+  ],
+  "tests": [
+    {"name": "test_oversized_body_returns_413_and_is_audited", "type": "unit", "status": "pass"},
+    {"name": "test_oversized_body_on_detect_also_413", "type": "unit", "status": "pass"},
+    {"name": "test_oversized_body_hint_mentions_max_body_bytes", "type": "unit", "status": "pass"},
+    {"name": "test_oversized_body_is_rejected_and_still_audited (契约更新)", "type": "unit", "status": "pass"},
+    {"name": "A13b_solve_oversized_body_413 (真进程)", "type": "e2e", "status": "pass"}
+  ],
+  "coverage_summary": {"total": "82%", "service.py": "76%", "metrics.py": "95%"},
+  "seams_touched": ["POST /solve 4xx 契约", "POST /detect 4xx 契约", "gocfsolve 兼容性（静态确认：4xx 一律 APIError 不重试，revalidate 仅由回放 403 触发）"],
+  "mock_scenarios_covered": [],
+  "browser_validation": "不适用（无 UI；E2E 为真进程 HTTP 路径）",
+  "limitations": [
+    "T-53 24h soak 运行中（plans/证据/v5-hit-rate-24h.jsonl，断点续采已支持），数字尚未产出",
+    "T-54 G1 双臂 A/B 未跑：真机预算 ~14 次，且同站连打会提分（R9b），建议单独排期并明确预算后再执行",
+    "T-50 prefer 跳过经复核 v4.x 已实现（backends.solve skip 参数 + 空链安全阀 + route.skip_backends + 测试断言），本轮未重复施工",
+    "Go 客户端 413 兼容性为静态确认（读 cfsolve.go 状态码分支），未构造 413 真机联调"
+  ]
+}

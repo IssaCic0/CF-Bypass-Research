@@ -2,65 +2,29 @@
   "task_id": "hot-update-drill",
   "status": "done",
   "result": "passed",
-  "timestamp": "2026-11-02T07:32:56+0800",
-  "baseline_commit": "6828e7e",
-  "duration_sec": 41.7,
+  "timestamp": "2026-11-03T04:04:28+0800",
+  "baseline_commit": "4b43a69",
+  "duration_sec": 21.8,
   "commands_executed": [
     {
-      "cmd": "python scripts/hot_update_drill.py",
+      "cmd": "python scripts/hot_update_drill.py --skip-slow",
       "exit_code": 0,
-      "raw_output_tail": "[PASS] A06_no_traceback_in_log  — queue_depth_at_shutdown=0\n[PASS] B01_two_workers_ready  — p1=49689 ready=True p2=49690 ready=True\n[PASS] B02_shared_cache_and_token  — token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-fvw35py5\\cache\n[PASS] B03_restart_shutdown_202_exit0  — http=202 exit=0\n[PASS] B04_restarted_worker_ready  — port=49689\n[PASS] B05_restarted_worker_serves  — /metrics -> 200\n[PASS] B06_other_worker_zero_failures_during_roll  — ok=212 fail=0 errors=[]\n[PASS] C01_spare_worker_ready  — port=50070\n[PASS] C02_old_still_serving_before_cutover  — /health -> 200\n[PASS] C03_old_drained_after_new_ready  — http=202 exit=0\n[PASS] C04_new_serving_after_cutover  — /metrics -> 200\n[PASS] B07_no_traceback_in_logs\n"
+      "raw_output_tail": "[PASS] B01_two_workers_ready  — p1=45810 ready=True p2=45811 ready=True\n[PASS] B02_shared_cache_and_token  — token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-wsp9qqig\\cache\n[PASS] B03_restart_shutdown_202_exit0  — http=202 exit=0\n[PASS] B04_restarted_worker_ready  — port=45810\n[PASS] B05_restarted_worker_serves  — /metrics -> 200\n[PASS] B06_other_worker_zero_failures_during_roll  — ok=84 fail=0 errors=[]\n[PASS] C01_spare_worker_ready  — port=46021\n[PASS] C02_old_still_serving_before_cutover  — /health -> 200\n[PASS] C03_old_drained_after_new_ready  — http=202 exit=0\n[PASS] C04_new_serving_after_cutover  — /metrics -> 200\n[PASS] B07_no_traceback_in_logs\n"
     }
   ],
   "files_changed": [],
   "tests": [
     {
-      "name": "A01_worker_ready",
-      "type": "e2e",
-      "status": "pass",
-      "evidence": "port=49398"
-    },
-    {
-      "name": "A02_shutdown_returns_202",
-      "type": "e2e",
-      "status": "pass",
-      "evidence": "http=202"
-    },
-    {
-      "name": "A03_shutdown_exit_code_0",
-      "type": "e2e",
-      "status": "pass",
-      "evidence": "exit=0"
-    },
-    {
-      "name": "A04_inflight_request_survived",
-      "type": "e2e",
-      "status": "pass",
-      "evidence": "status=200 elapsed=6.13s exception=None"
-    },
-    {
-      "name": "A05_inflight_returns_structured_body",
-      "type": "e2e",
-      "status": "pass",
-      "evidence": "keys=['error', 'error_code', 'hint', 'ok', 'solved', 'stage'] solved=False error_code=unsolved"
-    },
-    {
-      "name": "A06_no_traceback_in_log",
-      "type": "e2e",
-      "status": "pass",
-      "evidence": "queue_depth_at_shutdown=0"
-    },
-    {
       "name": "B01_two_workers_ready",
       "type": "e2e",
       "status": "pass",
-      "evidence": "p1=49689 ready=True p2=49690 ready=True"
+      "evidence": "p1=45810 ready=True p2=45811 ready=True"
     },
     {
       "name": "B02_shared_cache_and_token",
       "type": "e2e",
       "status": "pass",
-      "evidence": "token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-fvw35py5\\cache"
+      "evidence": "token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-wsp9qqig\\cache"
     },
     {
       "name": "B03_restart_shutdown_202_exit0",
@@ -72,7 +36,7 @@
       "name": "B04_restarted_worker_ready",
       "type": "e2e",
       "status": "pass",
-      "evidence": "port=49689"
+      "evidence": "port=45810"
     },
     {
       "name": "B05_restarted_worker_serves",
@@ -84,13 +48,13 @@
       "name": "B06_other_worker_zero_failures_during_roll",
       "type": "e2e",
       "status": "pass",
-      "evidence": "ok=212 fail=0 errors=[]"
+      "evidence": "ok=84 fail=0 errors=[]"
     },
     {
       "name": "C01_spare_worker_ready",
       "type": "e2e",
       "status": "pass",
-      "evidence": "port=50070"
+      "evidence": "port=46021"
     },
     {
       "name": "C02_old_still_serving_before_cutover",
@@ -119,44 +83,14 @@
   ],
   "checks": [
     {
-      "name": "A01_worker_ready",
-      "ok": true,
-      "detail": "port=49398"
-    },
-    {
-      "name": "A02_shutdown_returns_202",
-      "ok": true,
-      "detail": "http=202"
-    },
-    {
-      "name": "A03_shutdown_exit_code_0",
-      "ok": true,
-      "detail": "exit=0"
-    },
-    {
-      "name": "A04_inflight_request_survived",
-      "ok": true,
-      "detail": "status=200 elapsed=6.13s exception=None"
-    },
-    {
-      "name": "A05_inflight_returns_structured_body",
-      "ok": true,
-      "detail": "keys=['error', 'error_code', 'hint', 'ok', 'solved', 'stage'] solved=False error_code=unsolved"
-    },
-    {
-      "name": "A06_no_traceback_in_log",
-      "ok": true,
-      "detail": "queue_depth_at_shutdown=0"
-    },
-    {
       "name": "B01_two_workers_ready",
       "ok": true,
-      "detail": "p1=49689 ready=True p2=49690 ready=True"
+      "detail": "p1=45810 ready=True p2=45811 ready=True"
     },
     {
       "name": "B02_shared_cache_and_token",
       "ok": true,
-      "detail": "token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-fvw35py5\\cache"
+      "detail": "token_same=True cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-roll-wsp9qqig\\cache"
     },
     {
       "name": "B03_restart_shutdown_202_exit0",
@@ -166,7 +100,7 @@
     {
       "name": "B04_restarted_worker_ready",
       "ok": true,
-      "detail": "port=49689"
+      "detail": "port=45810"
     },
     {
       "name": "B05_restarted_worker_serves",
@@ -176,12 +110,12 @@
     {
       "name": "B06_other_worker_zero_failures_during_roll",
       "ok": true,
-      "detail": "ok=212 fail=0 errors=[]"
+      "detail": "ok=84 fail=0 errors=[]"
     },
     {
       "name": "C01_spare_worker_ready",
       "ok": true,
-      "detail": "port=50070"
+      "detail": "port=46021"
     },
     {
       "name": "C02_old_still_serving_before_cutover",

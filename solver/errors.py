@@ -24,6 +24,7 @@ class ErrorCode(str, Enum):
 
     # —— 请求级（4xx）——
     INVALID_REQUEST = "invalid-request"     # 参数非法：URL 不合规、timeout 越界、body 畸形
+    PAYLOAD_TOO_LARGE = "payload-too-large"  # 请求体超限：可减小后重试（区别于 400 的"不该重试"）
     UNAUTHORIZED = "unauthorized"           # 缺少或错误的 Bearer token
     RATE_LIMITED = "rate-limited"           # **预留值**：当前没有按 host 限流，不会产生（见下）
     BUSY = "busy"                           # 准入拒绝：队列已满 / inflight 已达上限
@@ -47,6 +48,7 @@ class ErrorCode(str, Enum):
 #: 两者永不同时出现，调用方不需要猜。
 STATUS_BY_CODE: dict[ErrorCode, int] = {
     ErrorCode.INVALID_REQUEST: 400,
+    ErrorCode.PAYLOAD_TOO_LARGE: 413,
     ErrorCode.UNAUTHORIZED: 401,
     ErrorCode.BUSY: 429,
     ErrorCode.RATE_LIMITED: 429,

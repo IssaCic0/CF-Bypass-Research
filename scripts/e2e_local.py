@@ -407,6 +407,13 @@ def phase_a(workdir: Path) -> None:
                status == 404 and json_or_empty(body).get("error_code") == "not-found",
                f"status={status}")
 
+        # v5.0 T-51：超大 body → 413 payload-too-large（可重试语义，区别于 400）
+        status, _h, body = request(f"{svc.base}/solve", token=svc.token, method="POST",
+                                raw_body=b'{"url":"' + b"a" * (65536 + 1) + b'"}')
+        record("A13b_solve_oversized_body_413",
+               status == 413 and json_or_empty(body).get("error_code") == "payload-too-large",
+               f"status={status} error_code={json_or_empty(body).get('error_code')}")
+
         # /shutdown：202 + 真退出 + 退出码 0（这是"滚动重启不掉请求"的地基）。
         code, http_status = svc.shutdown()
         record("A14_shutdown_202", http_status == "202", f"http={http_status}")

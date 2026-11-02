@@ -2,6 +2,58 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [5.0.0] - 2026-11-03
+
+主题：**治理收尾 + 测试卫生（对照《下一步改进指南 v4.7→v5.0》W1/W3；T-53/T-54 受真机预算约束另行排期）。**
+
+### 新增：413 契约（T-51/T-52）
+
+- **超大 body 从 `400 invalid-request` 改为 `413 payload-too-large`**。400 的语义是"请求坏了，
+  不该重试"；413 的语义是"可减小请求体后重试"——客户端的重试决策由此分化，混用是契约错误。
+  `/solve` 与 `/detect` 同步对齐；`hint` 告知阈值（`--max-body-bytes`，默认 65536）与解决方向；
+  审计行为不变（超大 body 请求在 JSONL 里仍有一行）。
+  兼容性：`gocfsolve` 对非 2xx 一律返回 `APIError` 且不重试（静态确认 `cfsolve.go` 状态码分支），
+  回放自愈（revalidate）只由**目标站 403**触发——413 不会引发任何自动重解。文档先行：
+  `docs/API.md` 错误码表新增行（契约 commit 与行为 commit 分开，可单独回滚行为）。
+  用例：`test_oversized_body_returns_413_and_is_audited` 等 3 个（改前必红）+ E2E `A13b`。
+
+### 修复
+
+- **soak.py 采样管线缺 token（T-53 前置，P1）**：`/solve` `/detect` `/metrics` 全部 401，
+  长跑只会采集到 401 噪音——等于"命中率 soak 从未真正可用"。新增 `--token` / `--token-file`
+  （CF_SOLVE_TOKEN= 行格式），日志只打指纹。
+- **soak.py 支持断点续采（`--resume`）**：Windows 更新/休眠打断后可从已有 jsonl 继续同一轮，
+  summary 的 `duration_sec` 正确累计偏移。
+- **cache.py 4 处 `open()` 句柄未关闭**（salt.bin / 缓存文件读路径）：`ResourceWarning` 洪水的源头之一，
+  已全部改为 `with` 块。
+- **summary 新增 `hit_rate_steady`**：剔除首 1h 冷启动后，用 /health 快照的累计 `solves`/`cache_hits`
+  差值计算稳态命中率（T-53 验收字段）。
+
+### 测试卫生（T-55）
+
+- 新增 `tests/conftest.py` autouse fixture：跟踪测试期间创建的 `SqliteStore`/`FileStore`，
+  teardown 统一 `close()`。**ResourceWarning 从 100+ 条降到 0**，warning 区恢复为真信号通道
+  （N-15 就是从这里抓到的）。
+
+### 结构下沉（T-56，每步 314 全绿）
+
+- `metrics_text` 渲染逻辑下沉到 **`solver/metrics.py`**（115 行，覆盖率 95%）；
+  `Solver.metrics_text` 保留为原样再导出，`/metrics` 端点与调用方零感知。
+- CLI 装配（参数解析 + 组件装配 + 信号处理，225 行）下沉到 **`solver/bootstrap.py`**；
+  `service.main` 保留再导出（延迟导入避免循环），`python solver/service.py` 入口行为逐字节不变。
+  **`service.py` 从 2329 行降到 2073 行**。
+
+### 复核结论
+
+- **T-50（prefer 真跳过）经复核 v4.x 已实现**：`backends.BackendRouter.solve(skip=)` +
+  空链安全阀（skip 覆盖全链时放弃跳过）+ `route.skip_backends` 映射 + handler 翻译 + 测试断言
+  （`reason=prefer-skip`）。本版未重复施工。
+
+### 验证（全部实跑，证据见 `evidence/v50-w1.json`）
+
+Python 314 passed · 覆盖率 81.90% · Go `-race` 绿 · E2E 30/30（含新 413 断言）·
+热更新演练 11/11 · 回放压测 5589.3 QPS / p99 2.93ms / 0 错 · findings 40 条校验 exit 0
+
 ## [4.7.0] - 2026-11-02
 
 主题：**不加功能，只把"没验证过的"变成可复现的断言，并修掉两个只有真跑才会暴露的缺陷。**

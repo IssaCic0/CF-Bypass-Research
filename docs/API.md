@@ -150,6 +150,7 @@ $TOKEN = (Select-String -Path .env -Pattern '^CF_SOLVE_TOKEN=(.+)$').Matches[0].
 | `error_code` | HTTP | `stage` | 含义与建议动作 |
 |---|---|---|---|
 | `invalid-request` | 400 | `validate` | url/timeout/force/body 不合法，**或页面重定向/子资源请求了私网地址被拦**；按 `hint` 修参数 |
+| `payload-too-large` | 413 | `validate` | **v5.0 新增**：请求体超过 `--max-body-bytes`（默认 65536 字节）。与 400 的区别：400=请求坏了**不该**重试，413=可减小请求体后**重试**（如拆分 URL 列表）。连接会被服务端主动关闭 |
 | `unauthorized` | 401 | `admit` | 缺 token 或 token 错；检查 `.env` |
 | `busy` | 429 | `admit` | 队列满 / inflight 满；降低并发或加进程 |
 | `rate-limited` | 429 | `admit` | 同域求解过频（预留，默认未启用） |

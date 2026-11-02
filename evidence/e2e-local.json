@@ -2,9 +2,9 @@
   "task_id": "e2e-local",
   "status": "done",
   "result": "passed",
-  "timestamp": "2026-11-02T07:37:02+0800",
-  "baseline_commit": "0712c48",
-  "duration_sec": 17.1,
+  "timestamp": "2026-11-03T04:02:32+0800",
+  "baseline_commit": "4b43a69",
+  "duration_sec": 17.0,
   "commands_executed": [
     {
       "cmd": "python scripts/e2e_local.py --json-out evidence/e2e-local.json",
@@ -18,7 +18,7 @@
       "name": "A01_service_ready",
       "type": "e2e",
       "status": "pass",
-      "evidence": "port=50790 token_file=有"
+      "evidence": "port=44944 token_file=有"
     },
     {
       "name": "A02_token_file_created",
@@ -42,7 +42,7 @@
       "name": "A05_health_auth_full_view",
       "type": "e2e",
       "status": "pass",
-      "evidence": "cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-e2e-m8ho21l2\\cache solves=0"
+      "evidence": "cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-e2e-hhfvv32f\\cache solves=0"
     },
     {
       "name": "A06_metrics_without_token_401",
@@ -93,6 +93,12 @@
       "evidence": "status=404"
     },
     {
+      "name": "A13b_solve_oversized_body_413",
+      "type": "e2e",
+      "status": "pass",
+      "evidence": "status=413 error_code=payload-too-large"
+    },
+    {
       "name": "A14_shutdown_202",
       "type": "e2e",
       "status": "pass",
@@ -108,13 +114,13 @@
       "name": "A16_no_traceback_in_log",
       "type": "e2e",
       "status": "pass",
-      "evidence": "日志行数=10"
+      "evidence": "日志行数=11"
     },
     {
       "name": "B01_service_ready",
       "type": "e2e",
       "status": "pass",
-      "evidence": "port=50825"
+      "evidence": "port=44986"
     },
     {
       "name": "B02_detect_plain_site_is_direct",
@@ -193,7 +199,7 @@
     {
       "name": "A01_service_ready",
       "ok": true,
-      "detail": "port=50790 token_file=有"
+      "detail": "port=44944 token_file=有"
     },
     {
       "name": "A02_token_file_created",
@@ -213,7 +219,7 @@
     {
       "name": "A05_health_auth_full_view",
       "ok": true,
-      "detail": "cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-e2e-m8ho21l2\\cache solves=0"
+      "detail": "cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-e2e-hhfvv32f\\cache solves=0"
     },
     {
       "name": "A06_metrics_without_token_401",
@@ -256,6 +262,11 @@
       "detail": "status=404"
     },
     {
+      "name": "A13b_solve_oversized_body_413",
+      "ok": true,
+      "detail": "status=413 error_code=payload-too-large"
+    },
+    {
       "name": "A14_shutdown_202",
       "ok": true,
       "detail": "http=202"
@@ -268,12 +279,12 @@
     {
       "name": "A16_no_traceback_in_log",
       "ok": true,
-      "detail": "日志行数=10"
+      "detail": "日志行数=11"
     },
     {
       "name": "B01_service_ready",
       "ok": true,
-      "detail": "port=50825"
+      "detail": "port=44986"
     },
     {
       "name": "B02_detect_plain_site_is_direct",

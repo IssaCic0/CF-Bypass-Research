@@ -80,6 +80,7 @@ try:  # 作为包导入（tests / 未来 solver 包）
         derive_ttl,
     )
     from .prewarm import Prewarmer, parse_targets
+    from .metrics import render_metrics_text  # v5.0 T-56：Prometheus 渲染已下沉（只搬不改）
     from .engines import Engine, build_factory as build_engine_factory, preflight as engine_preflight
     from .cfsolve_backend import CfsolveBackend
     from .pydoll_backend import PydollBackend, find_chrome
@@ -131,6 +132,7 @@ except ImportError:  # 直接以脚本运行：python solver/service.py
         derive_ttl,
     )
     from prewarm import Prewarmer, parse_targets  # type: ignore[no-redef]
+    from metrics import render_metrics_text  # type: ignore[no-redef]
     from engines import Engine, build_factory as build_engine_factory, preflight as engine_preflight  # type: ignore[no-redef]
     from cfsolve_backend import CfsolveBackend  # type: ignore[no-redef]
     from pydoll_backend import PydollBackend, find_chrome  # type: ignore[no-redef]
@@ -162,6 +164,9 @@ DEFAULT_TTL = 1500          # cf_clearance 通常 30 分钟量级；cookie 带 e
 MIN_TTL = 60
 MAX_URL_LEN = 2048
 MAX_BODY_BYTES = 64 * 1024
+#: 超大 body 的错误消息。`_read_body_raw` 返回它时，调用方必须转成 413 payload-too-large
+#: （而不是和其它 body_error 一样落进 400 invalid-request）。
+_BODY_TOO_LARGE_MSG = f"__payload_too_large__:{MAX_BODY_BYTES}"
 DEFAULT_TIMEOUT = 45.0
 MIN_TIMEOUT = 5.0
 MAX_TIMEOUT = 120.0         # 上限：避免 timeout=1e9 把 worker 永久占住
@@ -1494,87 +1499,23 @@ class Solver:
         return self.health()[1]
 
     def metrics_text(self) -> str:
-        """Prometheus 文本格式。只暴露计数与桶，不含任何域名/凭证。"""
+        """Prometheus 文本格式（渲染逻辑在 metrics.py，原样再导出）。"""
         with self._lock:
-            q = self._tasks.qsize()
-            alive = 1 if self._browser_alive else 0
-            ok_map = dict(self._backend_ok)
-            err_map = dict(self._backend_err)
-            lines = [
-                # 口径修正：`_solves` 只在**真正发起过一次后端调用**时 +1（含失败），
-                # 而原始 HELP 写"含失败"、实现却只在成功路径 +1 —— 这类"指标说谎"
-                # 比没有指标更坏，因为它会让人相信系统是健康的。
-                "# HELP cfsolve_solves_total 真实发起的求解次数（含失败）",
-                "# TYPE cfsolve_solves_total counter",
-                f"cfsolve_solves_total {self._solves}",
-                "# HELP cfsolve_cache_hits_total 缓存命中次数",
-                "# TYPE cfsolve_cache_hits_total counter",
-                f"cfsolve_cache_hits_total {self._hits}",
-                "# HELP cfsolve_failures_total 求解失败次数",
-                "# TYPE cfsolve_failures_total counter",
-                f"cfsolve_failures_total {self._failures}",
-                "# HELP cfsolve_timeouts_total 超时次数",
-                "# TYPE cfsolve_timeouts_total counter",
-                f"cfsolve_timeouts_total {self._timeouts}",
-                "# HELP cfsolve_rejected_total 准入拒绝次数",
-                "# TYPE cfsolve_rejected_total counter",
-                f"cfsolve_rejected_total {self._rejected_busy}",
-                "# HELP cfsolve_browser_restarts_total 浏览器重启次数",
-                "# TYPE cfsolve_browser_restarts_total counter",
-                f"cfsolve_browser_restarts_total {self._restarts}",
-                "# HELP cfsolve_browser_alive 浏览器是否存活",
-                "# TYPE cfsolve_browser_alive gauge",
-                f"cfsolve_browser_alive {alive}",
-                "# HELP cfsolve_queue_depth 队列深度",
-                "# TYPE cfsolve_queue_depth gauge",
-                f"cfsolve_queue_depth {q}",
-                "# HELP cfsolve_solve_seconds 求解耗时分布",
-                "# TYPE cfsolve_solve_seconds histogram",
-            ]
-            cumulative = 0
-            for edge, count in zip(LATENCY_BUCKETS, self._hist):
-                cumulative += count
-                lines.append(f'cfsolve_solve_seconds_bucket{{le="{edge:g}"}} {cumulative}')
-            lines.append(f'cfsolve_solve_seconds_bucket{{le="+Inf"}} {self._solves}')
-            lines.append(f"cfsolve_solve_seconds_sum {round(self._elapsed_sum, 3)}")
-
-            # 按后端：定位"哪一棒在退步"。没有它，多后端只是黑盒。
-            lines += [
-                "# HELP cfsolve_backend_total 按后端的调用结果计数",
-                "# TYPE cfsolve_backend_total counter",
-            ]
-            for name in sorted(set(ok_map) | set(err_map)):
-                if ok_map.get(name):
-                    lines.append(f'cfsolve_backend_total{{backend="{name}",result="ok"}} {ok_map[name]}')
-                if err_map.get(name):
-                    lines.append(f'cfsolve_backend_total{{backend="{name}",result="error"}} {err_map[name]}')
-
-            # 按域：只取 top-N，防止标签基数爆炸（域名是不可控输入，绝不能直接当标签用全量）
-            host_stats = getattr(self._store, "host_stats", None)
-            if callable(host_stats):
-                try:
-                    rows = host_stats(HOST_METRICS_TOP_N)
-                except Exception:  # noqa: BLE001
-                    rows = []
-                if rows:
-                    lines += [
-                        "# HELP cfsolve_host_solves_total 按域求解次数（仅 top-N，其余丢弃以防基数爆炸）",
-                        "# TYPE cfsolve_host_solves_total counter",
-                    ]
-                    for row in rows:
-                        host = str(row.get("host") or "")
-                        if host:
-                            lines.append(f'cfsolve_host_solves_total{{host="{host}"}} {int(row.get("solves") or 0)}')
-                    lines += [
-                        "# HELP cfsolve_host_failures_total 按域失败次数（仅 top-N）",
-                        "# TYPE cfsolve_host_failures_total counter",
-                    ]
-                    for row in rows:
-                        host = str(row.get("host") or "")
-                        if host:
-                            lines.append(f'cfsolve_host_failures_total{{host="{host}"}} {int(row.get("failures") or 0)}')
-            lines.append(f"cfsolve_solve_seconds_count {self._solves}")
-        return "\n".join(lines) + "\n"
+            return render_metrics_text(
+                solves=self._solves,
+                hits=self._hits,
+                failures=self._failures,
+                timeouts=self._timeouts,
+                rejected_busy=self._rejected_busy,
+                restarts=self._restarts,
+                browser_alive=self._browser_alive,
+                queue_depth=self._tasks.qsize(),
+                elapsed_sum=self._elapsed_sum,
+                hist=self._hist,
+                backend_ok=dict(self._backend_ok),
+                backend_err=dict(self._backend_err),
+                host_stats_fn=getattr(self._store, "host_stats", None),
+            )
 
     # -- 退出 -----------------------------------------
     def close(self) -> None:
@@ -1749,6 +1690,14 @@ class Handler(BaseHTTPRequestHandler):
         url = ""
         try:
             if body_error:
+                if body_error.startswith("__payload_too_large__"):
+                    # v5.0 T-51：超大 body → 413（可重试），区别于 400（不该重试）
+                    raise SolveError(
+                        ErrorCode.PAYLOAD_TOO_LARGE,
+                        f"请求体超过 {MAX_BODY_BYTES} 字节",
+                        stage="validate",
+                        hint=f"减小请求体到 {MAX_BODY_BYTES} 字节以内后重试；如需提高上限，启动时调 --max-body-bytes",
+                    )
                 raise SolveError(ErrorCode.INVALID_REQUEST, body_error, stage="validate")
             req = self._parse_json(raw)
             url = req.get("url")
@@ -1931,6 +1880,14 @@ class Handler(BaseHTTPRequestHandler):
         """
         try:
             if body_error:
+                if body_error.startswith("__payload_too_large__"):
+                    # v5.0 T-52：/detect 与 /solve 对齐 413 契约
+                    raise SolveError(
+                        ErrorCode.PAYLOAD_TOO_LARGE,
+                        f"请求体超过 {MAX_BODY_BYTES} 字节",
+                        stage="validate",
+                        hint=f"减小请求体到 {MAX_BODY_BYTES} 字节以内后重试；如需提高上限，启动时调 --max-body-bytes",
+                    )
                 raise SolveError(ErrorCode.INVALID_REQUEST, body_error, stage="validate")
             payload = Handler._parse_json(raw) if raw else {}
             fresh = bool(payload.get("fresh"))
@@ -2044,9 +2001,12 @@ class Handler(BaseHTTPRequestHandler):
         if n <= 0:
             return b"", "请求体为空"
         if n > MAX_BODY_BYTES:
-            # 超大 body 不读，直接告知；连接由 close_connection 收尾
+            # 超大 body 不读，直接告知；连接由 close_connection 收尾。
+            # v5.0 T-51：413 = 可减小请求体后重试（400 = 请求坏了不该重试）。
+            # 不在这里抛异常：本方法在 do_POST 的 try 之外被调用，
+            # 抛出去会绕过审计与结构化响应；改为标记位，由调用方在 try 内转 413。
             self.close_connection = True
-            return b"", f"请求体超过 {MAX_BODY_BYTES} 字节"
+            return b"", _BODY_TOO_LARGE_MSG
         return self.rfile.read(n), ""
 
     @staticmethod
@@ -2102,227 +2062,15 @@ Handler.do_GET = _track_inflight(Handler.do_GET)        # type: ignore[method-as
 Handler.do_POST = _track_inflight(Handler.do_POST)      # type: ignore[method-assign]
 
 
+# CLI 装配与启动已下沉 bootstrap.py（v5.0 T-56，只搬不改）：
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="Cloudflare cf_clearance 求解服务（Camoufox）")
-    ap.add_argument("--port", type=int, default=8878)
-    ap.add_argument("--host", default="127.0.0.1")
-    ap.add_argument("--ttl", type=int, default=DEFAULT_TTL,
-                    help="缓存有效期**上限**（秒）。真实值取 cf_clearance 自带的 expires，且不超过本值")
-    ap.add_argument("--headed", action="store_true", help="有头模式（调试用）")
-    ap.add_argument("--max-queue", type=int, default=DEFAULT_MAX_QUEUE, help="有界队列容量，满即 429")
-    ap.add_argument("--max-inflight", type=int, default=DEFAULT_MAX_INFLIGHT, help="并发求解上限，满即 429")
-    ap.add_argument("--allow-remote-shutdown", action="store_true",
-                    help="允许非回环地址触发 POST /shutdown（容器/端口映射需要；token 仍是第一道门）")
-    ap.add_argument("--audit-log", default="", help="审计日志（JSONL）路径；空=关闭。只记白名单字段，不含凭证")
-    ap.add_argument("--detect-cache-ttl", type=float, default=DETECT_CACHE_TTL,
-                    help="探测结果（/detect 与 route=auto）按域缓存的 TTL（秒）；0=关闭")
-    ap.add_argument("--max-detect", type=int, default=DEFAULT_MAX_DETECT,
-                    help="并发探测（/detect）上限，满即 429；与求解额度分开计")
-    ap.add_argument("--egress-id", default=os.environ.get("CF_EGRESS_ID", "default"),
-                    help="本进程的出口标识；换出口必须换 id，否则会复用别处 IP 的凭证")
-    ap.add_argument("--token-file", default=".env", help=f"token 文件；首次启动自动生成并写入 {TOKEN_LINE_PREFIX}<token>")
-    ap.add_argument("--no-auth", action="store_true", help="关闭鉴权（仅限本机调试；生产禁用）")
-    ap.add_argument("--allow-private-hosts", action="store_true", help="允许访问私网/回环地址（仅限本机联调）")
-    ap.add_argument("--cache-dir", default=os.environ.get("CF_CACHE_DIR", ""),
-                    help="落盘缓存目录（多进程共享）的路径；空=进程内内存缓存")
-    ap.add_argument("--cache-max-files", type=int, default=4096, help="落盘缓存的文件数上限（超出按最旧淘汰）")
-    ap.add_argument("--proxy", action="append", default=[],
-                    help="代理出口，可重复：scheme://user:pass@host:port。按域一致性哈希做粘性")
-    ap.add_argument("--proxy-egress-ip", action="append", default=[],
-                    help="登记某出口的实测 IP，格式 http://host:port=1.2.3.4（改 IP 会自动失效旧缓存）")
-    ap.add_argument("--browser-os", default=os.environ.get("CF_BROWSER_OS", ""),
-                    choices=["", "windows", "macos", "linux"],
-                    help="固定 Camoufox 的 OS persona（windows/macos/linux）；空=随机（Camoufox 默认，每次启动会变）")
-    ap.add_argument("--prewarm", default=os.environ.get("CF_PREWARM", ""),
-                    help="保活目标，逗号分隔（可只写域名）。空=不启用保活")
-    ap.add_argument("--prewarm-file", default=os.environ.get("CF_PREWARM_FILE", ""),
-                    help="保活目标文件：一行一个，允许 # 注释")
-    ap.add_argument("--prewarm-interval", type=float, default=60.0, help="保活扫描间隔（秒）")
-    ap.add_argument("--renew-before", type=float, default=300.0,
-                    help="剩余寿命低于该值时提前续期（秒）；应大于单次求解耗时")
-    ap.add_argument("--engine", default=os.environ.get("CF_ENGINE", "camoufox"),
-                    choices=["camoufox", "cloakbrowser", "patchright"],
-                    help="浏览器引擎：camoufox（默认，C++ 层改指纹）/ cloakbrowser（Chromium 源码层补丁，"
-                         "二进制专有）/ patchright（反检测 Chromium，免费的弱一些）")
-    ap.add_argument("--cfsolve-bin", default=os.environ.get("CFSOLVE_BIN", ""),
-                    help="纯协议后端：cfsolve 的 challenge 可执行文件路径（见 docs/纯协议-cfsolve.md）")
-    ap.add_argument("--cfsolve-profile", default=os.environ.get("CFSOLVE_PROFILE", ""),
-                    help="纯协议后端：浏览器 profile 文件路径（cfsolve profiles/*.json）")
-    ap.add_argument("--cfsolve-timeout", type=float, default=120.0, help="纯协议后端单次超时（秒）")
-    ap.add_argument("--pydoll", action="store_true",
-                    help="启用 pydoll 后端（零 WebDriver 的 CDP 直连 Chrome，自带 CF 求解器）")
-    ap.add_argument("--chrome-path", default=os.environ.get("CHROME_PATH", ""),
-                    help="Chrome 可执行文件路径（空=自动探测常见位置）")
-    ap.add_argument("--pydoll-headless", action="store_true",
-                    help="pydoll 用 headless（注意：headless 下 UA 会带 HeadlessChrome，成功率通常更低）")
-    ap.add_argument("--pydoll-wait", type=float, default=45.0, help="pydoll 单次等待上限（秒）")
-    ap.add_argument("--flaresolverr", default=os.environ.get("FLARESOLVERR_URL", ""),
-                    help="可选兜底后端：自托管 FlareSolverr 兼容服务的地址（例如 http://127.0.0.1:8191）")
-    args = ap.parse_args(argv)
-
-    token = ""
-    source = "disabled"
-    if not args.no_auth:
-        token, source = load_or_create_token(args.token_file)
-
+    # 延迟导入：bootstrap 依赖本模块的常量与类，顶层 import 会造成循环。
+    # main 只在进程启动时调用一次，函数级 import 无热路径开销。
     try:
-        engine_enum = Engine.parse(args.engine)
-        engine_preflight(engine_enum)
-    except (ValueError, SolveError) as e:
-        msg = getattr(e, "message", str(e))
-        hint = getattr(e, "hint", "")
-        print(f"[cfsolve] 引擎不可用：{msg}" + (f" | 安装：{hint}" if hint else ""), flush=True)
-        return 2
-
-    # 代理池 与 cfsolve/pydoll **不能同时启用**（这是启动即失败的硬冲突，不是警告）。
-    # 原因：cfsolve 与 pydoll 都在自己进程里直连（cfsolve 自带 BoringSSL、pydoll 自带 Chrome），
-    # 无法走代理池 ⇒ 它们拿到的 cf_clearance 绑定的是**本机直连 IP**；而 Go 侧回放会按
-    # 凭证的出口标识去走代理 ⇒ 求解与回放出口不一致 ⇒ 稳定的静默 403。
-    # 与其让它上线后表现为"随机 403"，不如启动就说清楚。
-    if args.proxy and (args.cfsolve_bin or args.pydoll):
-        print(
-            "[cfsolve] 配置冲突：--proxy（代理池）与 --cfsolve-bin/--pydoll 不能同时启用。\n"
-            "  原因：cfsolve/pydoll 在各自进程里直连，走不了代理池；它们发出的凭证绑的是直连 IP，\n"
-            "        而 Go 侧回放会按凭证出口走代理 → 出口不一致 → 稳定 403。\n"
-            "  处理：二选一 —— 去掉 --proxy，或去掉 --cfsolve-bin/--pydoll。",
-            flush=True,
-        )
-        return 2
-
-    pool = None
-    if args.proxy:
-        pool = ProxyPool(args.proxy)
-        for item in args.proxy_egress_ip:
-            server, _, ip = item.partition("=")
-            if ip and not pool.set_egress_ip_by_server(server.strip(), ip.strip()):
-                print(f"[cfsolve] 警告：--proxy-egress-ip 里的出口不在 --proxy 列表中：{server}", flush=True)
-
-    solver = Solver(
-        headless=not args.headed,
-        ttl=args.ttl,
-        max_queue=args.max_queue,
-        max_inflight=args.max_inflight,
-        max_detect=args.max_detect,
-        egress_id=args.egress_id,
-        allow_private_hosts=args.allow_private_hosts,
-        cache_dir=args.cache_dir or None,
-        token=token or "memory-only",     # 无 token 时也给个固定值，保证能派生密钥
-        cache_max_files=args.cache_max_files,
-        proxy_pool=pool,
-        browser_os=args.browser_os,
-        detect_cache_ttl=args.detect_cache_ttl,
-        browser_factory=None if engine_enum is Engine.CAMOUFOX else build_engine_factory(
-            engine_enum, os_persona=args.browser_os
-        ),
-    )
-    Handler.solver = solver
-    Handler.token = token
-    Handler.allow_remote_shutdown = bool(args.allow_remote_shutdown)
-    Handler.audit_path = (args.audit_log or "").strip()
-    if Handler.audit_path:
-        try:
-            os.makedirs(os.path.dirname(os.path.abspath(Handler.audit_path)) or ".", exist_ok=True)
-            with open(Handler.audit_path, "a", encoding="utf-8"):
-                pass
-            print(f"[cfsolve] 审计日志已启用：{Handler.audit_path}", flush=True)
-        except OSError as e:
-            Handler.audit_path = ""
-            print(f"[cfsolve] 警告：审计日志不可写（{e}），已关闭", flush=True)
-    # 后端优先级：纯协议（若配置）→ 本地浏览器 → 自托管 FlareSolverr
-    backends = []
-    if args.cfsolve_bin and args.cfsolve_profile:
-        backends.append(CfsolveBackend(
-            args.cfsolve_bin, args.cfsolve_profile, timeout=args.cfsolve_timeout,
-            egress_id=args.egress_id,
-        ))
-    if args.pydoll:
-        pyd = PydollBackend(
-            args.chrome_path, headless=args.pydoll_headless, wait=args.pydoll_wait,
-            egress_id=args.egress_id,
-        )
-        if not pyd.is_configured():
-            print(f"[cfsolve] 警告：--pydoll 已开启但不可用（chrome={find_chrome(args.chrome_path) or '未找到'}；"
-                  f"或缺 pydoll-python）。它会在后端链里被 skip。", flush=True)
-        backends.append(pyd)
-    backends.append(CamoufoxBackend(solver))
-    if args.flaresolverr:
-        backends.append(FlareSolverrBackend(args.flaresolverr))
-    # 把 solver 作为治理对象交给 router：缓存/准入/计数/按域统计对**所有后端**生效，
-    # 而不是只对"恰好走了 Solver.solve 的那一棒"生效。
-    Handler.router = BackendRouter(backends, governance=solver) if len(backends) > 1 else None
-    solver.backend_chain = list(Handler.router.backends) if Handler.router else ["camoufox"]
-
-    try:
-        srv = Server((args.host, args.port), Handler)
-    except OSError as e:
-        print(f"[cfsolve] 端口 {args.host}:{args.port} 绑定失败：{e}", flush=True)
-        print("[cfsolve] 换一个 --port，或用 `netstat -ano | findstr :PORT` 找到并停掉占用进程", flush=True)
-        solver.close()
-        return 2
-
-    print(
-        f"[cfsolve] 监听 http://{args.host}:{args.port} "
-        f"(camoufox, ttl={args.ttl}s, egress={args.egress_id}, auth={source}, "
-        f"cache={solver.cache_backend}, proxies={0 if pool is None else len(args.proxy)})",
-        flush=True,
-    )
-    print(f"[cfsolve] 浏览器引擎：{engine_enum.value}"
-          + (f"（os={args.browser_os}）" if args.browser_os else ""), flush=True)
-    if Handler.router is not None:
-        print(f"[cfsolve] 后端优先级：{Handler.router.backends}（未配置的会被 skip）", flush=True)
-    if token:
-        print(f"[cfsolve] token 指纹 {token_fingerprint(token)}（来源 {source}；"
-              f"完整 token 见 {args.token_file} 或环境变量 {TOKEN_ENV}）", flush=True)
-
-    def _shutdown(signum, _frame):
-        print(f"[cfsolve] 收到信号 {signum}，开始优雅退出", flush=True)
-        threading.Thread(target=srv.shutdown, daemon=True).start()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            signal.signal(sig, _shutdown)
-        except (ValueError, OSError):
-            pass    # 非主线程/平台不支持时忽略
-
-    prewarmer = None
-    targets: list[str] = []
-    if args.prewarm or args.prewarm_file:
-        try:
-            targets = parse_targets(args.prewarm, args.prewarm_file)
-        except ValueError as e:
-            print(f"[cfsolve] 保活配置错误：{e}", flush=True)
-            solver.close()
-            return 2
-        if targets:
-            prewarmer = Prewarmer(
-                solver,
-                targets,
-                renew_before=args.renew_before,
-                interval=args.prewarm_interval,
-            )
-            solver.prewarmer = prewarmer
-            prewarmer.start()
-            print(f"[cfsolve] 保活已启用：{len(targets)} 个域，提前 {args.renew_before:.0f}s 续期，"
-                  f"扫描间隔 {args.prewarm_interval:.0f}s", flush=True)
-        else:
-            print("[cfsolve] --prewarm/--prewarm-file 为空，保活未启用", flush=True)
-
-    try:
-        srv.serve_forever(poll_interval=0.5)
-    finally:
-        if prewarmer is not None:
-            prewarmer.stop()
-        # 优雅退出三步曲：已经停止接收新连接 → 等在途请求收尾 → 再关资源。
-        # 少了"等"这一步，正在求解的调用方会拿到连接被重置（实测 WinError 10054）。
-        left = srv.drain(SHUTDOWN_GRACE)
-        if left:
-            print(f"[cfsolve] 优雅退出：{SHUTDOWN_GRACE:.0f}s 内仍有 {left} 个请求未完成", flush=True)
-        else:
-            print("[cfsolve] 优雅退出：在途请求已全部完成", flush=True)
-        srv.server_close()
-        solver.close()
-    print("[cfsolve] 已退出", flush=True)
-    return 0
+        from . import bootstrap as _bootstrap
+    except ImportError:  # 直接以脚本运行：python solver/service.py
+        import bootstrap as _bootstrap  # type: ignore[no-redef]
+    return _bootstrap.main(argv)
 
 
 if __name__ == "__main__":

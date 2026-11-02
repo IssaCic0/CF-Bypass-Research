@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import statistics
 import sys
@@ -45,10 +46,13 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
 
 
-def http(method: str, url: str, payload: dict | None = None, timeout: float = 20.0):
+def http(method: str, url: str, payload: dict | None = None, timeout: float = 20.0,
+         token: str = ""):
     data = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(url, data=data, method=method,
-                                 headers={"Content-Type": "application/json"})
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
     t0 = time.perf_counter()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -114,6 +118,11 @@ def parse_metrics(text: str) -> dict:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="长跑稳定性测试")
     ap.add_argument("--solver", default="http://127.0.0.1:8971")
+    ap.add_argument("--token", default="",
+                    help="求解服务的 Bearer token（/solve /detect /metrics 需要；"
+                         "缺省时这些端点会 401，采样只有 /health）")
+    ap.add_argument("--token-file", default="",
+                    help="从 .env 风格文件读 token（行格式 CF_SOLVE_TOKEN=xxx），优先级低于 --token")
     ap.add_argument("--pid", type=int, default=0, help="服务进程 PID（用于采样 RSS/句柄）")
     ap.add_argument("--duration", type=float, default=3600.0, help="总时长（秒）")
     ap.add_argument("--interval", type=float, default=10.0, help="采样间隔（秒）")
@@ -124,13 +133,31 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-rss-growth-mb", type=float, default=80.0)
     ap.add_argument("--max-handle-growth", type=int, default=50)
     ap.add_argument("--out", default="")
+    ap.add_argument("--resume", action="store_true",
+                    help="断点续采：若 out 文件已存在，跳过其中已记录的时长（ Windows 更新/休眠打断后继续同一轮 soak）")
     args = ap.parse_args(argv)
 
     base = args.solver.rstrip("/")
+    token = args.token
+    if not token and args.token_file and Path(args.token_file).exists():
+        for line in Path(args.token_file).read_text(encoding="utf-8").splitlines():
+            if line.startswith("CF_SOLVE_TOKEN="):
+                token = line[len("CF_SOLVE_TOKEN="):].strip()
+                break
+        print(f"[soak] token 从 {args.token_file} 装载（指纹 {hashlib.sha256(token.encode()).hexdigest()[:12] if token else '空'}）", flush=True)
     samples: list[dict] = []
     light_errors = 0
     ready_failures = 0
     started = time.monotonic()
+    elapsed_offset = 0.0
+    if args.resume and args.out and Path(args.out).exists():
+        with open(args.out, encoding="utf-8") as f:
+            prior = [json.loads(line) for line in f if line.strip()]
+        samples = prior
+        if prior:
+            elapsed_offset = max(s.get("t", 0.0) for s in prior) + args.interval
+            print(f"[soak] --resume：从 {args.out} 恢复 {len(prior)} 个样本，"
+                  f"起始偏移 {elapsed_offset:.0f}s", flush=True)
     next_probe = 0.0
     next_auto = 0.0
     next_solve = 0.0
@@ -141,12 +168,12 @@ def main(argv: list[str] | None = None) -> int:
           f"pid={args.pid or '未给'}", flush=True)
 
     while True:
-        elapsed = time.monotonic() - started
+        elapsed = time.monotonic() - started + elapsed_offset
         if elapsed > args.duration:
             break
 
         rec = {"at": now_iso(), "t": round(elapsed, 1)}
-        code, health, _, ms = http("GET", base + "/health")
+        code, health, _, ms = http("GET", base + "/health", token=token)
         rec["health_ms"] = round(ms, 1)
         rec["health_http"] = code
         if code != 200:
@@ -161,7 +188,7 @@ def main(argv: list[str] | None = None) -> int:
             if health.get("state") != "ready":
                 ready_failures += 1
 
-        mcode, _, mtext, mms = http("GET", base + "/metrics")
+        mcode, _, mtext, mms = http("GET", base + "/metrics", token=token)
         rec["metrics_ms"] = round(mms, 1)
         if mcode != 200:
             light_errors += 1
@@ -175,7 +202,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.probe_every and elapsed >= next_probe:
             suffix = "&fresh=1" if probe_flip else ""
             probe_flip = not probe_flip
-            pcode, pbody, _, pms = http("GET", f"{base}/detect?url={PROBE_URL}{suffix}")
+            pcode, pbody, _, pms = http("GET", f"{base}/detect?url={PROBE_URL}{suffix}", token=token)
             rec["probe_http"] = pcode
             rec["probe_ms"] = round(pms, 1)
             rec["probe_cached"] = bool((pbody or {}).get("cached")) if isinstance(pbody, dict) else None
@@ -185,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.auto_every and elapsed >= next_auto:
             acode, abody, _, ams = http("POST", base + "/solve",
-                                        {"url": PROBE_URL, "route": "auto"}, timeout=40)
+                                        {"url": PROBE_URL, "route": "auto"}, timeout=40, token=token)
             rec["auto_http"] = acode
             rec["auto_ms"] = round(ams, 1)
             rec["auto_action"] = ((abody or {}).get("routed_by") or {}).get("action") if isinstance(abody, dict) else None
@@ -195,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.solve_every and elapsed >= next_solve:
             scode, sbody, _, sms = http("POST", base + "/solve",
-                                        {"url": args.solve_url, "timeout": 60, "force": True}, timeout=120)
+                                        {"url": args.solve_url, "timeout": 60, "force": True}, timeout=120, token=token)
             solve_count += 1
             rec["solve_http"] = scode
             rec["solve_ms"] = round(sms, 1)
@@ -235,9 +262,24 @@ def main(argv: list[str] | None = None) -> int:
     }
     passed = all(ok for ok, _, _ in checks.values())
 
+    # v5.0 T-53：稳态命中率（剔除首 1h 冷启动）。solves/cache_hits 来自 /health 快照，
+    # 是累计值 —— 用最后一个样本与冷启动结束点（1h 后第一个样本）的差值算增量命中率。
+    hit_rate_steady = None
+    solves_series = [(s.get("t", 0.0), s.get("solves"), s.get("cache_hits"))
+                     for s in samples if s.get("solves") is not None]
+    if len(solves_series) >= 2:
+        first_t, first_solves, _first_hits = solves_series[0]
+        steady = [(t, sv, ch) for (t, sv, ch) in solves_series if t >= first_t + 3600.0]
+        if steady:
+            (_, s1, c1), (_, s2, c2) = steady[0], steady[-1]
+            denom = (s2 - s1) + (c2 - c1)
+            hit_rate_steady = round((c2 - c1) / denom, 4) if denom > 0 else None
+
     summary = {
-        "generated_at": now_iso(), "kind": "soak", "duration_sec": round(time.monotonic() - started, 1),
+        "generated_at": now_iso(), "kind": "soak",
+        "duration_sec": round(time.monotonic() - started + elapsed_offset, 1),
         "samples": len(samples), "solve_count": solve_count, "passed": passed,
+        "hit_rate_steady": hit_rate_steady,
         "rss_first_mb": rss_vals[0] if rss_vals else None,
         "rss_last_mb": rss_vals[-1] if rss_vals else None,
         "rss_max_mb": max(rss_vals) if rss_vals else None,

@@ -165,7 +165,8 @@ class FileStore:
     def get(self, key: str) -> dict | None:
         path = self._path(key)
         try:
-            blob = open(path, "rb").read()
+            with open(path, "rb") as f:
+                blob = f.read()
         except FileNotFoundError:
             return None
         except OSError:
@@ -226,7 +227,8 @@ class FileStore:
         for name in self._list_files():
             path = os.path.join(self.dir, name)
             try:
-                payload = json.loads(self._fernet.decrypt(open(path, "rb").read()).decode("utf-8"))
+                with open(path, "rb") as f:
+                    payload = json.loads(self._fernet.decrypt(f.read()).decode("utf-8"))
             except Exception:  # noqa: BLE001
                 continue
             if payload.get("schema_version") != SCHEMA_VERSION:
@@ -243,7 +245,8 @@ class FileStore:
         for name in self._list_files():
             path = os.path.join(self.dir, name)
             try:
-                payload = json.loads(self._fernet.decrypt(open(path, "rb").read()).decode("utf-8"))
+                with open(path, "rb") as f:
+                    payload = json.loads(self._fernet.decrypt(f.read()).decode("utf-8"))
             except Exception:  # noqa: BLE001
                 self._safe_unlink(path)
                 gone += 1
@@ -724,7 +727,8 @@ def _build_fernet(cache_dir: str, token: str):
 def _read_salt(path: str) -> bytes | None:
     """读盐；不足 16 字节视为"还没写完"，返回 None 让调用方重试。"""
     try:
-        data = open(path, "rb").read()
+        with open(path, "rb") as f:
+            data = f.read()
     except OSError:
         return None
     if len(data) >= 16:
