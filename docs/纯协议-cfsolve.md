@@ -199,3 +199,36 @@ cfsolve（纯协议） → Camoufox（浏览器） → FlareSolverr（若配置�
   `needs_validation`，不是 `confirmed`。
 - 接口层（参数拼装、输出解析、错误映射、UA 提取、临时目录清理）已有 11 项离线单测覆盖
   （`tests/test_strategies.py`），保证"接上就能跑"的部分是可靠的。
+
+## 六、求解耗时解剖与提速上限（源码级，2026-11-03）
+
+> 问题：冷求解 18–43s，为什么慢？能不能压？
+
+### 6.1 耗时构成（全部源码证据）
+
+| 阶段 | 耗时 | 源码位置 | 能否省 |
+|---|---|---|---|
+| 导航 + TLS 握手 ×N 跳 | 网络往返 | `solver.rs` open() | ❌ 物理下限 |
+| VM 参数提取/反混淆 | 毫秒级 | `program.rs` / `deobfuscate.rs` | 无所谓 |
+| timeline 模拟（init→send） | ~226ms + intervals(send=195ms) | `session/challenge_page.rs:157 send_at = marked+handoff+1+send` | ⚠️ 只能换"天生快"的真机人设 |
+| **interaction ready_delay** | **1000ms** + click_delay 250ms | `session/interaction.rs:91` + profile `interaction.ready_delay_ms` | ⚠️ 同上 |
+| **PoW 工作量证明** | **CF 服务端下发的 budget_ms**（SHA-256 nonce 搜索须转满预算） | `stage2/interaction/plan.rs:143`（budget 是 CF 下发的字面量）+ `stage2/proof.rs:80`（spin_until 转满） | ❌ **死**——快了直接穿帮，浏览器同样要转 |
+
+### 6.2 结论
+
+- **18–43s 的方差主要来自 PoW 预算**（CF 按负载动态下发），这是 CF 反加速的核心设计，**任何方案（含真浏览器）都要转同样的时间**
+- 固定可压缩空间 ≈1.5–2s（人类行为模拟段），来源是录制设备的"人设速度"——换低端真机录制能合法地快一点，但**不改变数量级**
+- **真正的提速在架构层，不在求解器内**：
+
+| 手段 | 效果 | 现状 |
+|---|---|---|
+| **prewarm 预热**（热门域过期前预解） | 把 18s 彻底挪出请求路径，稳态请求 <3ms | ✅ 已实现（`--prewarm`） |
+| 多进程求解池 | 冷启动风暴吞吐 ×N（8 inflight/进程） | ✅ 已实现（`run-pool.ps1`） |
+| 403 自愈 | 失效自动重解一次，调用方无感 | ✅ 已实现（`gocfsolve` revalidate） |
+| route=auto 预检测 | 无盾站 0.55s 放行，0 次求解 | ✅ 已实现（33 厂商特征） |
+
+### 6.3 对"对速度敏感"场景的部署建议
+
+1. **永远走 prewarm + 回放**：求解只发生在新域首见和续期，请求路径 P99 <3ms
+2. 冷启动可接受 20–40s（与真浏览器同量级，且 72MB 无浏览器）；把它当"后台填充"而非"同步等待"
+3. 对单请求延迟极敏感的调用方：`/solve` 前先 `/detect`（缓存命中 1–32ms），无盾直接过、有盾走异步任务模式
