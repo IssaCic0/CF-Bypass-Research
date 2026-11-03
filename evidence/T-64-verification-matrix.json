@@ -1,0 +1,59 @@
+{
+ "task_id": "T-64-verification-matrix",
+ "status": "complete",
+ "timestamp": "2026-11-03T11:48:53+0800",
+ "gates": {
+  "python_tests": {
+   "cmd": "python -m pytest tests/ -q",
+   "result": "314 passed",
+   "exit": 0
+  },
+  "coverage": {
+   "cmd": "pytest --cov=solver --cov-fail-under=80",
+   "result": "81.98%",
+   "exit": 0
+  },
+  "go_vet": {
+   "cmd": "go vet ./...",
+   "result": "clean",
+   "exit": 0
+  },
+  "go_race": {
+   "cmd": "go test -race -count=1 ./...",
+   "result": "ok 7.914s",
+   "exit": 0
+  },
+  "compileall": {
+   "cmd": "python -m compileall -q solver scripts tests",
+   "exit": 0
+  },
+  "findings": {
+   "cmd": "node scripts/validate-findings.mjs",
+   "result": "40 条全部有证据",
+   "exit": 0
+  },
+  "e2e": {
+   "cmd": "python scripts/e2e_local.py",
+   "result": "30/30 通过 14.3s",
+   "exit": 0
+  },
+  "hot_update": {
+   "cmd": "python scripts/hot_update_drill.py",
+   "result": "17/17 通过 40.7s",
+   "exit": 0
+  },
+  "bench_hot": {
+   "cmd": "python scripts/loadtest.py --mode hot --workers 8 --duration 5",
+   "result": "PASS"
+  },
+  "doctor": {
+   "cmd": "python scripts/doctor.py --port 8907",
+   "result": "WARN(仅 cfsolve 未配置=预期默认, exit 1)",
+   "note": "cfsolve 后端为可选, 默认不配置"
+  }
+ },
+ "limitations": [
+  "doctor exit=1 仅为 cfsolve 未配置的预期 WARN（后端可选）",
+  "真实站点求解受 CF 变体窗口约束（见 README 当前已知状态）"
+ ]
+}

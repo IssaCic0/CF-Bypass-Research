@@ -220,9 +220,11 @@ gocfsolve/
   cfsolve_test.go       # Go 侧离线测试（httptest，不联网）
   revalidate_test.go    # 403 自愈回归（13 例）
   examples/endtoend/    # 端到端验证程序（求解 → 回放 → 校验 200）
-tools/cfsolve-patches/  # cfsolve 的 Windows 构建补丁 + profile 录制工具
+tools/cfsolve-patches/  # cfsolve 的 Windows 构建补丁 + 新版 CF 适配补丁 + profile 录制工具
+docs/cfsolve源码侦察-token提取与profile复用-20261103.md  # ★ token 现场提取原理 + profile 复用机制
 scripts/
   run-pool.ps1          # 多 worker 启动（共享缓存目录 + 可选 prewarm）
+  run_limited.py        # ★ Windows Job Object 内存上限运行器（--max-mb N，超限杀进程树）
   e2e_local.py          # 真进程 E2E（30 断言，离线）
   hot_update_drill.py   # 热更新演练（17 断言）
   soak.py               # 长跑采样（--resume 断点续采、--token）
@@ -379,6 +381,41 @@ curl -L -A "<UA>" "https://<target>/cdn-cgi/challenge-platform/scripts/jsd/main.
 
 ---
 
+## ⚙️ 求解延迟与吞吐（实测解剖）
+
+求解延迟的构成与上限（源码级证据见 `docs/纯协议-cfsolve.md` §6）：
+
+| 阶段 | 耗时 | 可否压缩 |
+|---|---|---|
+| 导航 + TLS 握手 ×N 跳 | 网络往返 | ❌ 物理下限 |
+| 人类行为模拟（ready_delay 1000ms + click 250ms + timeline） | ~1.5–2s | ⚠️ 只能换"天生快"的真机 profile 人设 |
+| **PoW 工作量证明**（SHA-256 转满 CF 下发的 `budget_ms`） | 大头，随 CF 负载浮动 | ❌ **转快 = 直接拒签**（真浏览器同样要转） |
+
+**提速的正解在架构层，不在求解器内**（全部已实现）：
+
+| 手段 | 效果 |
+|---|---|
+| `--prewarm` / `--prewarm-file` | 过期前主动续期，热门域请求路径永远 <3ms（11 项单测；目标域须与 persona 匹配，用 `/detect` 批量筛） |
+| 多进程求解池 `run-pool.ps1` | 冷启动风暴吞吐 ×N |
+| `route=auto` 预检测 | 无盾站 0.55s 放行、0 次求解（33 厂商特征） |
+| 403 自愈 | clearance 失效自动重解一次，调用方无感 |
+
+**长跑进程保护（必用）**：`python scripts/run_limited.py --max-mb 2048 -- <command>`
+（Windows Job Object，超限自动杀整个进程树——求解器对个别 CF 变体可能内存失控，实测 2GB 上限正常拦截。）
+
+## ⚠️ 当前已知状态（2026-11-03）
+
+- CF 于当日下发**新版挑战脚本**（computed-property 字符串别名 + 运行时字段名解码）：
+  - 已打穿：反混淆 → 46 字段 payload 构建 → POST 200（此前完全卡死），补丁见
+    `tools/cfsolve-patches/cfsolve-newcf-computed-key-20261103.patch`，
+    源码级分析见 `docs/cfsolve源码侦察-token提取与profile复用-20261103.md`
+  - 剩余卡点：响应程序分析（stage2）对最新形状未收敛——**回落链无感**（自动落 Camoufox），
+    等 CF 变体轮换或上游跟进后复测
+  - counter/token/input 字段名解码算法已逆向并**单测固化**（`field_names` 模块，2 passed），
+    变体窗口后一条命令验证
+
+---
+
 ## 🧭 工具地图（研究期间筛出的可用资源）
 
 | 类别 | 项目 | 定位 |
@@ -435,6 +472,11 @@ CF 的 `chl_page` 三者全中。这就是"离线纯算"走不通的机理说明
 - **纯协议 cfsolve（回放真实浏览器录制的环境快照）**：✅ **可行且已接入生产回落链**——
   同站 A/B 18.43s 最快（快于 Camoufox 19.56s），`--pure-only` 72MB 内存无浏览器进程。
   构建与 profile 录制见 [docs/纯协议-cfsolve.md](docs/纯协议-cfsolve.md)。
+
+**补充关键事实（源码侦察确证）**：cf-chl token 等会话参数**不在 profile 里**——
+`challenge` 每次求解时自己从实时页面提取；profile 只是可长期复用、可跨机分发的"环境壳"。
+绑出口 IP 的是 clearance（每次求解产物），不是 profile。详见
+[docs/cfsolve源码侦察-token提取与profile复用-20261103.md](docs/cfsolve源码侦察-token提取与profile复用-20261103.md)。
 
 详见 [docs/challenges/managed-challenge.md](docs/challenges/managed-challenge.md)。
 </details>

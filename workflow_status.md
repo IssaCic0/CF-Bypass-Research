@@ -302,3 +302,55 @@ Python 314 passed / cov 81.90% / Go -race 绿 / E2E 30/30 / 热更新 11/11 / �
 - T-54 未跑（需真机预算授权）
 - engines.py 57% / pydoll 40% 覆盖率：能力边界（二进制专有），非欠账
 - 本项目无生产环境；"部署"= 本机 compose 滚动（hot_update_drill 11/11 已验）
+
+---
+
+## v5.0.0 封版后追加（2026-11-03 下午-晚，cfsolve 新版 CF 适配专项）
+
+### T-58 cfsolve 上游源码侦察 | DONE
+
+- 结论：cf-chl token/secret/modulus 由 challenge 每次求解**现场提取**（`source.rs` AST + `program.rs`），不进 profile；profile = 可复用环境壳
+- capture-proxy 报 `cf-chl token found 0` 根因 = MITM 重写破坏 AST，仅影响自录
+- 证据：`docs/cfsolve源码侦察-token提取与profile复用-20261103.md`、技能 `.claude/skills/cf-pure-protocol`
+- commit `b466b3a`
+
+### T-59 求解耗时解剖 | DONE
+
+- 结论：18–43s 大头 = CF 下发的 PoW 预算（转快=拒签，真浏览器同耗）；提速靠 prewarm/池/auto（全部已实现）
+- 证据：`docs/纯协议-cfsolve.md` §6；commit `f947b06`
+
+### T-60 新版 CF 适配（computed-key 补丁组）| 部分完成（算法层全通，真机集成待变体窗口）
+
+- ✅ expression.rs：计算属性静态求值回退（`obj[helper.key]`）+ 64 层递归护栏
+- ✅ properties.rs：`is_static_member_key` 放宽（解除内联死锁）
+- ✅ String.prototype.slice 内置（VM 缺失原语）
+- ✅ field_names 模块：blob 静态解码（`slice(2, b0*256+b1)`），**单测固化 2 passed**
+- ✅ envelope.rs 集成 counter 查找回退
+- ✅ 实测：反混淆 → 46 字段 payload 构建 → POST 200 / 1.97MB（此前完全卡死）
+- ⏸ 剩余：stage2 响应程序分析（counter 断言）对 11-03 重变体未收敛；等变体轮换复测
+- 证据：`tools/cfsolve-patches/cfsolve-newcf-computed-key-20261103.patch`、`plans/证据/cfsolve-computed-prop-patch-20261103.json`、commit `448a0fd`/`5ed0e65`(cfsolve-upstream)
+- 排除法存档：内存爆炸非补丁问题（slice 路由开关/field_names 移除/深度护栏/全量重编均不改变，双站复现）—— ICM errors-resolved
+
+### T-61 进程保护工具 run_limited.py | DONE
+
+- Windows Job Object，`--max-mb N` 超限杀进程树；实测 2GB 触发击杀、零残留
+- 证据：commit `e427a0e`；真实 challenge.exe 超限验证
+
+### T-62 真机全链路实测（v5.0.0 + 重建 challenge.exe 50.1MB）| DONE
+
+- /detect：陌生站 2480ms 识别 CF；对照站 1195ms
+- 冷求解 14.15s（回落链 cfsolve 失败→camoufox 接管）；二次 0.002s（缓存）；回放 200/179KB/3.22s
+- 纯协议新版验证矩阵：网络栈/轻路径全绿；全求解待变体
+- 证据：`plans/证据/cfsolve-computed-prop-patch-20261103.json`；ICM 存档
+
+### T-63 prewarm 真机验证 | DONE（机制完备）
+
+- 11 单测全绿；真机 8879 实测线程运转正常（7 runs/1 failure 记账正确）
+- 部署要点：目标域须与 persona 匹配（glassdoor 对 Safari-iOS 不弹挑战 → renewed=0 属预期）
+- 观测：`/stats` 的 prewarm 字段（enabled/targets/runs/renewed/skipped/failures）
+
+### 剩余（如实）
+
+- stage2 对最新 CF 变体未收敛（上游 deobf 管线，非补丁问题——排除法已存档）；回落链无感
+- T-54 双臂 A/B 仍未跑（需真机预算授权）
+- 本项目无生产环境；部署=本机 compose 滚动
