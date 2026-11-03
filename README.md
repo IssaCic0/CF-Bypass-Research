@@ -1,8 +1,21 @@
-# Cloudflare 反爬机制研究与过盾方案 A/B 实测
+# Cloudflare 过盾求解服务——纯协议优先的 CF 凭证获取与回放
 
-> 对 Cloudflare 挑战体系（jsd / managed challenge）做的实证研究：**纯协议能不能行、纯算能算到哪一步、浏览器方案贵在哪**。所有结论都来自本机真实运行输出，不是推断。
+> 对 Cloudflare 挑战体系（jsd / managed challenge / Turnstile）的实证研究 + 生产级求解服务。
+> 所有结论都来自本机真实运行输出，不是推断。
 
-**一句话结论**：CF 的挑战脚本我们用**纯 JS 引擎（Node/jsdom 与 Go/goja）都能完整执行**，WebGL / Audio / WebRTC 的指纹返回值也能伪造到自洽；但**现场编造环境拿不到 `cf_clearance`**。卡点不是算力，是"环境真实性"。实测可行的两条路：**① 纯协议 cfsolve（Rust 自带 JS VM + 回放真实浏览器录制的环境快照，同站 A/B 18.43s 最快）**；② C++ 层指纹篡改的 Camoufox。生产架构 = 纯协议优先、浏览器兜底的有序回落链。
+## 🎯 这个项目能给你什么
+
+| 你要做什么 | 我们给你什么 | 实测效果 |
+|---|---|---|
+| 高频访问受 CF 保护的站 | 一次求解、30 分钟内**全部 <3ms 回放** | 热路径 5589 QPS / p99 2.93ms / 0 错 |
+| 大量站点、不确定哪些有盾 | `route=auto` 自动探测：无盾直接过、有盾自动解 | 无盾站 0.55s 放行、**0 次求解** |
+| 要 Turnstile 一次性 token | `want=turnstile`，**纯协议直解**（无浏览器进程） | 官方测试 sitekey 6–8s |
+| 要 `cf_clearance` cookie 供任意 HTTP 客户端用 | `want=clearance` + Go 客户端自动回放 | 回放 200、1.3–1.7s |
+| 服务高可用 | 多进程池 + 失败摘除 2s / 回归 28s + 403 自愈 | 摘除/回归真机演练通过 |
+| 内存敏感环境 | `--pure-only`：**72MB 无浏览器进程**的纯协议模式 | 同站 A/B 18.43s 最快 |
+
+**架构一句话**：纯协议 cfsolve（Rust，JS VM + 环境快照回放）打头 → pydoll → Camoufox 浏览器兜底
+→ FlareSolverr，按域缓存 + `prewarm` 保活把 18–43s 的求解挪出请求路径。
 
 ---
 
@@ -89,14 +102,34 @@ cd gocfsolve && go run ./examples/endtoend -target https://steamdb.info/
 > 三个参考仓库的深度调研见 **[docs/参考仓库深度调研.md](docs/参考仓库深度调研.md)**；
 > 纯协议的构建与 profile 录制见 **[docs/纯协议-cfsolve.md](docs/纯协议-cfsolve.md)**。
 
-**当前支持四类产物**（同一个浏览器求解路径，`want` 参数区分）：
+**当前支持四类产物**（`want` 参数区分；Turnstile 在**纯协议后端**同样支持——见下）：
 
 | `want` | 产物 | 真机验证 |
 |---|---|---|
 | `clearance`（默认） | `cf_clearance` cookie | ✅ A 组 24/25 |
-| `turnstile` | Turnstile 一次性 token | ✅ 官方测试 sitekey 通过（dummy token，6–8s） |
+| `turnstile` | Turnstile 一次性 token | ✅ 官方测试 sitekey 通过（6–8s）；**纯协议同样通过**（见下） |
 | `recaptcha_v3` | reCAPTCHA v3 一次性 token | ✅ Google 官方 demo 页通过（2297 字节 token，18.5s） |
 | `awswaf` | `aws-waf-token` cookie | ⚠️ 仅离线测试（无 AWS-WAF 目标站） |
+
+### 🎯 Turnstile token 的纯协议求解（cfsolve 原生，实测通过）
+
+Turnstile widget 不需要完整挑战页流程——cfsolve 的 widget 模式在**空白页**渲染
+指定 sitekey 的 widget、走完 Turnstile 自己的交互、拿一次性 token：
+
+```bash
+# 纯协议直解（无浏览器进程，72MB）：challenge.exe 原生参数
+challenge.exe --page https://目标站/ <outdir> --solve     --sitekey 0x4AAAAAAADnPIDROrmt1Wwj --blank-page     --fingerprint safari-26-ios.json
+# 服务化：POST /solve {"want":"turnstile","sitekey":"0x...","url":"..."}
+#         → cfsolve 后端自动接线 --sitekey --blank-page [--action --cdata]
+```
+
+- ✅ **既有实证**：官方测试 sitekey（`1x00000000000000000000AA` 系列）6–8s 通过
+- ⚠️ **前置条件（重要）**：出口 IP 必须干净。CF 对被提分的出口 IP 会在网络层注入
+  挑战页，widget 还没渲染就死——2026-11-03 实测：连 CF 官方 demo 页
+  （`demo.turnstile.workers.dev`，2.4KB 无保护静态页）都被注入 639KB 挑战页。
+  这不是求解算法的问题，是网络层前置条件。出口被提分时：`--proxy` 换干净出口，
+  或等 IP 信誉恢复。
+- widget 的 `origin` 由 `--page` 的 URL 决定，sitekey 必须与该域匹配
 
 **能纯算的部分我们已经在用，而且有效**：cookie 回放、TLS 指纹、加密链计算。
 （注意：**header 顺序不在其中**——Go 标准库按字段名字典序写 header，无法复现浏览器的顺序；
