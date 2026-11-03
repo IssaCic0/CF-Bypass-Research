@@ -1,0 +1,45 @@
+{
+ "task_id": "T-65-pick-prewarm-targets",
+ "status": "complete",
+ "timestamp": "2026-11-03T12:07:34+0800",
+ "files_changed": [
+  "scripts/pick-prewarm-targets.py",
+  "tests/test_pick_prewarm_targets.py"
+ ],
+ "commands_executed": [
+  {
+   "cmd": "python scripts/pick-prewarm-targets.py --input hosts.txt --dry-run",
+   "exit_code": 0,
+   "result": "5 域解析正确, 未发请求"
+  },
+  {
+   "cmd": "python -m pytest tests/test_pick_prewarm_targets.py -q",
+   "exit_code": 0,
+   "result": "14 passed"
+  },
+  {
+   "cmd": "python -m pytest tests/ -q",
+   "exit_code": 0,
+   "result": "328 passed（全量无回归）"
+  },
+  {
+   "cmd": "live E2E: 服务 8881 + 4 域清单",
+   "exit_code": 0,
+   "result": "入选 2 (glassdoor/steamdb browser) / 排除 2 (nowsecure=Turnstile token, example=无防护), 名单文件与 json 落盘"
+  }
+ ],
+ "review_fixes": [
+  "P2: recommendation 缺失时的误导性 reason → 专门提示",
+  "P2: token 文件不存在 → 友好错误提示",
+  "P2: 入选 0 个 → exit 1（CI 可感知）"
+ ],
+ "verification": {
+  "real_calls": "/detect 真实调用 4 域, 服务端守卫/缓存复用",
+  "e2e": "dry-run + live 两种模式",
+  "unit": "14 例（分类矩阵/hostname 校验/去重/错误分支 mock）",
+  "ui": "N/A（CLI 工具，以结构化输出代替截图验收）"
+ },
+ "limitations": [
+  "对 persona 不弹挑战的域（glassdoor+Safari-iOS）会被入选为 browser 路线——该判断依赖求解实测，detect 层看不到"
+ ]
+}

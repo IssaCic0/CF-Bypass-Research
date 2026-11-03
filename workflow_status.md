@@ -354,3 +354,21 @@ Python 314 passed / cov 81.90% / Go -race 绿 / E2E 30/30 / 热更新 11/11 / �
 - stage2 对最新 CF 变体未收敛（上游 deobf 管线，非补丁问题——排除法已存档）；回落链无感
 - T-54 双臂 A/B 仍未跑（需真机预算授权）
 - 本项目无生产环境；部署=本机 compose 滚动
+
+---
+
+## v5.0.1 专项（2026-11-03 晚，prewarm 选目标自动化）
+
+### T-65 pick-prewarm-targets.py | Doing
+
+需求细拆（用户原话逐句）：
+1. "批量 /detect" → 输入域名清单，逐个调服务端 /detect（复用服务端缓存与守卫）
+2. "自动筛弹挑战且轻路径可解的域" → 依据 recommend() 的 route 字段分类：
+   - pure_protocol_may_work（jsd）→ 入选
+   - direct / direct_unless_blocked → 不入选（无盾或 CF 在场但无挑战标记，prewarm 无意义）
+   - browser*（managed/interactive/embedded/turnstile）→ 入选（有挑战可解）
+   - unsupported_or_browser（DataDome 等）→ 不入选，明确告知"这不是 CF 或不支持"
+3. "遇到不是 CF 人机挑战的就告诉用户" → 输出报告必须含排除原因明细
+4. "避免浪费白烧超时时间" → --timeout 每站探测超时（默认 15s），超时即跳过标记；--dry-run 只打印计划
+5. 输出 = prewarm 名单文件（--prewarm-file 直接可吃格式）+ 人类可读报告（含排除原因）
+6. 验收：单测（分类逻辑/超时/排除原因）+ 真实 /detect 集成 + dry-run E2E + 代码复审
