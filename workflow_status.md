@@ -1006,3 +1006,53 @@ pipe 给独立 `claude -p` 进程，明确"只输出审查结论、不改文件�
 2. 补丁里 `re` 没导入 → 模块直接起不来（`compileall` 抓不到，因为语法合法）。教训：**加模块级助手要同时验证 import 可用**。
 3. `_patch_findings.py` 里中文文本嵌了 ASCII 双引号 → 语法错 → 改用「」。
 4. `test_oversized_body_larger_than_drain...` 第一版**头一到就跳出读取循环**，根本没读 body，把"实现没问题"误报成"响应被挤掉"。
+
+---
+
+## 发版 v5.0.1（2026-11-04，用户授权）
+
+### 授权（已写进 policy.md §2/§5 与 ICM）
+
+用户 2026-11-04 明确授权：**可以发版**、**可以动用真机预算做真实 E2E 验证**。
+规范里同时写明：授权"可以花"不等于"可以乱花" —— 每批照样先报计划、失败≥5 即停、同站串行≥30s、不重试。
+
+### 真机 E2E（R-E2E-1，用 4 次预算，失败 1/5）
+
+| 项 | 结果 |
+|---|---|
+| `/detect` × 3 | **全对**：example.com→无防护(direct)；canva.com→**AWS WAF**(browser_cookie)；udemy.com→**Cloudflare managed**(browser) |
+| `route=auto` example.com | **0.00s / 0 次求解**，`no_challenge=true`（省掉一次 16–20s 浏览器） |
+| `route=auto` g2.com | DataDome → **直接 `unsupported-provider` 拒绝**（不白等 45s） |
+| 真实求解 udemy.com | **成功：18.32s / 462 字节 `cf_clearance`**；跨进程缓存命中 `cached=true`（0.00s、cookies=2） |
+| 回放 udemy（Python 单 cookie） | `status=200` 但 **挑战页**（`challenge=true`） |
+| 回放 udemy（Go 客户端，2 cookie + 同 UA） | `status=200` 但 **挑战页** → `examples/endtoend` 判 `❌ 端到端未通过` |
+| 对照 glassdoor.co.uk | 求解**超时未完成**（Go `context deadline exceeded`），按纪律**不重试** |
+
+**结论（必须如实）**：`solve 成功` ≠ `回放可用`。本版**不声称"真机端到端通过"**。
+udemy 是 managed 挑战，光靠 `cf_clearance` 很可能不够（**推断，未验证**）。已固化 `findings` **F-051**。
+证据：`evidence/real-e2e-20261104.json`。
+
+### 发版执行记录
+
+| 步 | 结果 |
+|---|---|
+| 五处版本号同步 | `CHANGELOG.md`（新增 5.0.1 段）/ `Dockerfile` / `docker-compose.yml` / `docs/facts.json` / `docs/openapi.json` 全部 → `5.0.1` |
+| 发版前门禁 | pytest **532 passed** · 覆盖率 **86.42%** · **20 模块**逐模块达标 · openapi **12 操作**一致 · 文档 9 处一致 · findings **51 条** · compileall/go vet/go test 全绿 |
+| commit | `d9d0b96`（40 个文件）· **路径白名单提交**：并发会话在 `plans/` 下的已暂存 rename **未被卷入**（提交后复核：`git show --name-only` 里零 `plans/`） |
+| tag | `v5.0.1`（annotated）→ `git describe` = `v5.0.1` |
+| push | `master f3d455d..d9d0b96` + `[new tag] v5.0.1` |
+| GitHub Release | https://github.com/lza6/CF-Bypass-Research/releases/tag/v5.0.1 |
+| CI | run `41747428407`（见下） |
+
+### 发版过程中发现的**我自己的脚本缺陷**（已修）
+
+`validate-docs.mjs --write` 会拿 `git describe` 的结果**覆盖** `facts.json` 的 `version`。
+发版时踩到：刚把五处改成 5.0.1、跑一次 `--write` 更新测试数 → **version 被悄悄改回 5.0.0**。
+修法：`version` 是**人为的发版决定，不是测量值** —— `--write` 不再覆盖它（只提示），
+并且 WRITE 模式下校验用的 effective 也不再用 `{...facts, ...measured}` 的 spread 覆盖 version。
+同时把 `docs/facts.json` 的 `_note` 改成："测试数/覆盖率/条数由 `--write` 测量；**version 手动改**"。
+
+### 偏差声明
+
+policy.md §5 要求"一个任务卡 = 一个可独立回滚的 commit"。本轮为了发版合并成**一个 release commit**
+（逐项清单在 CHANGELOG 的 5.0.1 段，可按该清单回滚）。**这是已知偏差**，不是疏忽。

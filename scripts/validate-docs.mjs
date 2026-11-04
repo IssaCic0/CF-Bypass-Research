@@ -63,9 +63,22 @@ const RULES = [
 /** version 是字符串（"5.0.0" 转 Number 会变 NaN），其余键是数字。 */
 const STRING_KEYS = new Set(["version"]);
 
+/**
+ * 允许的测量容差。
+ *
+ * 为什么覆盖率需要容差：**覆盖率是平台相关的**。同一个提交在 Windows 与 Linux 上实测不同
+ * （`Server.allow_reuse_address = os.name != "nt"`、socket 错误类型、路径处理等分支只在一侧走到），
+ * 2026-11-04 实测 Windows 86.x% / Linux 87.x%，四舍五入后就是 86 vs 87。
+ * 拿它当跨平台硬等值门禁 → CI 必红，而且红得没有信息量。
+ * 真正的覆盖率门禁在 `check-coverage.mjs`（逐模块下限 + 已留 floor 容差），这里只管"文档别写飞"。
+ */
+const TOLERANCE = { python_coverage_percent: 2 };
+
 function same(key, a, b) {
   if (a === undefined || b === undefined) return false;
-  return STRING_KEYS.has(key) ? String(a) === String(b) : Number(a) === Number(b);
+  if (STRING_KEYS.has(key)) return String(a) === String(b);
+  const tol = TOLERANCE[key] ?? 0;
+  return Math.abs(Number(a) - Number(b)) <= tol;
 }
 
 const problems = [];
@@ -189,7 +202,9 @@ function checkDocs(facts) {
       continue;
     }
     if (!same(rule.key, actual, expected)) {
-      problem(rule.file, `${rule.key} 写成 ${actual}，事实源是 ${expected}`);
+      const tol = TOLERANCE[rule.key] ?? 0;
+      const hint = tol ? `（容差 ±${tol}）` : "";
+      problem(rule.file, `${rule.key} 写成 ${actual}，事实源是 ${expected}${hint}`);
     }
   }
   return checked;
