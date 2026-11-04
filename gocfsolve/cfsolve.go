@@ -735,6 +735,16 @@ func replayable(req *http.Request) bool {
 	return req.GetBody != nil
 }
 
+// LooksBlocked 是 looksBlocked 的**导出版本**，给 examples/ 与外部集成方复用同一判据。
+//
+// 为什么要导出：2026-11-04 真机实测里，`examples/endtoend` 自己复制了一份
+// "在整个 body 里 strings.Contains("Just a moment")" 的判断，而 udemy 的**真实页面**
+// （306KB）里正好含这个字符串（站点自己的 JS 文案）—— 于是把**回放成功**判成了**挑战页**。
+// 判据只能有一份，且只能看前缀。
+func LooksBlocked(resp *http.Response) bool {
+	return looksBlocked(resp)
+}
+
 // looksBlocked 判断响应是不是"被 CF 拦了"。
 //
 // 判据优先级：`cf-mitigated` 头 > 403 > 200 正文里的挑战页特征。

@@ -2,6 +2,40 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [5.0.2] - 2026-11-04
+
+主题：**更正真机结论 + 收敛挑战页判据**（无产品行为变更，只修验证工具与文档）。
+
+### 修复
+
+- **`F-052`（high）挑战页判据误报**：`scripts/verify_real.py` 与 `gocfsolve/examples/endtoend/main.go`
+  都在**整个 body** 里找 `Just a moment` 来判断挑战页，而 udemy 的真实页面（306KB）里就含这个串
+  （站点自己的 JS 文案）→ 把**回放成功**判成**挑战页**。
+  - Go 侧：导出 `gocfsolve.LooksBlocked()`（复用生产客户端 `looksBlocked` 的正确判据：
+    只看前 2048 字节、只在 200+html 时读正文、`cf-mitigated` 头与 403 优先），
+    `examples/endtoend` 改为调用它，不再自己造子串判断。新增 `gocfsolve/blocked_test.go`（5 条用例）。
+  - Python 侧：新增 `verify_real.is_challenge(status, headers, body)`（前缀 + 头/状态优先，
+    与 Go 的 `challengeMarkers` 同口径）。新增 `tests/test_verify_real_predicate.py`（10 条用例）。
+  - 危害说明：验证工具说谎会直接产出错误结论（本次即 `F-051`）；Go 的回放自愈若用粗判据，
+    会对正常页面反复重解，白烧真机预算。
+
+### 文档更正
+
+- **撤回 `F-051`**（"udemy 回放未通过"）：对照实测证明回放**是成功的**（带 cookie 200/306,752B/真实标题
+  vs 不带 cookie 403/5,777B/`Just a moment...`）。结论以本条为准。
+- v5.0.1 的 `CHANGELOG` 与 Release notes 中相应表述已标注更正。
+
+### 真机验证（本批用 6 次目标请求，累计失败 1/5）
+
+- 用同一套 fresh cookie 做**带/不带**对照（各 1 次），确认判据误报；再取前 2048 字节验证
+  `just a moment` / `cf-mitigated` / `challenge-platform` / `challenges.cloudflare.com` **全部 0 命中**。
+- 重跑 `examples/endtoend`：修复后不再误报（同一 udemy clearance 命中缓存 0.00s）。
+
+### 验证
+
+- Python **542 项**全绿（+10 条判据用例）；`solver/` 覆盖率不变；20 模块逐模块门禁全达标。
+- Go **46 项**全绿（41 + 5 新增），`go vet` 无输出。
+
 ## [5.0.1] - 2026-11-04
 
 主题：**可观测性闭环 + 生态接入 + 门禁补强**（含一次独立复审与其修复；无破坏性变更）。
@@ -81,9 +115,11 @@
   - `route=auto` **2 站符合预期**：example.com 无盾 → `no_challenge=true`、**0.00s / 0 次求解**；
     g2.com(DataDome) → 直接 `unsupported-provider` 拒绝（不白等 45s）；
   - 真实求解 **1/1 成功**：udemy.com 18.32s 拿到 462 字节 `cf_clearance`，跨进程缓存命中 `cached=true`；
-  - **但回放未通过**：Python（单 cookie）与 Go 客户端（完整 2 cookie + 同 UA）回放 udemy 均返回
-    `status=200` 但**挑战页**（`Just a moment`）；glassdoor.co.uk 对照求解超时未完成，按纪律不重试。
-  - **结论：本版不声称「真机端到端通过」**。'solve 成功' ≠ '回放可用'，见 `findings` 的 `F-051`。
+  - ~~**但回放未通过**~~ —— **该结论已撤回（见 5.0.2）**：当时用"整段 body 找 `Just a moment`"判挑战页，
+    而 udemy 真实页面里就含这个串，属**判据误报**。对照实测：带 cookie `200`/306,752B/真实标题，
+    不带 cookie `403`/5,777B/`Just a moment...` ⇒ **回放其实成功**。详见 `F-051`(rejected) 与 `F-052`。
+  - glassdoor.co.uk 对照求解超时未完成，按纪律不重试。
+  - **本版对真机结论的表述以 5.0.2 为准。**
 
 ## [5.0.0] - 2026-11-03
 

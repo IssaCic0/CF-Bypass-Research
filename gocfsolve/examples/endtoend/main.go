@@ -88,12 +88,13 @@ func main() {
 		fmt.Printf("❌ 回放失败：%v\n", err)
 		os.Exit(1)
 	}
+	// 判据**复用库里那一份**（LooksBlocked：只看前缀 + cf-mitigated 头 + 403）。
+	// 不要在这里自己写 strings.Contains(body, "Just a moment")：udemy 的真实页面里
+	// 就含这个字符串，会把成功判成挑战页（2026-11-04 真机实测踩过）。
+	challenge := cfsolve.LooksBlocked(resp)
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 400000))
 	resp.Body.Close()
 
-	challenge := strings.Contains(string(body), "Just a moment") ||
-		strings.Contains(string(body), "请稍候") ||
-		strings.Contains(string(body), "cf-mitigated")
 	fmt.Printf("📄 回放结果：status=%d 长度=%d 挑战页=%v 耗时=%.2fs\n",
 		resp.StatusCode, len(body), challenge, time.Since(t1).Seconds())
 

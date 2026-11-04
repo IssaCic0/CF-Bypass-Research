@@ -280,7 +280,7 @@ scripts/
   probe_browser.py      # Playwright headless / headed 过盾对照实验
   probe_camoufox.py     # Camoufox 过盾实验
   diag_challenge.py     # 挑战页 DOM 诊断：iframe / checkbox / 按钮 / 截图
-tests/                  # 532 项 Python 测试（注入假浏览器/假后端，离线）
+tests/                  # 542 项 Python 测试（注入假浏览器/假后端，离线）
 docs/
   项目规格.md            # ★ 单一事实源：是什么/边界/承诺什么/不承诺什么
   API.md                # ★ 接口契约（参数/响应/错误码表）

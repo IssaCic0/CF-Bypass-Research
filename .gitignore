@@ -7,6 +7,10 @@ __pycache__/
 # 抓取的 CF 混淆脚本样本（体积大且随请求变化，不入库）
 # scripts/capture_sample.py 的默认输出目录（manifest.json 含目标站信息，也不入库）
 /samples/
+# 真机取证产物（含真实 cf_clearance / __cf_bm 值，绝不入库）
+_cookie_dump.json
+*_cookie_dump.json
+
 main_*.js
 orchestrate_chl_page.js
 challenge_page.html

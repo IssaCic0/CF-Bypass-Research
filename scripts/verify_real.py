@@ -93,6 +93,41 @@ def post_json(url: str, payload: dict, token: str, timeout: float = 200.0):
         return 0, {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
+#: 判断"是否被 CF 挑战"时最多看正文多少字节。
+#:
+#: **必须在开头看，不能在整个 body 里找子串**：2026-11-04 真机实测踩过 ——
+#: udemy 的**真实页面**（306KB）里含 "Just a moment"（站点自己的 JS 文案），
+#: 于是"整段 body 找子串"的判据把**回放成功**判成了挑战页，进而得出"回放未通过"的
+#: 错误结论（还写进了 CHANGELOG/Release notes）。挑战页的特征一定出现在开头。
+CHALLENGE_PEEK_BYTES = 2048
+#: 与 Go 侧 `gocfsolve.challengeMarkers` 保持同一份口径。
+CHALLENGE_MARKERS = (b"just a moment", b"checking your browser", b"_cf_chl_opt",
+                     b"/cdn-cgi/challenge-platform/", b"challenges.cloudflare.com")
+
+
+def is_challenge(status: int, headers, body: bytes) -> bool:
+    """判定响应是不是 CF 挑战页。判据优先级：`cf-mitigated` 头 > 403 > 200 正文前缀特征。
+
+    `headers` 可以是 dict 或 `email.message.Message`（urllib 的 r.headers），
+    统一按小写键取值。
+    """
+    try:
+        got = {str(k).lower(): str(v) for k, v in dict(headers or {}).items()}
+    except Exception:  # noqa: BLE001
+        got = {}
+    if got.get("cf-mitigated", "").strip():
+        return True
+    if status == 403:
+        return True
+    if status != 200:
+        return False
+    ctype = got.get("content-type", "").lower()
+    if ctype and "html" not in ctype:
+        return False
+    prefix = (body or b"")[:CHALLENGE_PEEK_BYTES].lower()
+    return any(m in prefix for m in CHALLENGE_MARKERS)
+
+
 def replay(target: str, ua: str, cookie: str, timeout: float = 40.0) -> dict:
     req = urllib.request.Request(target)
     req.add_header("User-Agent", ua)
@@ -106,7 +141,7 @@ def replay(target: str, ua: str, cookie: str, timeout: float = 40.0) -> dict:
             return {
                 "status": r.status,
                 "len": len(body),
-                "challenge": b"Just a moment" in body or b"cf-mitigated" in body,
+                "challenge": is_challenge(r.status, r.headers, body),
                 "elapsed": round(time.time() - t0, 2),
             }
     except urllib.error.HTTPError as e:
@@ -114,7 +149,7 @@ def replay(target: str, ua: str, cookie: str, timeout: float = 40.0) -> dict:
         return {
             "status": e.code,
             "len": len(body),
-            "challenge": b"Just a moment" in body or b"cf-mitigated" in body,
+            "challenge": is_challenge(e.code, e.headers, body),
             "elapsed": round(time.time() - t0, 2),
         }
     except Exception as e:  # noqa: BLE001

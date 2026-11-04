@@ -432,12 +432,16 @@ def test_retained_ready_tasks_are_capped(monkeypatch):
 
 
 def test_purge_does_not_remove_processing_task():
-    """还在跑的任务不能被过期清理删掉（否则客户端从 processing 直接跳到 TASK_ID_INVALID）。"""
-    reg = TaskRegistry(FakeSolver(delay=0.3), ttl=0.01, max_pending=4)
+    """还在跑的任务不能被过期清理删掉（否则客户端从 processing 直接跳到 TASK_ID_INVALID）。
+
+    时序要留余量：TTL 必须**明显大于**轮询间隔，否则"刚完成就被清"会和轮询撞车，
+    测试自己变得随机（我第一版用 ttl=0.01 就踩了这个坑）。
+    """
+    reg = TaskRegistry(FakeSolver(delay=0.5), ttl=0.3, max_pending=4)
     rec = reg.create(make_task())
-    time.sleep(0.05)                 # 超过 ttl，但任务仍在跑
+    time.sleep(0.4)                  # 已超过 ttl，但任务仍在跑（delay=0.5）
     assert reg.result(rec.task_id).status == "processing"
-    wait_task(reg, rec.task_id)
+    wait_task(reg, rec.task_id, timeout=5.0)
 
 
 def test_sitekey_length_is_capped_like_solve():

@@ -875,21 +875,44 @@
     },
     {
       "id": "F-051",
-      "verdict": "confirmed",
-      "severity": "high",
-      "claim": "2026-11-04 真机 E2E 实测：**求解能力在真实站点可用，但回放没有通过**。①`https://www.udemy.com/`（detect 判为 Cloudflare managed）：`POST /solve` 成功，18.32s 拿到 462 字节 `cf_clearance`；随后同一 clearance 跨进程命中缓存（`cached=true`，0.00s，cookies=2）—— 说明求解与缓存链路在真站是通的。②但**回放拿到的是挑战页**：Python 回放（只带 cf_clearance 单条 cookie）与 Go 客户端回放（带完整 2 条 cookie + 同 UA）都是 `status=200` 但 `挑战页=true`（body 含 `Just a moment` / `cf-mitigated`），`examples/endtoend` 判定 `❌ 端到端未通过`。③对照组 `https://www.glassdoor.co.uk/` 求解**超时未完成**（Go 客户端 `context deadline exceeded`），按实验纪律不重试，本批到此为止（累计失败 1/5）。**必须如实记录的是**：'solve 成功' 不等于 '回放可用'。udemy 是 managed 挑战，仅靠 `cf_clearance` 很可能不足以回放（推断：还需要浏览器会话里拿到的其它 cookie / sensor 状态）—— 这一条属**推断，未验证**。因此 5.0.1 的发布说明**不得**声称『真机端到端通过』。",
+      "verdict": "rejected",
+      "claim": "**【已撤回】曾判定「udemy 回放未通过（拿到挑战页）」—— 被 2026-11-04 的对照实测推翻。**当时的依据是回放响应里含 `Just a moment` 子串。实际用同一套 cookie 做对照后：带 cookie = `200` / **306,752 字节** / 标题 `Udemy: Online Courses for Skills, Careers & AI`；不带 cookie = `403` / **5,777 字节** / 标题 `Just a moment...` / 含 `_cf_chl_opt`。**⇒ 回放其实是成功的**；`Just a moment` 出现在 udemy 真实页面深处的 JS 文案里，是判据误报（见 F-052）。撤回原因写在这里而不是删记录：这条错误结论曾被我写进 v5.0.1 的 CHANGELOG 与 Release notes，留痕比擦掉更有用。",
       "evidence": [
         {
           "path": "evidence/real-e2e-20261104.json",
-          "locator": "rows[0]: udemy solve ok=true elapsed=18.32 replay{status:200, challenge:true} replay_ok=false"
+          "locator": "错误结论的原始证据（判据误报导致）"
         },
         {
-          "path": "workflow_status.md",
-          "locator": "真机 E2E 记录（2026-11-04）"
+          "path": "docs/findings.json",
+          "locator": "本文件 F-052：误报的根因与修复"
+        }
+      ]
+    },
+    {
+      "id": "F-052",
+      "verdict": "confirmed",
+      "severity": "high",
+      "claim": "**挑战页判据误报**：`scripts/verify_real.py` 与 `gocfsolve/examples/endtoend/main.go` 都用『在**整个 body** 里找子串 `Just a moment`』来判断『是不是 CF 挑战页』。而 udemy 的**真实页面**（306KB）里就含这个字符串（站点自己的 JS 文案），于是把**回放成功**判成**挑战页** —— 这直接导致 F-051 那条错误结论，并写进了 v5.0.1 的 CHANGELOG 与 Release notes。生产客户端 `gocfsolve/cfsolve.go` 的 `looksBlocked` **本来就是对的**（只看前 2048 字节、只在 200+html 时读正文、`cf-mitigated` 头与 403 优先）——错的是两个**验证工具**自己复制了一份粗判据。危害：①验证工具说谎 → 结论错；②Go 的 revalidate 自愈若用粗判据会对正常页面反复重解（烧预算）。修法：把判据收敛成一份 —— Go 侧导出 `gocfsolve.LooksBlocked()` 并让 `examples/endtoend` 复用它；Python 侧新增 `verify_real.is_challenge(status, headers, body)`（前缀 + 头/状态优先，与 Go 的 `challengeMarkers` 同口径）。两边都补了『marker 在深处不算挑战』的回归用例。",
+      "evidence": [
+        {
+          "path": "gocfsolve/cfsolve.go",
+          "locator": "导出 LooksBlocked（复用 lookBlocked 的判据）"
         },
         {
-          "path": "policy.md",
-          "locator": "§2 预算台账（本批用 4 次）"
+          "path": "gocfsolve/examples/endtoend/main.go",
+          "locator": "改用 cfsolve.LooksBlocked(resp)"
+        },
+        {
+          "path": "gocfsolve/blocked_test.go",
+          "locator": "5 条判据用例（深处 marker 不误判 + body 必须还原）"
+        },
+        {
+          "path": "scripts/verify_real.py",
+          "locator": "is_challenge() + CHALLENGE_PEEK_BYTES/CHALLENGE_MARKERS"
+        },
+        {
+          "path": "tests/test_verify_real_predicate.py",
+          "locator": "10 条判据用例"
         }
       ]
     }
