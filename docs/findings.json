@@ -915,6 +915,42 @@
           "locator": "10 条判据用例"
         }
       ]
+    },
+    {
+      "id": "F-053",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "claim": "2026-11-04 真机端到端（glassdoor.co.uk，R-E2E-3）：**求解与回放双成功**。`POST /solve` 16.5s 取得 `cf_clearance` + **12 条 cookie**（含 `cf_clearance`/`__cf_bm`/站点的 `gdId`/`rl_session` 等）；30s 后用**完整 cookie + 同 UA + 真实 Firefox 头**回放：`200` / **735,957 字节** / 标题 `Glassdoor | Job Search and Career Community` / 前 2048 字节 **0 个挑战 marker**。结合 R-E2E-2（udemy 端到端成功）—— 两个不同站点、两种 challenge 形态（managed），『求解 → 缓存 → 回放真实内容』这条主链路在真实站点上**成立**。注意 12 条 cookie 里大量是**站点自己的**业务 cookie（glassdoor 的），它们与过盾无关但会一起返回 —— 上游集成方如果只取 `cf_clearance` 也仍能过（udemy 实测），但带上全量 cookie 更接近真实浏览器。",
+      "evidence": [
+        {
+          "path": "workflow_status.md",
+          "locator": "R-E2E-3（glassdoor 端到端成功）—— solve 16.5s/12 cookie；replay 200/735,957B"
+        },
+        {
+          "path": "policy.md",
+          "locator": "§2 R-E2E-3 台账（2 次全部成功）"
+        }
+      ]
+    },
+    {
+      "id": "F-054",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "claim": "**工具契约：『是不是挑战页』的判定必须复用生产客户端的同一份实现，禁止在验证工具里另写子串匹配。**F-052 的教训泛化：任何新写『判挑战』的地方（脚本/示例/测试）都是下一个误报源。Go 侧已导出 `gocfsolve.LooksBlocked`；Python 侧 `verify_real.is_challenge` 与 Go 的 `challengeMarkers` 同口径。判据变化时两处必须同步改。另：验证脚本里的 cookie/凭证**只允许存在内存** —— R-E2E-2 里 `_cookie_dump.json` 落盘差点被 `git add -A` 带进仓库（幸好推送前拦下，见 workflow_status 的 v5.0.2 节）。",
+      "evidence": [
+        {
+          "path": "gocfsolve/blocked_test.go",
+          "locator": "判据用例（marker 深处不误判 + body 还原）"
+        },
+        {
+          "path": "tests/test_verify_real_predicate.py",
+          "locator": "10 条 Python 判据用例"
+        },
+        {
+          "path": ".gitignore",
+          "locator": "_cookie_dump.json / *_cookie_dump.json"
+        }
+      ]
     }
   ]
 }

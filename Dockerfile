@@ -1,7 +1,7 @@
 # 求解服务镜像（v4.0 T-41）
 #
 # ✅ 状态：**已在本机实测**（v4.7，Docker 29.9.2 / linux-amd64）。
-#    构建：`docker build --build-arg SLIM_FONTS=1 -t cf-bypass-solver:5.0.2 .` → 3.52 GB
+#    构建：`docker build --build-arg SLIM_FONTS=1 -t cf-bypass-solver:5.0.3 .` → 3.52 GB
 #    运行：容器 **5–6s** 就绪（/health → state=ready）；`/detect` / `/solve` / `/metrics`
 #          / `/shutdown`（202 + exit 0）六项全部实测通过。见 `evidence/v47-container.md`。
 #    唯一需要重新确认的点：**换 camoufox 版本时** Debian 依赖包名可能变（base 是 python:3.12-slim，

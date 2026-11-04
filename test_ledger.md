@@ -11,7 +11,7 @@
 | Python 覆盖率 | **86%**（`solver/service.py` 83%；逐模块门禁见 `docs/coverage-policy.json`） | `... --cov=solver --cov-fail-under=80` + `node scripts/check-coverage.mjs` | 门槛通过 |
 | Go 用例 | **46 个 Test** | `cd gocfsolve && go test -count=1 -race ./...` | 全部 PASS |
 | Go 静态检查 | — | `cd gocfsolve && go vet ./...` | 无输出 |
-| 结论库校验 | **40 条** | `node scripts/validate-findings.mjs` | exit 0 |
+| 结论库校验 | **54 条** | `node scripts/validate-findings.mjs` | exit 0 |
 | E2E 冒烟 | 3 个断言 | `.\run.ps1 smoke` | ✅ |
 | **E2E 真进程** | **29 项断言** | `.\run.ps1 e2e`（= `python scripts/e2e_local.py`） | **29/29**，落盘 `evidence/e2e-local.json` |
 | **热更新/滚动重启演练** | **17 项断言** | `python scripts/hot_update_drill.py` | **17/17**，落盘 `evidence/hot-update.json` |
