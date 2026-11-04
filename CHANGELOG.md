@@ -57,12 +57,25 @@ CF 改版后，"哪条结构假设破了"过去只能靠真机跑一遍看报错
   （A/B pass、C fail）、缺口扫描器有真输入、归档/脱敏/校验对真数据成立。
 - 教训：**真机必须走 `research.py run` 护栏**（本轮第一次没走，直接吃满 24.6 GB）。
 
+### Rust 侧（T-71/T-72）—— 已落地并实测
+
+- **T-71** 计算属性别名规则数据驱动化：`src/alias_rules.json` + `include_str!` 嵌入，
+  `CFSOLVE_ALIAS_RULES=off` 逐字恢复 11-03 的手写判定。上游独立 commit `aeacaa5`；
+  `cargo test --lib alias_rules` **8 passed**（含 `switch_restores_the_hard_coded_check` 与
+  反向用例 `reverse_cases_keep_calls_dynamic`：`obj[getKey()]` 必须判动态）。
+- **T-72** `envelope.rs` 把「找 counter 字段」拆成「候选集生成 → 逐个校验」，错误里带候选/行号，
+  **原错误串保留为 `detail`**；`assertions_do_not_mask_each_other` 保证 6 类分析不互相掩盖。
+  上游独立 commit `640516a`，关键用例全绿。
+- 补丁同步落 `tools/cfsolve-patches/cfsolve-alias-rules-20261104.patch` 与
+  `cfsolve-stage2-counter-diag-20261104.patch`，`PATCHES.json` 逐条登记 `assertion_ids`。
+- 上游 `cargo test --lib`：**245 passed / 1 failed**；失败项
+  `capture::upstream::tests::socks5_chains_the_tunnel` 经核实为 **pre-existing 环境失败**
+  （`src/capture/` 在 `b5a9eb3..HEAD` 零改动、稳定失败 3/3），**与 T-71/T-72 无关**。
+
 ### 未完成（如实，不许读成已闭环）
 
-- **T-71/T-72 的 Rust 侧**（`properties.rs`/`expression.rs` 数据驱动化、`CFSOLVE_ALIAS_RULES=off`
-  开关、`envelope.rs` counter 候选集报告）**未落地** → 别名规则目前只有 Python 侧清单生成，
-  `test_alias_rule_set_matches_rust_side` 未写。
-- 本版**不承诺** stage2 对最新变体收敛（K-1 不变）；只交付「收敛过程可视化」。
+- 本版**不承诺** stage2 对最新变体收敛（K-1 不变）；只交付「收敛过程可视化」——
+  counter 失败时给候选/位置/形态，但"让它在新变体上通过"仍需上游跟进 + 真机验证。
 
 ### 独立复审（`claude -p` 独立进程，只喂 diff 不喂结论）
 

@@ -1157,7 +1157,7 @@ R-E2E-1 4 次 → R-E2E-2 6 次 → R-E2E-3 2 次 = 本轮共 **12 次**；累�
 | 编号 | 决策点 | 用户结论 | 落地情况 |
 |---|---|---|---|
 | **E-2'** | 真机预算 | 在 E-2（0 次）基础上**追加 R-1 最小真机包：抓 3 份真实会话快照** | 已用 1 次（见下），剩 2 次 |
-| **RUST-1** | T-71/T-72 的 Rust 侧改动 | **接 Rust，但独立 commit + `CFSOLVE_ALIAS_RULES=off` 开关** | 独立代理施工中，未完成前 T-71/T-72 记 PARTIAL |
+| **RUST-1** | T-71/T-72 的 Rust 侧改动 | **接 Rust，但独立 commit + `CFSOLVE_ALIAS_RULES=off` 开关** | **已落地并验证**：上游 `aeacaa5`（T-71）/`640516a`（T-72），独立 commit；`cargo test --lib alias_rules` 8 passed、stage2 关键用例全绿 |
 
 ### 任务卡状态（只有观察到交付物+证据才记 DONE）
 
@@ -1168,8 +1168,8 @@ R-E2E-1 4 次 → R-E2E-2 6 次 → R-E2E-3 2 次 = 本轮共 **12 次**；累�
 | **T-68** 结构断言矩阵 | **DONE** | `tests/test_research_assertions.py` + `assertions_matrix()` | 真样本上 **pass=2 fail=1 skip=6**（stage2 层因样本未到 stage2 而 skip，带 reason） |
 | **T-69** 仓库卫生 | **DONE** | `scripts/check_repo_hygiene.py`；7 个运行产物 `git rm --cached` | `[OK] 仓库干净：194 个跟踪文件中无运行产物`；`git ls-files` 零命中 |
 | **T-70** VM 原语缺口 | **DONE** | `tools/cfsolve-patches/analyze/primitive_gap.py`（317 行） | 真样本：**783 调用点 / 105 缺口 / 35 已实现**（ArrayBuffer·Map·Set·Symbol·Uint8Array·Worker…） |
-| **T-71** 别名规则 | **PARTIAL** | Python 侧 `analyze/alias_shapes.py`（616 行）DONE；Rust 侧数据驱动化施工中 | 12 passed（含 `obj[helper.key]` 判静态 / `obj[getKey()]` 判动态）；Rust 侧未接 → `test_alias_rule_set_matches_rust_side` 未写 |
-| **T-72** counter 断言收敛 | **PARTIAL** | 差分可视化 DONE；`envelope.rs` 候选集报告施工中 | 差分真跑报出 **`counter: pass → fail`** 并映射到补丁 `newcf-computed-key-20261103` |
+| **T-71** 别名规则 | **DONE** | Rust 侧数据驱动化 + `CFSOLVE_ALIAS_RULES=off` 开关 + Python 侧 `analyze/alias_shapes.py` | 上游 commit `aeacaa5`；`cargo test --lib alias_rules` **8 passed**（含 `switch_restores_the_hard_coded_check` 与 `reverse_cases_keep_calls_dynamic` 反向用例）；补丁 `cfsolve-alias-rules-20261104.patch` |
+| **T-72** counter 断言收敛 | **DONE（可视化部分）** | `envelope.rs` 拆成「候选集 → 逐个校验」+ 结构化错误（保留原错误串为 detail） | 上游 commit `640516a`；`counter_candidates_are_reported_on_failure` / `assertions_do_not_mask_each_other` / `counter_field_keeps_the_first_named_write` 全绿；补丁 `cfsolve-stage2-counter-diag-20261104.patch` |
 | **T-73** 反混淆预算护栏 | **DONE** | `research.py run --max-mb/--max-sec` + `infer_stage()` | 阶段推断表驱动 5 态用例；本轮真机正是靠它定位"内存爆炸卡在哪" |
 | **T-74** 补丁集演进 | **DONE** | `tools/cfsolve-patches/PATCHES.json` + `patch --check/--verify` | `patch --check` 真实报出 2 份补丁的冲突文件与行号 |
 | **T-75** 快照差分报告 | **DONE** | `research.py diff` | 五段齐全；`plans/证据/research-diff-*.md` |
@@ -1219,7 +1219,7 @@ R-E2E-1 4 次 → R-E2E-2 6 次 → R-E2E-3 2 次 = 本轮共 **12 次**；累�
 
 ### 本轮未做（如实，不许读成已闭环）
 
-- **T-71/T-72 的 Rust 侧**：施工中。未完成前，别名规则仍是 Python 侧清单生成，Rust 的 `properties.rs`/`expression.rs` 仍硬编码，`CFSOLVE_ALIAS_RULES=off` 开关不存在 → 相应的 `test_alias_rule_set_matches_rust_side` 未写。
+- **上游 Rust 侧测试**：`cargo test --lib` **245 passed / 1 failed**。失败项 `capture::upstream::tests::socks5_chains_the_tunnel` 经核实为 **pre-existing 环境失败**（`src/capture/` 在 `b5a9eb3..HEAD` 零改动、稳定失败 3/3、断言为 IPv4 解析行为差异），**与 T-71/T-72 无关**。
 - **完整 stage2 会话**：真机 1 次失败（内存爆炸），剩 2 次额度未用。stage2 的 6 条断言在真样本上仍为 `skip`。
 - **K-1 不变**：本版仍**不承诺** stage2 对最新变体收敛；只交付"收敛过程可视化"。
 - 差分报告的字段名集合会把长 URL 编码串当字段名（噪声），已记录为 P3。
