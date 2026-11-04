@@ -5,13 +5,31 @@
 #   · 进程之间靠**共享 cache 目录**避免同一域重复求解（SQLite/WAL 支持多进程并发读单写）；
 #   · 每个 worker 自己崩自己重启，互不影响 —— 这就是要的隔离。
 #
-# ⚠️ 状态：未在本机验证（Docker daemon 未运行）。首次使用请按 docs/部署-容器.md 的检查清单跑一遍。
+# ✅ 状态：已在本机实测（v4.7 轮：3 worker 3s 就绪、6 端点全过、滚动 150 次请求 0 失败，
+#    见 evidence/v47-container.md）。首次在新机器上跑，仍建议按 docs/部署-容器.md 的检查清单过一遍。
+#
+# ⚠️ 裸跑（不经过本文件的 `command`）时的唯一硬要求：**把 /data 挂成卷**。
+#    镜像里设了 `CF_SOLVE_TOKEN_FILE=/data/.env`，`--token-file` 的默认值就取它
+#    （2026-11-04 之前这个环境变量是死的，没人读 —— 当时裸跑会让 token 落进容器临时层，
+#    每次重启重新生成 → 客户端旧 token 全部 401，且缓存密钥由 token 派生
+#    (solver/cache.py:723) → 整个共享缓存被作废。现已修好并有 tests/test_bootstrap.py 守住）。
+#    所以：`docker run -v solver-data:/data ...` 是必须的；不挂卷则上述后果照旧成立。
 
 x-solver: &solver
-  build: .
+  build:
+    context: .
+    args:
+      # ⚠️ 显式跳过 UBO 插件预热（2026-11-04 实测）：
+      #   camoufox 的插件源要访问 api.github.com 列 release，实测会 403 限流 / 404 抖动，
+      #   而真下载很慢（容器内首启实测 40s 才 7%，全量分钟级）。构建期预热多次失败后
+      #   Dockerfile 现在会**硬失败**（不再静默产出缺件镜像）。这里显式声明"知道代价"：
+      #   跳过预热 ⇒ 每个新容器首启要现场下载几分钟（/health 期间 503）。
+      #   要在离线/生产环境免除这几分钟，请在能稳定访问 GitHub 的网络里构建一次并复用
+      #   /home/solver/.cache；或等上游插件源稳定后把这一行删掉（恢复严格预热）。
+      PREWARM_ADDONS: "0"
   # 与 CHANGELOG / git tag 同步：`docker compose up` 会优先用这个 tag 的本地镜像，
   # 没有才 build。写死版本号是故意的 —— 否则"线上跑的是哪个镜像"永远说不清。
-  image: cf-bypass-solver:4.7.0
+  image: cf-bypass-solver:5.0.1
   restart: unless-stopped
   volumes:
     - solver-data:/data

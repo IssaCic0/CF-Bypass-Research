@@ -1,0 +1,102 @@
+{
+  "_note": [
+    "solver/ 的逐模块覆盖率门禁（v5.0.1 P1-4）。由 scripts/check-coverage.mjs 读取。",
+    "",
+    "为什么要有它：2026-11-04 审计实测 solver/ 整体 82% 达标，但 bootstrap.py 只有 38%、",
+    "engines.py 57% —— 一个整体数字把两块盲区平均掉了。而盲区里当场就藏着真缺陷：",
+    "bootstrap.py 的 `except (ValueError, SolveError)` 引用了未导入的 SolveError，",
+    "导致文档承诺的『缺依赖 → 友好提示 + exit 2』实际抛 NameError。",
+    "",
+    "口径：min = 该模块**本轮实测值的整数部分**（floor）。它防的是向下漂移，",
+    "不是逼人把数字做高。给某个模块加代码却不加测试 → 覆盖率掉下 min → CI 红，",
+    "这正是想要的信号。真的只能降门槛时，请在同一 commit 里写清理由。",
+    "",
+    "新增模块必须在 modules 里登记阈值，否则脚本直接报错：未登记 ≠ 无门槛。",
+    "",
+    "waiver 只给『在当前环境根本无法执行』的分支，且必须写清为什么测不到、",
+    "以及哪条用例覆盖了它能测到的那部分 —— 不许用 waiver 掩盖『懒得写测试』。"
+  ],
+  "modules": {
+    "solver/auth.py": {
+      "min": 72,
+      "why": "凭证入口；未覆盖的是多进程首启竞态与 OSError 分支"
+    },
+    "solver/backends.py": {
+      "min": 93,
+      "why": "回落链与 TERMINAL_CODES 决定 SSRF 守卫会不会被绕过"
+    },
+    "solver/bootstrap.py": {
+      "min": 87,
+      "why": "参数解析/装配/信号/优雅退出；曾因这一块没有测试而漏掉 NameError（38% → 87%）"
+    },
+    "solver/cache.py": {
+      "min": 82,
+      "why": "加密落盘 + WAL + claims 抢占"
+    },
+    "solver/cfsolve_backend.py": {
+      "min": 90,
+      "why": "纯协议后端：子进程调用与超时解析"
+    },
+    "solver/challenges.py": {
+      "min": 90,
+      "why": "clearance/turnstile/recaptcha/awswaf 四类收集器"
+    },
+    "solver/compat.py": {
+      "min": 97,
+      "why": "YesCaptcha 兼容层：映射/生命周期/上限；错一个字段名就会让对接方静默拿到空 solution"
+    },
+    "solver/detect.py": {
+      "min": 97,
+      "why": "防护识别；结论错=白烧 16-20s 浏览器（结论本身另由 tests/test_detect_golden.py 兜住）"
+    },
+    "solver/engines.py": {
+      "min": 56,
+      "why": "三引擎枚举与缺依赖检测",
+      "waiver": "cloakbrowser 是**专有二进制**（最新版需订阅），本机与 CI 都装不了；能测到的只有『缺依赖 → NOT_CONFIGURED + 安装提示』这条，已由 tests/test_service.py 覆盖。剩余分支在拿到该二进制前无法执行。"
+    },
+    "solver/errors.py": {
+      "min": 100,
+      "why": "错误码 → HTTP 映射是纯表，必须 100%"
+    },
+    "solver/eventlog.py": {
+      "min": 90,
+      "why": "GET /logs 的对外可读数据源；白名单漏一个字段就是信息泄露，必须高覆盖"
+    },
+    "solver/metrics.py": {
+      "min": 94,
+      "why": "Prometheus 文本渲染；指标说谎比没有指标更坏"
+    },
+    "solver/prewarm.py": {
+      "min": 92,
+      "why": "保活续期：退避 + 抖动"
+    },
+    "solver/probe.py": {
+      "min": 73,
+      "why": "探测工具；非主链路"
+    },
+    "solver/proxypool.py": {
+      "min": 89,
+      "why": "按域粘性 + 冷却 + 出口 IP 变更失效"
+    },
+    "solver/pydoll_backend.py": {
+      "min": 83,
+      "why": "CDP 直连后端；未装 pydoll/Chrome 时只能测缺依赖分支"
+    },
+    "solver/request.py": {
+      "min": 98,
+      "why": "请求参数校验（D1 下沉的纯函数）：每个边界都直接对应一个对外 4xx 契约"
+    },
+    "solver/route.py": {
+      "min": 98,
+      "why": "route=auto 决策表：纯函数，没有理由低于 98"
+    },
+    "solver/service.py": {
+      "min": 83,
+      "why": "HTTP 层 + Solver 状态机（2286 行；D1 已把请求解析下沉到 request.py）"
+    },
+    "solver/statuspage.py": {
+      "min": 100,
+      "why": "只读状态页的 HTML/JS 常量：它是常量不是逻辑，覆盖率天然 100%；契约由 test_observability 的 6 条页面用例守住（免鉴权/无数据/无外部资源/按钮真绑/转义）"
+    }
+  }
+}

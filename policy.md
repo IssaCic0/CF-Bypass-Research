@@ -7,18 +7,51 @@
 | 项 | 门禁 | 检查命令 |
 |---|---|---|
 | Python 全量测试 | **0 failed，0 error** | `python -m pytest tests/ -q` |
-| Python 覆盖率 | **≥ 80%**（`solver/` 整体）；`solver/service.py` **≥ 70%** | `python -m pytest tests/ -q --cov=solver --cov-fail-under=80` |
+| Python 覆盖率（整体） | **≥ 80%**（`solver/` 整体） | `python -m pytest tests/ -q --cov=solver --cov-fail-under=80` |
+| Python 覆盖率（**逐模块**） | 每个 `solver/` 模块 ≥ `docs/coverage-policy.json` 里登记的值；**未登记 = 直接红** | `node scripts/check-coverage.mjs --coverage-json=coverage.json` |
 | Go 测试 | **0 failed**，且 `-race` 通过 | `cd gocfsolve && go test -race ./...` |
 | Go 静态检查 | `go vet` **无输出** | `cd gocfsolve && go vet ./...` |
 | Python 语法 | `compileall` 退出码 **0** | `python -m compileall -q solver scripts tests` |
 | 结论库一致性 | 退出码 **0** | `node scripts/validate-findings.mjs` |
+| **detect 结论差分** | 退出码 **0**（签名表改动导致分类结论变化必须显式更新 golden） | `python -m pytest tests/test_detect_golden.py -q` |
+| **接口规格一致性** | 退出码 **0**（`docs/openapi.json` 的 `path+method` 必须与 `solver/service.py` 实际路由**完全一致**；除 `/health` 外必须声明 Bearer） | `node scripts/validate-openapi.mjs` |
+| 文档数字一致性 | 退出码 **0**（测试数/覆盖率/结论条数/版本号四处必须等于 `docs/facts.json`，且 facts.json 必须等于本次实测） | `node scripts/validate-docs.mjs --coverage-json=coverage.json` |
 | 文档一致性 | `docs/00-索引.md` 的计数与 `findings.json` 实际条数**相等** | 见 `scripts/validate-findings.mjs` 输出 |
+
+> **数字口径（2026-11-04 起）**：测试数/覆盖率/版本号只允许出现在 `docs/facts.json` 里，
+> 文档正文写具体数字时必须与它一致，由 `validate-docs.mjs` 把关。历史轮次的数字
+> （如 `workflow_status.md` 里标了 `v4.7 轮次` 的行）保持原值不追改 —— 那是当时的实测记录。
+
+> **为什么加"逐模块覆盖率"（2026-11-04）**：整体 82% 曾与 `bootstrap.py` 的 38% 并存 ——
+> 一个整体数字把盲区平均掉了。而那块盲区里当场就藏着真缺陷（`bootstrap.py` 引用了未导入的
+> `SolveError`，让文档承诺的「缺依赖 → 友好提示 + exit 2」变成 `NameError` 裸 traceback）。
+> 修完之后 `bootstrap.py` 从 38% → 87%，整体从 82% → 85%。
+>
+> **门槛口径**：`min` = 该模块本轮实测值的整数部分（floor）。加代码不加测试就会掉下 min，
+> 这正是想要的信号。要降门槛必须在同一 commit 里写理由。
+>
+> **唯一豁免**：`solver/engines.py`（min 56，waiver 理由写在 `docs/coverage-policy.json`）——
+> cloakbrowser 是专有二进制，本机与 CI 都装不了，剩余分支在拿到二进制前无法执行。
+> 豁免**不豁免 min**，它照样会拦住进一步腐烂。
 
 ## 2. 付费 / 外部资源红线
 
 - **付费 API 真实调用预算 = 0**：本仓库不涉及付费 API；若将来引入，默认 0 次，须用户书面批准并给额度。
-- **真实目标站过盾请求**：受 `plans/下一步改进指南.md` §15 预算约束（本版 60 次），**累计失败 ≥5 次立即全停**。
-- **CI 永远离线**：禁止 `camoufox fetch`、禁止任何真实联网请求、禁止 §15 实验。
+- **真实目标站过盾请求**：受《下一步改进指南 v4.7→v5.0》§15 预算约束。
+  **额度台账**：原 60 次 / 已用 ≈46（据 `workflow_status.md` R5）→ 2026-11-04 用户**追加 20 次**（累计上限 **80**）。
+  任何一批实验前必须报"本批用几次、打哪些站"；**累计失败 ≥5 次立即全停**，不许"再试一次就好"。
+  **2026-11-04 R-E2E-1 台账**：用 **4 次**（udemy 求解 1 + Python 回放 1 + Go 回放 1 + glassdoor 尝试 1），失败 **1 次**（glassdoor 求解超时，按纪律未重试）。累计 ≈**50 / 80**。
+  **2026-11-04 用户明确授权**：真机 E2E 验证可以做（含求解 + 回放），发版也可以做。
+  授权范围仍受上面台账约束（累计上限 80）；**"授权可以花"不等于"可以乱花"**——
+  每批照样先报计划、失败照样即停、同站照样串行 ≥30s。
+- **本机出口纪律**：同一出口连续打同一站有被提分风险（`workflow_status.md` R9b 有实证），
+  换出口必须换 `--egress-id`，否则会复用别处 IP 的凭证。
+- **CI 永远离线**：禁止在 runner 上 `camoufox fetch`、禁止任何真实联网请求、禁止 §15 实验。
+  > 2026-11-04 曾为"容器内跑 e2e"开过一个联网例外，实测后**已撤回**：镜像的 UBO 插件预热
+  > 依赖 `api.github.com` 列 release（实测 403/404 抖动）且下载极慢（容器内首启 40s 才 7%），
+  > 于是 e2e 的 180s 就绪预算必然超时。结论：这个 job 的成败取决于上游插件源，而不是我们的代码质量。
+  > 现在 CI 恢复为**全程离线**；e2e 留在本地（`run.ps1 e2e`，实测 30/30、20.3s）。
+  > 详见 `docs/findings.json` F-043 与 `.github/workflows/ci.yml` 文件末尾的说明。
 - 任何实验脚本必须支持 `--dry-run`。
 
 ## 3. 任务分级与审查
@@ -45,6 +78,9 @@ Approve 的含义是"严格审查后未发现阻塞性问题"，不是"代码完
 - 允许：本地 commit、推送 `main`（项目默认分支为 `master`，本版发版合并到 `master`）。
 - **禁止**：`git push --force` / `-f` / 任何等效强制推送；禁止删除他人分支。
 - 提交粒度：一个任务卡 = 一个可独立回滚的 commit。
+- **发版（2026-11-04 用户授权）**：发版 = ①五处版本号同步（`CHANGELOG.md` / `Dockerfile` /
+  `docker-compose.yml` / `docs/facts.json` / `docs/openapi.json`）②全部门禁复跑并落证据
+  ③commit → `tag vX.Y.Z` → push → GitHub Release。**五处有任一处不同步即视为发版失败**（`validate-docs.mjs` 会红）。
 - 提交前：`git status` 与 `git diff` 必须只含本任务范围改动，无密钥、无临时文件、无调试残留。
 - 提交信息遵循 Conventional Commits（`feat|fix|refactor|docs|test|chore|perf|ci`）。
 

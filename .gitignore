@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 
 # 抓取的 CF 混淆脚本样本（体积大且随请求变化，不入库）
+# scripts/capture_sample.py 的默认输出目录（manifest.json 含目标站信息，也不入库）
+/samples/
 main_*.js
 orchestrate_chl_page.js
 challenge_page.html
@@ -41,6 +43,7 @@ Thumbs.db
 # 覆盖率产物（会随测试生成）
 .coverage
 coverage.xml
+coverage.json
 htmlcov/
 
 # codegraph 本地索引缓存（可重建：codegraph index）

@@ -3,9 +3,11 @@
 # 硬约束（改这个文件前先读）：
 #   1. 禁止 `python -m camoufox fetch`：CI 只校验逻辑，不下载几百 MB 的浏览器二进制；
 #      需要浏览器的用例在 tests/ 里全部走替身（FakeBrowser），不依赖真二进制。
-#   2. 禁止任何真实联网请求：不打真实目标站、不跑 plans/下一步改进指南.md §15 的实验。
-#   3. 覆盖率门槛 80%（policy.md），低于门槛直接红。
+#   2. 禁止任何真实联网请求：不打真实目标站、不跑《下一步改进指南》§15 的实验。
+#   3. 覆盖率门槛 80%（policy.md）+ 逐模块门禁（docs/coverage-policy.json）+ 文档数字一致性
+#      + 接口规格一致性，任一不过即红。
 #   4. Windows 专属行为（SO_REUSEADDR 语义、NTFS 权限）由本地测试覆盖，CI 只跑 Linux。
+#   5. 文件末尾有"为什么没有 container/e2e job"的实测结论 —— 想加回来之前先读完。
 
 name: ci
 
@@ -29,6 +31,10 @@ jobs:
         python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 需要 tag：scripts/validate-docs.mjs 用 `git describe --tags` 取当前版本号。
+          # 默认 fetch-depth: 1 拿不到 tag，版本校验会静默退化成"照抄 facts.json"。
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -40,7 +46,13 @@ jobs:
       - name: 语法检查
         run: python -m compileall -q solver scripts tests
       - name: 测试 + 覆盖率门槛
-        run: python -m pytest tests/ -q --cov=solver --cov-report=term-missing --cov-fail-under=80
+        run: python -m pytest tests/ -q --cov=solver --cov-report=term-missing --cov-report=json:coverage.json --cov-fail-under=80
+      - name: 逐模块覆盖率门禁（docs/coverage-policy.json）
+        run: node scripts/check-coverage.mjs --coverage-json=coverage.json
+      - name: 文档数字一致性（测试数/覆盖率/结论条数/版本号）
+        run: node scripts/validate-docs.mjs --coverage-json=coverage.json
+      - name: 接口规格一致性（openapi.json ↔ 源码路由）
+        run: node scripts/validate-openapi.mjs
 
   go:
     name: go
@@ -68,3 +80,23 @@ jobs:
           node-version: "20"
       # 这条守的是"文档结论不能凭空漂移"：每条结论必须指向仓库里真实存在的文件
       - run: node scripts/validate-findings.mjs
+
+# 为什么这里**没有** container / e2e job（2026-11-04 实测后撤下，别再"顺手加回来"）：
+#
+#   动机是对的：e2e 验的是"起进程→读 token→Bearer→审计→/shutdown→退出码 0"这条交付链路，
+#   而它需要**真实** camoufox worker（段 A 的 A03 断言 state=ready）。runner 上没有浏览器
+#   二进制，所以当时的结论是"CI 里跑 docker build（镜像自带二进制）+ 容器内跑 e2e"。
+#
+#   实测结果：**不可靠，撤下**。三步证据：
+#     1) `docker build` 的 UBO 插件预热撞 `api.github.com/.../releases` 403 限流，
+#        旧写法只 WARN → 构建 exit 0 但**镜像缺件**（CI 会绿，发布物只在有网时偶然能用）；
+#     2) 把预热改成"重试 3 次后硬失败"后，本机构建**直接失败** —— 说明它不只是偶发限流；
+#     3) 用缺件镜像真跑：容器 `/health` 51s 后仍 503，日志显示
+#        `Downloading addon (UBO): 0%→7%`（40s 才 7%，全量分钟级）→
+#        浏览器首启被插件下载拖住，e2e 的 `wait_ready`（180s）必然超时。
+#
+#   结论：这个 job 的成败取决于**上游插件源的速度/可用性**，不是我们代码的质量。
+#   在它变成"绿就是真绿"之前，e2e 留在本地（`run.ps1 e2e`，实测 30/30、20.3s）。
+#   解除条件（任一）：①上游插件源稳定；②把 UBO 的 xpi 预先放进构建上下文/制品，
+#   让预热不依赖 GitHub；③接受首启数分钟慢启动并相应放宽 e2e 的就绪预算。
+#   相关记录：`docs/findings.json` 的 F-043、`workflow_status.md` 批次 C。

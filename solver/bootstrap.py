@@ -15,6 +15,7 @@ import threading
 
 try:  # 作为包导入
     from .service import (
+        COMPAT_DEFAULT_MAX_PENDING,
         DEFAULT_MAX_DETECT,
         DEFAULT_MAX_INFLIGHT,
         DEFAULT_MAX_QUEUE,
@@ -25,6 +26,7 @@ try:  # 作为包导入
         SHUTDOWN_GRACE,
         TOKEN_ENV,
         TOKEN_LINE_PREFIX,
+        SolveError,
         BackendRouter,
         CamoufoxBackend,
         CfsolveBackend,
@@ -46,6 +48,7 @@ try:  # 作为包导入
     )
 except ImportError:  # 直接以脚本运行
     from service import (  # type: ignore[no-redef]
+        COMPAT_DEFAULT_MAX_PENDING,
         DEFAULT_MAX_DETECT,
         DEFAULT_MAX_INFLIGHT,
         DEFAULT_MAX_QUEUE,
@@ -56,6 +59,7 @@ except ImportError:  # 直接以脚本运行
         SHUTDOWN_GRACE,
         TOKEN_ENV,
         TOKEN_LINE_PREFIX,
+        SolveError,
         BackendRouter,
         CamoufoxBackend,
         CfsolveBackend,
@@ -93,9 +97,18 @@ def main(argv: list[str] | None = None) -> int:
                     help="探测结果（/detect 与 route=auto）按域缓存的 TTL（秒）；0=关闭")
     ap.add_argument("--max-detect", type=int, default=DEFAULT_MAX_DETECT,
                     help="并发探测（/detect）上限，满即 429；与求解额度分开计")
+    ap.add_argument("--compat-max-pending", type=int, default=COMPAT_DEFAULT_MAX_PENDING,
+                    help="YesCaptcha 兼容层（/createTask）待处理任务上限，满即 ERROR_NO_SLOT_AVAILABLE")
     ap.add_argument("--egress-id", default=os.environ.get("CF_EGRESS_ID", "default"),
                     help="本进程的出口标识；换出口必须换 id，否则会复用别处 IP 的凭证")
-    ap.add_argument("--token-file", default=".env", help=f"token 文件；首次启动自动生成并写入 {TOKEN_LINE_PREFIX}<token>")
+    # 环境变量回退不是"顺手加的便利"：Dockerfile 与 docker-compose.yml 早就设了
+    # `CF_SOLVE_TOKEN_FILE`，但代码里从来没人读过它 —— 也就是说这个变量一直是死的。
+    # 后果很具体：脱离 compose 的 `docker run` 里 `--token-file` 会退回容器内的 `.env`，
+    # 而那不是挂载卷 ⇒ 每次重启都重新生成 token ⇒ 客户端旧 token 全 401，
+    # 且缓存密钥由 token 派生（cache.py:723）⇒ 整个共享缓存被作废。
+    ap.add_argument("--token-file", default=os.environ.get("CF_SOLVE_TOKEN_FILE", ".env"),
+                    help=f"token 文件；首次启动自动生成并写入 {TOKEN_LINE_PREFIX}<token>。"
+                         f"默认取环境变量 CF_SOLVE_TOKEN_FILE，未设置时用 .env")
     ap.add_argument("--no-auth", action="store_true", help="关闭鉴权（仅限本机调试；生产禁用）")
     ap.add_argument("--allow-private-hosts", action="store_true", help="允许访问私网/回环地址（仅限本机联调）")
     ap.add_argument("--cache-dir", default=os.environ.get("CF_CACHE_DIR", ""),
@@ -186,6 +199,7 @@ def main(argv: list[str] | None = None) -> int:
         proxy_pool=pool,
         browser_os=args.browser_os,
         detect_cache_ttl=args.detect_cache_ttl,
+        compat_max_pending=args.compat_max_pending,
         browser_factory=None if engine_enum is Engine.CAMOUFOX else build_engine_factory(
             engine_enum, os_persona=args.browser_os
         ),

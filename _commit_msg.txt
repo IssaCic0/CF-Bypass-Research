@@ -1,0 +1,50 @@
+feat(v5.0.1): 可观测性闭环 + 生态接入 + 门禁补强（含独立复审修复）
+
+一个 release commit，覆盖本轮全部批次（A 文档可信度 / B 门禁 / C 可观测 / D 结构下沉 /
+E1 YesCaptcha 兼容层 / E2 样本采集 / UI 只读状态页 / 独立复审与修复）。
+按 policy.md 的「一个任务卡一个 commit」理想应拆成 6 个；本轮为一次性发版合并提交，
+逐项内容见 CHANGELOG 的 5.0.1 段，可按该清单回滚。
+
+新增对外能力
+- GET /            只读状态页（单文件 HTML+JS，零依赖零构建；免鉴权但不含数据；严格 CSP）
+- GET /status      在途请求明细（最久的排最前；exclude_rid 不把自己算进去）
+- GET /logs?lines= 最近 200 条事件环形缓冲（字段白名单，凭证类进不来）
+- POST /createTask、POST /getTaskResult  YesCaptcha 兼容层（3 种 task type；业务错误一律 200+errorId）
+- scripts/capture_sample.py  样本采集脚本化（默认 dry-run、预算硬闸、sha256 manifest）
+- 启动参数 --compat-max-pending
+
+门禁补强
+- docs/facts.json（单一事实源）+ scripts/validate-docs.mjs（文档数字/版本一致性）
+- docs/coverage-policy.json + scripts/check-coverage.mjs（20 模块逐模块覆盖率，未登记即红）
+- scripts/validate-openapi.mjs（openapi 与源码路由双向一致 + 鉴权声明 + 版本一致）
+- tests/test_detect_golden.py（签名表 golden 差分）、tests/test_auth_matrix.py（鉴权真的生效）
+
+结构下沉与日志
+- do_POST 请求解析下沉 solver/request.py（纯函数；do_POST 175→131 行）
+- 每个请求一个贯穿 req_id；三处 traceback.print_exc() → Handler._log_internal（栈只落 stderr，路径脱敏）
+- AUDIT_FIELDS 增 path
+
+修复（findings F-041 ~ F-051）
+- F-041 bootstrap.py 引用未导入 SolveError → 引擎缺依赖路径 NameError
+- F-042/F-044/F-045 超大 body 收尾：无墙钟上限 + 用 read(n) 可被滴流钉住线程 + 收尾顺序反了
+  → read1 + 墙钟 deadline + 先写响应后读残余
+- F-043 镜像插件预热静默降级 → 重试 3 次后硬失败；据此撤下「CI 跑容器 e2e」
+- F-046/F-047 兼容层任务永挂 / 僵尸记录占配额 / 保留期从创建时刻算
+- F-048 非 ASCII clientKey 让 compare_digest 抛 TypeError
+- F-049 鉴权门禁只看规格不看实现 → 以 test_auth_matrix 兜住
+- F-050 capture_sample import 死路 + detect 失败丢 manifest
+
+验证
+- Python 532 项全绿；solver/ 覆盖率 86.42%；20 模块逐模块门禁全达标
+- 真实调用矩阵 27/27；真实 E2E 30/30（25.7s）；UI 截图验收 12/12 + 中断态 2/2
+- openapi 12 个操作一致；文档数字 9 处一致；findings 51 条 exit 0
+- 真机（真实站点，用 4 次预算，失败 1/5）：detect 3 站 + route=auto 2 站符合预期；
+  udemy 求解成功 18.32s/462B 且跨进程缓存命中，但**回放未通过（挑战页）**；
+  glassdoor 对照求解超时未重试。**本版不声称「真机端到端通过」**，见 findings F-051
+
+不兼容变更
+- 无破坏性变更：/solve 成功响应体、timeout 默认值与上下界、错误码语义逐字未变
+- 唯一对外文案变更：/solve 的 internal 错误 hint 改为「查看服务端日志中同 req_id 的 internal 事件」
+- 审计 JSONL 新增 path 字段（只增不改）
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>

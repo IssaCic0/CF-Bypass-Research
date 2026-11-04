@@ -1,0 +1,650 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "CF-Bypass-Research 求解服务",
+    "version": "5.0.1",
+    "description": "Cloudflare `cf_clearance` / Turnstile token / reCAPTCHA v3 / AWS WAF token 的获取与回放服务。\n\n**这份规格是手写的**（本项目不引入 FastAPI/pydantic，见 policy.md 的『零新依赖』），因此必须由 `scripts/validate-openapi.mjs` 反向核对：规格里声明的 `path + method` 必须与 `solver/service.py` 里实际存在的路由**完全一致**，多一个少一个都报错。\n\n约定：\n- 鉴权：`Authorization: Bearer <token>`；`/health` 免鉴权（容器探活）。\n- 错误响应体：2xx 读 `ok`，非 2xx 读 `error_code`（另有 `stage` / `hint` 供自动重试与自助修复）。\n- `POST /shutdown` 额外限制来源必须是回环地址（除非启动时加 `--allow-remote-shutdown`）。"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8878",
+      "description": "默认监听地址"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "启动时自动生成并写入 .env 的 CF_SOLVE_TOKEN"
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "ok",
+          "error_code"
+        ],
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "enum": [
+              false
+            ]
+          },
+          "error_code": {
+            "type": "string",
+            "enum": [
+              "invalid-request",
+              "payload-too-large",
+              "unauthorized",
+              "rate-limited",
+              "busy",
+              "not-configured",
+              "browser-unavailable",
+              "timeout",
+              "transport",
+              "internal",
+              "unsolved"
+            ]
+          },
+          "error": {
+            "type": "string"
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "validate",
+              "admit",
+              "solve",
+              "internal"
+            ]
+          },
+          "hint": {
+            "type": "string",
+            "description": "给人看的下一步建议（不是给机器解析的）"
+          }
+        }
+      },
+      "SolveRequest": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string",
+            "description": "目标 URL（http/https，长度上限 2048）"
+          },
+          "timeout": {
+            "type": "number",
+            "default": 45.0,
+            "description": "整条后端链的预算（秒），范围 [5, 120]"
+          },
+          "want": {
+            "type": "string",
+            "enum": [
+              "",
+              "clearance",
+              "turnstile",
+              "recaptcha_v3",
+              "awswaf"
+            ],
+            "description": "要哪种凭证；空=clearance（cf_clearance）"
+          },
+          "sitekey": {
+            "type": "string",
+            "description": "want=turnstile/recaptcha_v3/awswaf 时必需"
+          },
+          "action": {
+            "type": "string",
+            "description": "Turnstile action"
+          },
+          "cdata": {
+            "type": "string",
+            "description": "Turnstile cdata"
+          },
+          "force": {
+            "type": "boolean",
+            "default": false,
+            "description": "跳过缓存强制重新求解"
+          },
+          "route": {
+            "type": "string",
+            "enum": [
+              "fixed",
+              "auto"
+            ],
+            "default": "fixed",
+            "description": "fixed=按后端链求解；auto=先探测，无盾站直接放行（0 次求解）、不支持的防护直接拒绝"
+          }
+        }
+      },
+      "SolveResponse": {
+        "type": "object",
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "solved": {
+            "type": "boolean"
+          },
+          "cached": {
+            "type": "boolean"
+          },
+          "cookies": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "cookie 名 → 值"
+          },
+          "user_agent": {
+            "type": "string"
+          },
+          "elapsed": {
+            "type": "number"
+          },
+          "expires_at": {
+            "type": "number"
+          },
+          "attempts": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            },
+            "description": "后端回落轨迹"
+          },
+          "routed_by": {
+            "type": "object",
+            "description": "route=auto 时的决策记录"
+          }
+        }
+      },
+      "DetectRequest": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string"
+          },
+          "fresh": {
+            "type": "boolean",
+            "default": false,
+            "description": "忽略按域探测缓存"
+          }
+        }
+      },
+      "CompatTaskRequest": {
+        "type": "object",
+        "required": [
+          "task"
+        ],
+        "properties": {
+          "clientKey": {
+            "type": "string",
+            "description": "与本服务 Bearer token 相同（YesCaptcha 客户端习惯放 body）"
+          },
+          "task": {
+            "type": "object",
+            "required": [
+              "type",
+              "websiteURL"
+            ],
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": [
+                  "AntiCloudflareTask",
+                  "RecaptchaV3TaskProxyless",
+                  "TurnstileTaskProxyless"
+                ]
+              },
+              "websiteURL": {
+                "type": "string"
+              },
+              "websiteKey": {
+                "type": "string",
+                "description": "Turnstile / reCAPTCHA 必填"
+              },
+              "action": {
+                "type": "string",
+                "description": "Turnstile action"
+              },
+              "cdata": {
+                "type": "string",
+                "description": "Turnstile cdata"
+              },
+              "pageAction": {
+                "type": "string",
+                "description": "reCAPTCHA v3 pageAction"
+              }
+            }
+          }
+        }
+      },
+      "CompatError": {
+        "type": "object",
+        "description": "业务错误一律 HTTP 200 + errorId=1（生态客户端只按 errorId 判断成败）",
+        "required": [
+          "errorId",
+          "errorCode",
+          "errorDescription"
+        ],
+        "properties": {
+          "errorId": {
+            "type": "integer",
+            "enum": [
+              0,
+              1
+            ]
+          },
+          "errorCode": {
+            "type": "string"
+          },
+          "errorDescription": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "responses": {
+      "Unauthorized": {
+        "description": "缺少或错误的 Bearer token",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "Busy": {
+        "description": "队列已满 / 并发已达上限（可重试）",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "summary": "只读状态页（HTML，免鉴权）",
+        "description": "单文件 HTML 面板：展示 /health、/status、/logs。页面**不含任何服务端数据**——token 由用户在页面上填入并存于 sessionStorage。",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "text/html；Cache-Control: no-store",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "summary": "健康视图（免鉴权；带 token 才给完整运维视图）",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "ready"
+          },
+          "503": {
+            "description": "starting / degraded"
+          }
+        }
+      }
+    },
+    "/solve": {
+      "post": {
+        "summary": "求解并返回可回放的凭证",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SolveRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "求解完成（solved 可能为 false，属正常业务结果）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SolveResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数非法（不该重试）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "413": {
+            "description": "请求体超过 --max-body-bytes（可减小后重试）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/Busy"
+          }
+        }
+      }
+    },
+    "/detect": {
+      "get": {
+        "summary": "探测目标站用了什么防护（query 传 url）",
+        "parameters": [
+          {
+            "name": "url",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fresh",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "探测结论 + 建议路由"
+          },
+          "400": {
+            "description": "参数非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "429": {
+            "$ref": "#/components/responses/Busy"
+          }
+        }
+      },
+      "post": {
+        "summary": "探测目标站用了什么防护（JSON body）",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DetectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "探测结论 + 建议路由"
+          },
+          "400": {
+            "description": "参数非法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "413": {
+            "description": "请求体超限",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/Busy"
+          }
+        }
+      }
+    },
+    "/stats": {
+      "get": {
+        "summary": "运维视图（等同于 /health 的完整版）",
+        "responses": {
+          "200": {
+            "description": "完整运维字段（含 last_error / 代理快照 / UA 指纹）"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/status": {
+      "get": {
+        "summary": "当前在干什么：在途请求明细（最久的排最前）",
+        "description": "与 /stats 的差别：这里有 inflight 明细（rid / method / path / elapsed_sec）。响应**刻意不含** last_error、代理地址、UA 指纹等高敏字段。",
+        "responses": {
+          "200": {
+            "description": "状态 + 在途明细"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/logs": {
+      "get": {
+        "summary": "最近 N 条事件（新的在前）",
+        "description": "内存环形缓冲，字段由白名单决定（凭证类字段永不可能出现）。`lines` 是调用方可控输入：非法值回默认，超上限夹取，不报 400。",
+        "parameters": [
+          {
+            "name": "lines",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 200,
+              "default": 50
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{ok, total, kept, dropped_fields, lines[]}"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "summary": "Prometheus 文本指标",
+        "responses": {
+          "200": {
+            "description": "Prometheus text/plain; version=0.0.4",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/shutdown": {
+      "post": {
+        "summary": "优雅退出（供滚动重启用）",
+        "description": "三道门：① Bearer 鉴权 ② 来源必须是回环地址（除非 --allow-remote-shutdown）③ 先回 202 再真正退出。",
+        "responses": {
+          "202": {
+            "description": "已接受，进程将排空在途请求后退出"
+          },
+          "401": {
+            "description": "缺少 token，或来源不是回环地址",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/createTask": {
+      "post": {
+        "summary": "YesCaptcha 兼容：创建异步求解任务（返回 taskId）",
+        "description": "薄适配层：内部仍调用 /solve 的同一套链路（同一份缓存/准入/指标）。鉴权支持 Bearer 或 body.clientKey。不接受任务级代理字段（ERROR_PROXY_NOT_SUPPORTED）。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompatTaskRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "成功返回 taskId；业务失败返回 errorId=1",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompatError"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "传输层畸形（body 不是 JSON）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "请求体超限",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/getTaskResult": {
+      "post": {
+        "summary": "YesCaptcha 兼容：轮询任务结果（processing / ready）",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "taskId"
+                ],
+                "properties": {
+                  "clientKey": {
+                    "type": "string"
+                  },
+                  "taskId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "{errorId,errorCode,errorDescription,status,solution?}；任务不存在/过期返回 errorId=1 ERROR_TASK_ID_INVALID"
+          },
+          "400": {
+            "description": "传输层畸形",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "请求体超限",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "started_at": "2026-11-04T08:22:38",
+  "duration_sec": 20.6,
+  "budget": 2,
+  "used": 2,
+  "failures": 0,
+  "stopped_early": false,
+  "arms": {
+    "pinned": {
+      "attempts": 1,
+      "solve_ok": 1,
+      "solve_rate": 1.0,
+      "avg_solve_sec": 18.32,
+      "replays": 1,
+      "replay_ok": 0
+    },
+    "random": {
+      "attempts": 0,
+      "solve_ok": 0,
+      "solve_rate": 0.0,
+      "avg_solve_sec": null,
+      "replays": 0,
+      "replay_ok": 0
+    }
+  },
+  "caveat": "A/B 是站点间对照，站点难度差异会混入结论；不得当成交互效应显著。",
+  "results": [
+    {
+      "site": "https://www.udemy.com/",
+      "arm": "pinned",
+      "solver": "http://127.0.0.1:18811",
+      "attempt": 1,
+      "http": 200,
+      "ok": true,
+      "error_code": null,
+      "stage": null,
+      "elapsed": 18.32,
+      "egress_id": "default",
+      "expires_in": 1500,
+      "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101 Firefox/156.0",
+      "replay": {
+        "status": 200,
+        "len": 200000,
+        "challenge": true,
+        "elapsed": 2.25
+      },
+      "replay_ok": false
+    }
+  ]
+}

@@ -44,6 +44,7 @@ import ipaddress
 import json
 import os
 import queue
+import re
 import secrets
 import signal
 import socket
@@ -81,6 +82,23 @@ try:  # 作为包导入（tests / 未来 solver 包）
     )
     from .prewarm import Prewarmer, parse_targets
     from .metrics import render_metrics_text  # v5.0 T-56：Prometheus 渲染已下沉（只搬不改）
+    from .eventlog import EventLog  # P2-1：最近 N 条事件环形缓冲（GET /logs 的数据源）
+    # UI：只读状态页（单文件 HTML，零依赖零构建）
+    from .statuspage import STATUS_PAGE_HTML_BYTES
+    # E1：YesCaptcha 兼容层（createTask/getTaskResult）的注册表与错误类型
+    from .compat import DEFAULT_MAX_PENDING as COMPAT_DEFAULT_MAX_PENDING, ERR_KEY as COMPAT_ERR_KEY, CompatError, TaskRegistry
+    # D1：请求解析/校验已下沉（常量与解析函数都从这里来）
+    from .request import (
+        BODY_TOO_LARGE_MSG,
+        DEFAULT_TIMEOUT,
+        MAX_BODY_BYTES,
+        MAX_TIMEOUT,
+        MAX_URL_LEN,
+        MIN_TIMEOUT,
+        clamp_timeout,
+        parse_json_body,
+        parse_solve_request,
+    )
     from .engines import Engine, build_factory as build_engine_factory, preflight as engine_preflight
     from .cfsolve_backend import CfsolveBackend
     from .pydoll_backend import PydollBackend, find_chrome
@@ -133,6 +151,25 @@ except ImportError:  # 直接以脚本运行：python solver/service.py
     )
     from prewarm import Prewarmer, parse_targets  # type: ignore[no-redef]
     from metrics import render_metrics_text  # type: ignore[no-redef]
+    from eventlog import EventLog  # type: ignore[no-redef]
+    from statuspage import STATUS_PAGE_HTML_BYTES  # type: ignore[no-redef]
+    from compat import (  # type: ignore[no-redef]
+        DEFAULT_MAX_PENDING as COMPAT_DEFAULT_MAX_PENDING,
+        ERR_KEY as COMPAT_ERR_KEY,
+        CompatError,
+        TaskRegistry,
+    )
+    from request import (  # type: ignore[no-redef]
+        BODY_TOO_LARGE_MSG,
+        DEFAULT_TIMEOUT,
+        MAX_BODY_BYTES,
+        MAX_TIMEOUT,
+        MAX_URL_LEN,
+        MIN_TIMEOUT,
+        clamp_timeout,
+        parse_json_body,
+        parse_solve_request,
+    )
     from engines import Engine, build_factory as build_engine_factory, preflight as engine_preflight  # type: ignore[no-redef]
     from cfsolve_backend import CfsolveBackend  # type: ignore[no-redef]
     from pydoll_backend import PydollBackend, find_chrome  # type: ignore[no-redef]
@@ -162,14 +199,11 @@ except ImportError:  # 直接以脚本运行：python solver/service.py
 # ── 常量 ───────────────────────────────────────────
 DEFAULT_TTL = 1500          # cf_clearance 通常 30 分钟量级；cookie 带 expires 时以 cookie 为准
 MIN_TTL = 60
-MAX_URL_LEN = 2048
-MAX_BODY_BYTES = 64 * 1024
+# 请求层常量与解析已下沉到 `solver/request.py`（v5.0.1 D1），此处只 re-export：
+# 既有引用（bootstrap 的帮助文本、tests 里的 `service.MAX_BODY_BYTES`）零感知。
 #: 超大 body 的错误消息。`_read_body_raw` 返回它时，调用方必须转成 413 payload-too-large
 #: （而不是和其它 body_error 一样落进 400 invalid-request）。
-_BODY_TOO_LARGE_MSG = f"__payload_too_large__:{MAX_BODY_BYTES}"
-DEFAULT_TIMEOUT = 45.0
-MIN_TIMEOUT = 5.0
-MAX_TIMEOUT = 120.0         # 上限：避免 timeout=1e9 把 worker 永久占住
+_BODY_TOO_LARGE_MSG = f"{BODY_TOO_LARGE_MSG}:{MAX_BODY_BYTES}"
 SUBMIT_SLACK = 5.0          # worker 等待上限 = 预算 + 该余量
 POLL_INTERVAL = 0.15        # 等 cookie 的轮询间隔（原 1.0s 平均白等 ~500ms）
 GOTO_BUDGET_RATIO = 0.6     # 导航最多占预算的 60%
@@ -180,6 +214,27 @@ DEFAULT_MAX_INFLIGHT = 8
 DEFAULT_MAX_DETECT = 4
 #: `/detect` 跟随重定向的跳数上限
 DEFAULT_WARM_RETRY_MAX = 30.0
+
+#: 响应发出**之后**、"尽力"读掉的残余字节上限。
+#:
+#: 定这个数的依据：真正约束住攻击者的是下面的**墙钟 deadline**（滴流再慢也超不过 0.5s），
+#: 而不是字节数 —— 所以字节上限可以给得宽松些，让"只是超了一点"的正常客户端
+#: 能被完整排空、干净关闭，从而稳定读到 413。给太小（比如 32KB）的话，
+#: 一个 200KB 的误发 body 仍然会残余 168KB 未读就被 close → RST → 客户端丢掉响应。
+DRAIN_MAX_BYTES = 1024 * 1024
+#: 读残余的**墙钟总预算**（秒）。必须是墙钟：`rfile.read(n)` 底层是
+#: `BufferedReader.read(n)`，它会**循环 raw read 直到凑满 n 字节** ——
+#: 只给"单次 recv 超时"的话，滴流客户端能让一次 read(64KB) 阻塞几百秒。
+DRAIN_TIMEOUT = 0.5
+#: 单次 raw read 的 socket 超时（配合 `read1` 使用：一次只读一次，立刻返回）。
+DRAIN_RECV_TIMEOUT = 0.2
+
+#: `GET /logs` 环形缓冲容量。为什么是 200：够覆盖"刚才那几波请求"的排障窗口，
+#: 又不至于让一个对外可读的结构占住内存（每条被截断到 200 字符，上限约 40KB）。
+EVENT_LOG_MAXLEN = 200
+#: `GET /logs?lines=` 的默认值与硬上限（`lines` 是**调用方可控输入**，必须夹取）。
+DEFAULT_LOG_LINES = 50
+MAX_LOG_LINES = 200
 SHUTDOWN_GRACE = 10.0
 
 
@@ -203,7 +258,7 @@ DETECT_CACHE_MAX = 256
 #: "谁在什么时候打了哪个站、结果如何"，不回答"凭证是什么"。
 AUDIT_FIELDS = (
     "event", "req_id", "host", "ok", "cached", "elapsed", "clearance_len", "ms",
-    "error_code", "stage", "backend", "route", "reason", "peer", "ts",
+    "error_code", "stage", "backend", "route", "reason", "peer", "path", "ts",
 )
 
 #: `/metrics` 里按域指标只保留前 N 个域。
@@ -219,6 +274,17 @@ def _now() -> float:
     return time.time()
 
 
+#: 把消息里的绝对路径收敛成 `<path>`。为什么需要：`/logs` 是**对外可读**的端点，
+#: 而异常消息里经常带绝对路径（`FileNotFoundError: ... /app/solver/xxx`）或内部 URL。
+#: 完整原文仍然进 stderr 的 traceback，按 req_id 对得上。
+_PATH_RE = re.compile(r"(?:[A-Za-z]:)?(?:[/\\][^\s:：,，)）]{1,200}){2,}")
+
+
+def _redact(text: str) -> str:
+    """把疑似路径/URL 的片段替换成 `<path>`（保守：只动看起来像路径的东西）。"""
+    return _PATH_RE.sub("<path>", text)
+
+
 def _host_of(url: str) -> str:
     try:
         return (urlsplit(url).hostname or "").lower()
@@ -226,15 +292,9 @@ def _host_of(url: str) -> str:
         return ""
 
 
-def _clamp_timeout(value) -> float:
-    """把外部传入的 timeout 收敛到 [MIN_TIMEOUT, MAX_TIMEOUT]。"""
-    try:
-        t = float(value)
-    except (TypeError, ValueError):
-        raise SolveError(ErrorCode.INVALID_REQUEST, "timeout 必须是数字", stage="validate")
-    if t != t or t in (float("inf"), float("-inf")):  # NaN / inf
-        raise SolveError(ErrorCode.INVALID_REQUEST, "timeout 必须是有限数字", stage="validate")
-    return max(MIN_TIMEOUT, min(MAX_TIMEOUT, t))
+#: 兼容旧名：实现已下沉到 `request.clamp_timeout`（v5.0.1 D1），此处保留别名，
+#: 既有调用点（router 分支与 `Solver.solve`）与用例零改动。
+_clamp_timeout = clamp_timeout
 
 
 def _default_browser_factory(*, headless: bool, os_persona: str = ""):
@@ -315,6 +375,7 @@ class Solver:
         proxy_pool: ProxyPool | None = None,
         browser_os: str = "",
         detect_cache_ttl: float = DETECT_CACHE_TTL,
+        compat_max_pending: int = COMPAT_DEFAULT_MAX_PENDING,
     ) -> None:
         self.ttl = max(MIN_TTL, int(ttl))
         self.egress_id = egress_id or "default"
@@ -377,6 +438,19 @@ class Solver:
         # 允许 0 = 关闭（运维有时要每次都看实时探测结论）
         self.detect_cache_ttl = max(0.0, float(detect_cache_ttl))
         self.detect_cache_hits = 0
+
+        # 可观测性：最近事件环形缓冲（`GET /logs`）+ 在途请求注册表（`GET /status`）。
+        # 为什么放在 Solver 而不是 Handler：Handler 每连接一个实例，活不过一个请求；
+        # 这两样东西的价值恰恰在于"跨请求、跨连接"。
+        self.events = EventLog(EVENT_LOG_MAXLEN)
+        # YesCaptcha 兼容层的任务注册表（E1）。它内部只调用 self.solve()，
+        # 不构成第二条求解路径 —— 缓存/准入/指标全复用。
+        self.compat = TaskRegistry(self, max_pending=max(1, int(compat_max_pending)))
+        self._inflight_registry: dict[int, dict] = {}
+        self._inflight_seq = 0
+        self._inflight_reg_lock = threading.Lock()
+        self.pid = os.getpid()
+        self.started_at = self._started_at
 
         self._thread = threading.Thread(target=self._worker, name="cfsolve-worker", daemon=True)
         self._thread.start()
@@ -1498,6 +1572,98 @@ class Solver:
     def stats(self) -> dict:
         return self.health()[1]
 
+    # -- 可观测性：/status 与 /logs（P2-1）--------------------------------
+    #
+    # 为什么这两个端点值得存在：`/metrics` 回答"总量多少"，`/health` 回答"活没活"，
+    # 但没有一个接口回答"**现在正在干什么、刚才那几条为什么失败**"——而那是排障第一问。
+    # 参考 captcha-solver 的 `/status` + `/logs`（同类自托管求解服务的通行做法）。
+
+    def begin_request(self, method: str, path: str) -> int:
+        """登记一次在途请求，返回序号（异常时返回 0，调用方据此跳过收尾）。
+
+        **只留路径，剥掉 query**：`/detect?url=https://internal-host/...` 里的主机名
+        是调用方的敏感信息，而 `/status` 是任何 token 持有者都能读的端点。
+        剥离放在这里而不是调用点，是为了纵深防御 —— 将来多一个调用方也不会漏。
+        """
+        with self._inflight_reg_lock:
+            self._inflight_seq += 1
+            rid = self._inflight_seq
+            self._inflight_registry[rid] = {
+                "rid": rid,
+                "method": str(method or "")[:8],
+                "path": str(path or "").split("?", 1)[0][:80],
+                "started_at": time.time(),
+            }
+            return rid
+
+    def end_request(self, rid: int) -> None:
+        if not rid:
+            return
+        with self._inflight_reg_lock:
+            self._inflight_registry.pop(rid, None)
+
+    def inflight_snapshot(self, exclude_rid: int = 0) -> list[dict]:
+        """在途请求明细，**最久的排最前**——卡住的就是它。
+
+        `exclude_rid`：把"正在读这份明细的那次请求"排除掉。不排除的话，
+        `GET /status` 会永远看到自己（`inflight_count` 至少是 1），
+        调用方还得自己减一 —— 这种"每次都差一"的接口比没有还烦人。
+        """
+        now = time.time()
+        with self._inflight_reg_lock:
+            items = [
+                {
+                    "rid": rec["rid"],
+                    "method": rec["method"],
+                    "path": rec["path"],
+                    "elapsed_sec": round(max(0.0, now - rec["started_at"]), 2),
+                }
+                for rec in self._inflight_registry.values()
+                if rec["rid"] != exclude_rid
+            ]
+        items.sort(key=lambda r: r["elapsed_sec"], reverse=True)
+        return items
+
+    def status(self, exclude_rid: int = 0) -> dict:
+        """给人看的"现在在干什么"。与 `/stats` 的差别：这里有**在途请求明细**。
+
+        刻意不把 `health()` 的完整体照搬过来：那里面有 `last_error`（可能带被拦子资源的
+        主机名）、代理地址、UA 指纹 —— 那些属于 `/health`（带 token 才给）。这里只取
+        "能不能服务 + 正在服务谁"。
+        """
+        code, health = self.health()
+        inflight = self.inflight_snapshot(exclude_rid)
+        return {
+            "ok": bool(health.get("ok", False)),
+            "code": code,
+            "state": health.get("state"),
+            "pid": self.pid,
+            "backends": list(self.backend_chain),
+            "cache_backend": self.cache_backend,
+            "uptime_sec": round(_now() - self.started_at, 1),
+            "queue_depth": self._tasks.qsize(),
+            "inflight_count": len(inflight),
+            "inflight": inflight,
+            "events_total": self.events.snapshot(0)["total"],
+            "compat": self.compat.stats(),
+        }
+
+    def logs(self, lines: int = DEFAULT_LOG_LINES) -> dict:
+        """最近 N 条事件（新的在前）。`lines` 是调用方可控输入，必须夹取。"""
+        try:
+            n = int(lines)
+        except (TypeError, ValueError):
+            n = DEFAULT_LOG_LINES
+        n = max(0, min(n, MAX_LOG_LINES))
+        snap = self.events.snapshot(n)
+        return {
+            "ok": True,
+            "total": snap["total"],
+            "kept": snap["kept"],
+            "dropped_fields": snap["dropped_fields"],
+            "lines": snap["lines"],
+        }
+
     def metrics_text(self) -> str:
         """Prometheus 文本格式（渲染逻辑在 metrics.py，原样再导出）。"""
         with self._lock:
@@ -1519,6 +1685,10 @@ class Solver:
 
     # -- 退出 -----------------------------------------
     def close(self) -> None:
+        try:
+            self.compat.close()
+        except Exception:  # noqa: BLE001 —— 关闭路径上的清理失败不掩盖真实错误
+            pass
         self._stopping.set()
         try:
             self._tasks.put_nowait(None)
@@ -1582,6 +1752,47 @@ class Handler(BaseHTTPRequestHandler):
         fields.setdefault("ts", round(_now(), 3))
         print(json.dumps(fields, ensure_ascii=False), flush=True)
         self._audit_write(fields)
+        # 同时进内存环形缓冲，供 `GET /logs` 读取。
+        # 这是**旁路**：缓冲出任何问题都不许影响正在处理的请求，所以整段包在 try 里；
+        # 字段安全由 eventlog.ALLOWED_FIELDS 白名单保证（第二道防线，不依赖调用点自觉）。
+        solver = getattr(Handler, "solver", None)
+        events = getattr(solver, "events", None)
+        if events is not None:
+            try:
+                events.record(**fields)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _log_internal(self, exc: BaseException) -> None:
+        """未预期异常的统一出口（v5.0.1 P2-9）。
+
+        原来三处 `except Exception` 各自 `traceback.print_exc()`：栈只进 stderr、**不带 req_id**，
+        于是它与 stdout 的 JSON 行、`GET /logs` 的环形缓冲、审计文件全都对不上 ——
+        看到栈不知道是哪个请求，看到请求行又不知道栈在哪。
+
+        现在的分工：
+          · 结构化行（`event=internal`）进 stdout JSONL + 审计 + `/logs`，带 req_id 与 path，
+            用来**定位是哪个请求炸了**；
+          · 完整栈仍然只落 stderr：栈体量大、含源文件绝对路径，不该出现在对外可读的
+            `/logs`，也不该塞进审计文件。
+        这样"能对上号"与"能看到栈"两件事都保住，且没有把栈暴露到新端点。
+        """
+        path = (getattr(self, "path", "") or "").split("?", 1)[0]
+        self._log(
+            event="internal",
+            req_id=getattr(self, "_req_id", "") or "",
+            path=path,
+            stage="internal",
+            error_code=ErrorCode.INTERNAL.value,
+            # 只留类型名 + **脱敏后**的消息：完整 str(exc) 常含绝对路径或内部 URL，
+            # 而 `/logs` 对外可读。原文仍在 stderr 的 traceback 里，按 req_id 对得上。
+            reason=_redact(f"{type(exc).__name__}: {str(exc)}")[:160],
+        )
+        print(
+            f"[cfsolve] internal error req_id={getattr(self, '_req_id', '?')} path={path}",
+            file=sys.stderr, flush=True,
+        )
+        traceback.print_exc()
 
     def _audit_write(self, fields: dict) -> None:
         """把事件写进审计文件（`--audit-log`）。**只写白名单字段**，且失败绝不打断服务。
@@ -1603,6 +1814,31 @@ class Handler(BaseHTTPRequestHandler):
             print(json.dumps({"event": "audit-write-failed", "error": f"{type(e).__name__}: {str(e)[:100]}"},
                              ensure_ascii=False), flush=True)
 
+    def _send_status_page(self) -> None:
+        """回只读状态页。不带任何服务端数据（token 由用户在页面上填）。"""
+        body = STATUS_PAGE_HTML_BYTES
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        # 页面是静态的：不让中间层/浏览器缓存它（改版后要立刻生效）
+        self.send_header("Cache-Control", "no-store")
+        # 只允许同源脚本与同源样式；页面里没有内联事件处理器之外的资源
+        self.send_header("X-Content-Type-Options", "nosniff")
+        # 严格的 CSP：这是一个**新增的公网可读端点**，必须自己带防线。
+        #   default-src 'none'      —— 任何没显式允许的资源类型一律禁止
+        #   script-src/style-src    —— 页面是单文件内联脚本/样式（零依赖的代价）
+        #   connect-src 'self'      —— fetch 只能打本服务，杜绝"被改注入后把 token 外传"
+        #   frame-ancestors 'none'  —— 不许被别的站 iframe 套壳（防点击劫持）
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+            "connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; "
+            "frame-ancestors 'none'",
+        )
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _send(self, code: int, payload: dict) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(code)
@@ -1610,6 +1846,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        # 响应已经落地，这时再读残余才有意义（顺序反了会拖慢响应且照样 RST）。
+        self._drain_after_response()
 
     def _authorized(self) -> bool:
         """GET /health 公开（供容器健康检查），其余一律要求 Bearer token。"""
@@ -1620,6 +1858,32 @@ class Handler(BaseHTTPRequestHandler):
         if not header.lower().startswith("bearer "):
             return False
         return secrets.compare_digest(header[7:].strip(), expected)
+
+    def _authorized_compat(self, payload: dict) -> bool:
+        """兼容层鉴权：Bearer 优先，其次 body 里的 `clientKey`（YesCaptcha 客户端的习惯）。
+
+        为什么允许 clientKey：存量客户端把 key 放在 body 里，不会发 Authorization 头。
+        值与本服务的 token **相同**（不是另一套凭据），比较仍走 `compare_digest`。
+        """
+        if self._authorized():
+            return True
+        expected = self.__class__.token
+        if not expected:
+            return True          # `--no-auth` 联调模式：与其它端点同语义
+        client_key = payload.get("clientKey")
+        if not isinstance(client_key, str) or not client_key:
+            return False
+        # 必须先转 bytes：`secrets.compare_digest` 对含非 ASCII 的 **str** 会抛 TypeError
+        # （它只对 bytes 做常量时间比较）。不转的话，任何人发 {"clientKey":"密码"}
+        # 就能让服务回 ERROR_INTERNAL + 打一条 traceback —— 既是误诊，也是零成本日志放大。
+        try:
+            return secrets.compare_digest(client_key.encode("utf-8"), expected.encode("utf-8"))
+        except (UnicodeError, TypeError):
+            return False
+
+    def _compat_send_error(self, err) -> None:
+        """兼容层的错误一律 HTTP 200 + errorId=1（生态客户端只看 errorId，看状态码会当网络错重试）。"""
+        self._send(200, err.payload())
 
     def _deny(self) -> None:
         self._send(
@@ -1635,6 +1899,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802
         path = self.path.split("?", 1)[0]
+        if path == "/":
+            # 只读状态页：**免鉴权**（否则浏览器连页面都打不开）。
+            # 页面本身不含任何数据 —— 数据要靠用户在页面上填 token 去读 /health /status /logs。
+            self._send_status_page()
+            return
         if path == "/health":
             # 免鉴权 → 只给"服务是否在服务"的最小视图；带 token 才给完整运维视图。
             # 理由：完整视图里有 last_error（可能含被拦截子资源的主机名）、代理地址与评分、
@@ -1647,6 +1916,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/detect":
             self._handle_detect_from_query()
+        elif path == "/status":
+            # "现在在干什么" —— 在途请求明细（最久的排最前），排障第一问。
+            self._send(200, self.solver.status(exclude_rid=getattr(self, "_inflight_rid", 0)))
+        elif path == "/logs":
+            # "刚才那几条为什么失败" —— 最近 N 条事件（`lines` 夹在 [0, MAX_LOG_LINES]）。
+            self._send(200, self.solver.logs(self._query_lines()))
         elif path == "/stats":
             self._send(200, self.solver.stats())
         elif path == "/metrics":
@@ -1663,6 +1938,14 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         # 先把 body 读完：否则提前返回 401/404 时残留的 body 会让 keep-alive 连接被对端重置
         raw, body_error = self._read_body_raw()
+        # YesCaptcha 兼容层自己鉴权（Bearer 或 body.clientKey），必须排在下面的
+        # Bearer-only 检查**之前** —— 否则 clientKey 客户端会永远拿到 401。
+        if path == "/createTask":
+            self._handle_create_task(raw, body_error)
+            return
+        if path == "/getTaskResult":
+            self._handle_get_task_result(raw, body_error)
+            return
         if not self._authorized():
             self._deny()
             return
@@ -1676,7 +1959,8 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, {"ok": False, "error_code": "not-found", "error": "not found", "stage": "admit"})
             return
 
-        req_id = secrets.token_hex(4)
+        # 与 _track_inflight 分配的贯穿 ID 对齐：同一次请求只应有一个 req_id
+        req_id = getattr(self, "_req_id", "") or secrets.token_hex(4)
         started = time.monotonic()
         # 路由决策在 try 之外初始化：失败时也要把它带回给调用方
         # （实测：route=auto 求解失败时响应里完全没有 routed_by，排查时不知道"当时怎么判的"）。
@@ -1689,53 +1973,16 @@ class Handler(BaseHTTPRequestHandler):
         # 畸形输入恰恰是最需要审计的那一类，所以这里不是"兜个 None"而是修根。
         url = ""
         try:
-            if body_error:
-                if body_error.startswith("__payload_too_large__"):
-                    # v5.0 T-51：超大 body → 413（可重试），区别于 400（不该重试）
-                    raise SolveError(
-                        ErrorCode.PAYLOAD_TOO_LARGE,
-                        f"请求体超过 {MAX_BODY_BYTES} 字节",
-                        stage="validate",
-                        hint=f"减小请求体到 {MAX_BODY_BYTES} 字节以内后重试；如需提高上限，启动时调 --max-body-bytes",
-                    )
-                raise SolveError(ErrorCode.INVALID_REQUEST, body_error, stage="validate")
-            req = self._parse_json(raw)
-            url = req.get("url")
-            if not isinstance(url, str) or not url:
-                raise SolveError(ErrorCode.INVALID_REQUEST, "缺少 url 字段", stage="validate")
-            if len(url) > MAX_URL_LEN:
-                raise SolveError(ErrorCode.INVALID_REQUEST, f"url 超过 {MAX_URL_LEN} 字符", stage="validate")
-            if not url.startswith(("http://", "https://")):
-                raise SolveError(
-                    ErrorCode.INVALID_REQUEST, "url 必须是 http(s)", stage="validate",
-                    hint="需要带 scheme 的绝对地址，例如 https://example.com/",
-                )
-            timeout = req.get("timeout", DEFAULT_TIMEOUT)
-            force_raw = req.get("force", False)
-            if not isinstance(force_raw, (bool, int)):
-                raise SolveError(ErrorCode.INVALID_REQUEST, "force 必须是布尔值", stage="validate")
-
-            # 要哪种产物：clearance（默认）/ awswaf / turnstile / recaptcha_v3
-            want_raw = req.get("want", "")
-            if not isinstance(want_raw, str):
-                raise SolveError(ErrorCode.INVALID_REQUEST, "want 必须是字符串", stage="validate")
-            try:
-                want_enum = Want.parse(want_raw)
-            except ValueError as e:
-                raise SolveError(ErrorCode.INVALID_REQUEST, str(e), stage="validate") from e
-
-            sitekey = req.get("sitekey", "") or ""
-            action = req.get("action", "") or ""
-            cdata = req.get("cdata", "") or ""
-            for name, value in (("sitekey", sitekey), ("action", action), ("cdata", cdata)):
-                if not isinstance(value, str) or len(value) > 256:
-                    raise SolveError(ErrorCode.INVALID_REQUEST, f"{name} 必须是不超过 256 字符的字符串",
-                                     stage="validate")
-            if want_enum in TOKEN_WANTS and not sitekey:
-                raise SolveError(
-                    ErrorCode.INVALID_REQUEST, f"want={want_enum.value} 需要 sitekey", stage="validate",
-                    hint="从页面源码里取 data-sitekey，或 reCAPTCHA 的 api.js?render=<sitekey>",
-                )
+            # 解析 + 逐字段校验全部在 request.parse_solve_request 里（v5.0.1 D1 下沉）。
+            # 它是纯函数，边界用例不再需要起真实服务；错误码/stage/hint 与拆分前逐字一致。
+            req_obj = parse_solve_request(raw, body_error)
+            url = req_obj.url
+            timeout = req_obj.timeout
+            force_raw = req_obj.force
+            want_enum = req_obj.want
+            sitekey = req_obj.sitekey
+            action = req_obj.action
+            cdata = req_obj.cdata
             # ── 入口 SSRF 守卫：**与后端无关**（v4.1）──────────────
             # 守卫原来只写在 Solver.solve() 里，而配了 cfsolve/pydoll/flaresolverr 时
             # handler 走 router 分支、根本不进 Solver.solve —— 于是整条守卫被绕过，
@@ -1748,15 +1995,7 @@ class Handler(BaseHTTPRequestHandler):
 
             # ── route：让探测结论驱动决策（v4.0 T-32）──────────────
             # 不传 route 等价于 fixed，行为与 v3 完全一致（向后兼容的第一优先级）。
-            route_mode = req.get("route", "fixed")
-            if not isinstance(route_mode, str):
-                raise SolveError(ErrorCode.INVALID_REQUEST, "route 必须是字符串", stage="validate")
-            route_mode = route_mode.strip().lower() or "fixed"
-            if route_mode not in ROUTE_MODES:
-                raise SolveError(
-                    ErrorCode.INVALID_REQUEST, f"未知 route={route_mode!r}", stage="validate",
-                    hint=f"可选 {sorted(ROUTE_MODES)}；不传等价于 fixed（v3 行为）",
-                )
+            route_mode = req_obj.route_mode
             if route_mode != "fixed":
                 detect_result = self._probe_for_route(url, timeout=timeout) if route_mode == "auto" else None
                 decision = route_decide(detect_result, route_mode)
@@ -1778,7 +2017,7 @@ class Handler(BaseHTTPRequestHandler):
                         "elapsed": round(time.monotonic() - started, 2),
                         "egress_id": self.solver.egress_id,
                     })
-                    self._log(event="solve", req_id=req_id, host=_host_of(url), ok=True,
+                    self._log(event="solve", req_id=req_id, host=_host_of(url), path="/solve", ok=True,
                               cached=False, route=decision.mode, reason=decision.reason,
                               ms=round((time.monotonic() - started) * 1000))
                     return
@@ -1807,7 +2046,7 @@ class Handler(BaseHTTPRequestHandler):
                 result = dict(result)
                 result["routed_by"] = routed_by
             self._send(200, result)
-            self._log(event="solve", req_id=req_id, host=_host_of(url), ok=True,
+            self._log(event="solve", req_id=req_id, host=_host_of(url), path="/solve", ok=True,
                       cached=result.get("cached"), elapsed=result.get("elapsed"),
                       backend=result.get("backend"),
                       route=(routed_by or {}).get("mode") if routed_by else None,
@@ -1819,18 +2058,18 @@ class Handler(BaseHTTPRequestHandler):
                 # 却不知道它探测到了什么、选了哪条路。
                 e.extra = {**(getattr(e, "extra", None) or {}), "routed_by": routed_by}
             self._send(e.http_status, e.payload())
-            self._log(event="solve", req_id=req_id, host=_host_of(url), ok=False,
+            self._log(event="solve", req_id=req_id, host=_host_of(url), path="/solve", ok=False,
                       error_code=e.code.value, stage=e.stage,
                       route=(routed_by or {}).get("mode") if routed_by else None,
                       ms=round((time.monotonic() - started) * 1000))
         except Exception as e:  # noqa: BLE001
-            traceback.print_exc()
+            self._log_internal(e)
             err = SolveError(ErrorCode.INTERNAL, f"{type(e).__name__}: {str(e)[:160]}",
-                             stage="internal", hint="查看服务端 traceback")
+                             stage="internal", hint="查看服务端日志中同 req_id 的 internal 事件")
             if routed_by is not None:
                 err.extra = {**(getattr(err, "extra", None) or {}), "routed_by": routed_by}
             self._send(err.http_status, err.payload())
-            self._log(event="solve", req_id=req_id, ok=False, error_code=err.code.value,
+            self._log(event="solve", req_id=req_id, path="/solve", ok=False, error_code=err.code.value,
                       stage="internal", ms=round((time.monotonic() - started) * 1000))
 
     # -- 防护识别 ----------------------------------
@@ -1857,10 +2096,10 @@ class Handler(BaseHTTPRequestHandler):
                       "回环判断不成立。token 仍是第一道门。"),
             )
             self._send(err.http_status, err.payload())
-            self._log(event="shutdown-denied", peer=peer)
+            self._log(event="shutdown-denied", peer=peer, path="/shutdown")
             return
         self._send(202, {"ok": True, "state": "shutting-down", "peer": peer})
-        self._log(event="shutdown", peer=peer)
+        self._log(event="shutdown", peer=peer, path="/shutdown")
         srv = getattr(self, "server", None)
         if srv is not None and hasattr(srv, "begin_shutdown"):
             srv.begin_shutdown()
@@ -1896,7 +2135,7 @@ class Handler(BaseHTTPRequestHandler):
         except SolveError as e:
             self._send(e.http_status, e.payload())
         except Exception as e:  # noqa: BLE001
-            traceback.print_exc()
+            self._log_internal(e)
             err = SolveError(ErrorCode.INTERNAL, f"{type(e).__name__}: {str(e)[:160]}", stage="internal")
             self._send(err.http_status, err.payload())
 
@@ -1935,6 +2174,70 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if got_slot:
                 gate.release()
+
+    # -- YesCaptcha 兼容层（E1）-----------------------
+    def _handle_create_task(self, raw: bytes, body_error: str) -> None:
+        """`POST /createTask`：校验并起一个后台求解任务，立刻返回 taskId。"""
+        try:
+            payload = self._compat_payload(raw, body_error)
+            if not self._authorized_compat(payload):
+                raise CompatError(COMPAT_ERR_KEY, "clientKey/Authorization 缺失或错误")
+            record = self.solver.compat.create(payload.get("task"))
+        except CompatError as e:
+            self._compat_send_error(e)
+            return
+        except SolveError as e:
+            # 传输层畸形（非 JSON / 超大 body）：按本服务既有约定回 400/413，不塞进 errorId
+            self._send(e.http_status, e.payload())
+            return
+        except Exception as e:  # noqa: BLE001
+            self._log_internal(e)
+            self._compat_send_error(CompatError("ERROR_INTERNAL", f"{type(e).__name__}: {str(e)[:120]}"))
+            return
+        self._send(200, {"errorId": 0, "errorCode": "", "errorDescription": "", "taskId": record.task_id})
+
+    def _handle_get_task_result(self, raw: bytes, body_error: str) -> None:
+        """`POST /getTaskResult`：轮询任务结果。未完成返回 `status=processing`。"""
+        try:
+            payload = self._compat_payload(raw, body_error)
+            if not self._authorized_compat(payload):
+                raise CompatError(COMPAT_ERR_KEY, "clientKey/Authorization 缺失或错误")
+            record = self.solver.compat.result(payload.get("taskId"))
+        except CompatError as e:
+            self._compat_send_error(e)
+            return
+        except SolveError as e:
+            # 传输层畸形（非 JSON / 超大 body）：按本服务既有约定回 400/413，不塞进 errorId
+            self._send(e.http_status, e.payload())
+            return
+        except Exception as e:  # noqa: BLE001
+            self._log_internal(e)
+            self._compat_send_error(CompatError("ERROR_INTERNAL", f"{type(e).__name__}: {str(e)[:120]}"))
+            return
+        body = {"errorId": 0, "errorCode": "", "errorDescription": ""}
+        body.update(record.result_payload())
+        self._send(200, body)
+
+    def _compat_payload(self, raw: bytes, body_error: str) -> dict:
+        """兼容层的 body 解析。**传输层畸形仍按本服务约定**返回 400/413（那是客户端 bug，
+        不是业务错误，不能也塞进 errorId=1 —— 否则客户端会把"发错了"当"业务失败"重试）。
+
+        唯一例外：**完全没有凭据**时不回 400/413。否则未鉴权者可以在不持 key 的情况下
+        探出「本服务把 body 解析到了哪一步」（哪些是 JSON 畸形、哪些是超限），
+        与本服务"未授权一律不给信息"的口径不一致。
+        """
+        if body_error and not self._authorized():
+            raise CompatError(COMPAT_ERR_KEY, "clientKey/Authorization 缺失或错误")
+        if body_error:
+            if body_error.startswith("__payload_too_large__"):
+                raise SolveError(
+                    ErrorCode.PAYLOAD_TOO_LARGE,
+                    f"请求体超过 {MAX_BODY_BYTES} 字节",
+                    stage="validate",
+                    hint=f"减小请求体到 {MAX_BODY_BYTES} 字节以内后重试",
+                )
+            raise SolveError(ErrorCode.INVALID_REQUEST, body_error, stage="validate")
+        return self._parse_json(raw)
 
     def _run_detect(self, url: str, fresh: bool = False) -> None:
         """两种入口（GET 查询串 / POST JSON）共用的探测实现。
@@ -1979,7 +2282,7 @@ class Handler(BaseHTTPRequestHandler):
         except SolveError as e:
             self._send(e.http_status, e.payload())
         except Exception as e:  # noqa: BLE001
-            traceback.print_exc()
+            self._log_internal(e)
             err = SolveError(ErrorCode.INTERNAL, f"{type(e).__name__}: {str(e)[:160]}", stage="internal")
             self._send(err.http_status, err.payload())
         finally:
@@ -2005,19 +2308,89 @@ class Handler(BaseHTTPRequestHandler):
             # v5.0 T-51：413 = 可减小请求体后重试（400 = 请求坏了不该重试）。
             # 不在这里抛异常：本方法在 do_POST 的 try 之外被调用，
             # 抛出去会绕过审计与结构化响应；改为标记位，由调用方在 try 内转 413。
+            # 收尾顺序很关键：**先让调用方把 413 写出去，再回来读残余**（nginx 的
+            # lingering_close 就是这个顺序）。反过来的话：响应被上传速度拖住，
+            # 而且 body 超过读掉的上限时残余仍在缓冲里就被 close，内核照样发 RST。
+            # 这里只登记"待收尾"，真正的读发生在 `_send()` 写完响应之后。
+            self._drain_after_send = n
             self.close_connection = True
             return b"", _BODY_TOO_LARGE_MSG
         return self.rfile.read(n), ""
 
+    def _drain_after_response(self) -> None:
+        """响应已写出后调用的收尾钩子：把 `_read_body_raw` 登记的超大 body 残余读掉。"""
+        declared = getattr(self, "_drain_after_send", 0)
+        if not declared:
+            return
+        self._drain_after_send = 0
+        self._drain_bounded(declared)
+
+    def _drain_bounded(self, declared: int) -> None:
+        """**尽力**读掉最多 `DRAIN_MAX_BYTES` / `DRAIN_TIMEOUT` 的请求体残余。
+
+        三个约束都不能少（每一条都对应一个真实的失败方式）：
+          1. **必须用 `read1` 而不是 `read`**：`BufferedReader.read(n)` 会循环 raw read
+             直到凑满 n 字节 —— 滴流客户端能让一次 `read(64KB)` 阻塞几百秒，
+             外层 deadline 完全拦不住它。
+          2. **必须有墙钟 deadline**：只限单次 recv 超时是不够的（同上）。
+          3. **必须有字节上限**：`Content-Length` 是客户端声明的，写 10GB 也行；
+             全读就是把"拒绝请求"变成"帮攻击者下载流量"。
+        每轮还按剩余预算收紧 socket 超时，保证总耗时 ≈ DRAIN_TIMEOUT 量级。
+        任何异常都吞掉：这是收尾，不能影响已经决定好的状态码。
+        """
+        remaining = min(max(0, int(declared)), DRAIN_MAX_BYTES)
+        if remaining <= 0 or self.rfile is None:
+            return
+        conn = self.connection
+        deadline = time.monotonic() + DRAIN_TIMEOUT
+        prev_timeout = None
+        try:
+            prev_timeout = conn.gettimeout()
+        except OSError:
+            prev_timeout = None
+        try:
+            while remaining > 0:
+                left = deadline - time.monotonic()
+                if left <= 0:
+                    break
+                try:
+                    conn.settimeout(max(0.01, min(DRAIN_RECV_TIMEOUT, left)))
+                except OSError:
+                    break
+                # read1：**最多做一次** raw read，有多少拿多少 —— 不会为了凑满 n 而阻塞。
+                chunk = self.rfile.read1(min(8192, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except Exception:  # noqa: BLE001 —— 收尾的尽力而为
+            pass
+        finally:
+            if prev_timeout is not None:
+                try:
+                    conn.settimeout(prev_timeout)
+                except OSError:
+                    pass
+
+    def _query_lines(self) -> int:
+        """从 `?lines=N` 取条数。**调用方可控输入**，非法值一律回默认，不报错。
+
+        为什么不报 400：这是个只读的诊断端点，为"参数写错了"返回错误只会让排障更烦；
+        夹取到合法区间并回默认值即可（响应里 `kept`/`total` 会说明实际给了多少）。
+        """
+        query = self.path.split("?", 1)[1] if "?" in self.path else ""
+        for part in query.split("&"):
+            name, _, value = part.partition("=")
+            if name == "lines":
+                try:
+                    return int(value)
+                except (TypeError, ValueError):
+                    return DEFAULT_LOG_LINES
+        return DEFAULT_LOG_LINES
+
     @staticmethod
     def _parse_json(raw: bytes) -> dict:
-        try:
-            payload = json.loads(raw.decode("utf-8"))
-        except Exception as e:  # noqa: BLE001
-            raise SolveError(ErrorCode.INVALID_REQUEST, f"请求体不是合法 JSON：{e}", stage="validate")
-        if not isinstance(payload, dict):
-            raise SolveError(ErrorCode.INVALID_REQUEST, "请求体必须是 JSON 对象", stage="validate")
-        return payload
+        """保留为薄委托：实现已到 `request.parse_json_body`（v5.0.1 D1）。"""
+        return parse_json_body(raw)
 
 
 class Server(ThreadingHTTPServer):
@@ -2047,13 +2420,38 @@ class Server(ThreadingHTTPServer):
 
 
 def _track_inflight(method):
-    """给 handler 方法套一层在途计数（优雅退出靠它判断"还有没有人没回话"）。"""
+    """给 handler 方法套一层在途计数（优雅退出靠它判断"还有没有人没回话"）。
+
+    v5.0.1 起额外登记**在途明细**（`GET /status` 的数据源）：计数只回答"有几个"，
+    明细才能回答"卡在哪一个、卡了多久"。登记失败一律降级为"只有计数"，
+    绝不允许可观测性把请求本身搞挂。
+    """
     @functools.wraps(method)
     def wrapper(self, *args, **kwargs):
         Handler.enter_request()
+        # 每个 HTTP 请求一个 req_id：它同时是 solve 日志行、internal 异常行、/logs 缓冲、
+        # 审计文件、/status 在途明细的共同键。分散在各处各生成一个 ID 就"对不上号"了。
+        self._req_id = secrets.token_hex(4)
+        solver = getattr(Handler, "solver", None)
+        rid = 0
+        if solver is not None:
+            try:
+                # query 的剥离由 begin_request 负责（纵深防御 + 可单测），这里传原样即可。
+                rid = solver.begin_request(
+                    getattr(self, "command", "") or "", getattr(self, "path", "") or ""
+                )
+                # 记在 handler 实例上：`/status` 要据此把自己从明细里排除
+                self._inflight_rid = rid
+            except Exception:  # noqa: BLE001
+                rid = 0
         try:
             return method(self, *args, **kwargs)
         finally:
+            if rid:
+                try:
+                    solver.end_request(rid)
+                except Exception:  # noqa: BLE001
+                    pass
             Handler.exit_request()
     return wrapper
 

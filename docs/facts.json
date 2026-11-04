@@ -1,0 +1,10 @@
+{
+  "_generated_by": "scripts/validate-docs.mjs --write",
+  "_note": "文档里出现的测试数/覆盖率/结论条数必须与本文件一致（由 validate-docs.mjs 校验）。测试数/覆盖率/条数由 --write 重新测量；**version 例外：它是一次人为的发版决定，--write 不会覆盖它**，升版时手动改本文件 + CHANGELOG + docs/openapi.json + Dockerfile + docker-compose.yml 五处。",
+  "_measured_at": "2026-11-04",
+  "version": "5.0.1",
+  "python_tests": 532,
+  "python_coverage_percent": 86,
+  "go_tests": 41,
+  "findings": 51
+}

@@ -1,0 +1,333 @@
+"""`/status` 与 `/logs` 的契约测试 + `solver/eventlog.py` 的安全边界单测（v5.0.1 P2-1）。
+
+两件事必须同时成立，缺一不可：
+  1. **问题答得上来**：`/status` 能说清"现在有几个在途、最久那个多久"，
+     `/logs` 能说清"刚才那几条为什么失败"；
+  2. **不该漏的不漏**：`/logs` 是对外可读端点，凭证类字段必须由**白名单**挡住，
+     而不是指望每个调用点都记得别传。
+
+第 2 条是这组用例的重点 —— 一个"贴心的日志端点"如果会回显 token，
+那它是漏洞而不是功能。
+"""
+
+from __future__ import annotations
+
+import json
+import time
+
+import pytest
+
+from solver.eventlog import ALLOWED_FIELDS, MAX_VALUE_LEN, EventLog
+from solver.service import AUDIT_FIELDS, MAX_LOG_LINES
+from test_service import _get, _post, live_server  # noqa: F401 —— fixture 需被收集
+
+
+# ─────────────────────────────────────────── EventLog 单元测试
+
+
+def test_whitelist_covers_audit_fields():
+    """审计白名单是本模块白名单的子集。
+
+    两份白名单故意分开（审计落盘口径该更严），但**不允许漂移**：
+    有人往审计里加字段却忘了让 `/logs` 认得它，这条会红。
+    """
+    missing = set(AUDIT_FIELDS) - ALLOWED_FIELDS
+    assert not missing, f"这些审计字段没有进 /logs 白名单：{sorted(missing)}"
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["token", "cookie", "authorization", "cf_clearance", "password", "secret", "user_agent_full"],
+)
+def test_credential_like_fields_are_dropped(field):
+    """白名单外的一切字段必须被丢弃 —— 这是结构性防线，不依赖调用点自觉。"""
+    log = EventLog(maxlen=10)
+    log.record(event="solve", **{field: "SENSITIVE-VALUE"})
+    snap = log.snapshot(10)
+    assert snap["lines"], "事件本身应当被记录"
+    assert field not in snap["lines"][0], f"{field} 竟然进了可对外读的缓冲"
+    assert "SENSITIVE-VALUE" not in json.dumps(snap["lines"], ensure_ascii=False)
+    assert snap["dropped_fields"] == 1, "丢弃必须可观测，不能静默"
+
+
+def test_allowed_fields_survive():
+    log = EventLog(maxlen=10)
+    log.record(event="solve", host="example.com", ok=False, error_code="timeout", stage="solve")
+    line = log.snapshot(10)["lines"][0]
+    assert line["event"] == "solve"
+    assert line["host"] == "example.com"
+    assert line["ok"] is False
+    assert line["error_code"] == "timeout"
+    assert "ts" in line
+
+
+def test_long_values_are_truncated():
+    """域名/错误串是调用方可控输入：不截断就是内存放大器。"""
+    log = EventLog(maxlen=10)
+    log.record(event="solve", host="h" * (MAX_VALUE_LEN * 3))
+    assert len(log.snapshot(10)["lines"][0]["host"]) == MAX_VALUE_LEN
+
+
+def test_buffer_is_bounded_but_total_keeps_counting():
+    log = EventLog(maxlen=5)
+    for i in range(20):
+        log.record(event="solve", req_id=f"r{i}")
+    snap = log.snapshot(100)
+    assert snap["kept"] == 5, "缓冲必须定长"
+    assert snap["total"] == 20, "total 是累计条数，不是当前长度"
+    # 新的在前
+    assert snap["lines"][0]["req_id"] == "r19"
+    assert snap["lines"][-1]["req_id"] == "r15"
+
+
+def test_snapshot_lines_zero_returns_no_lines_but_counts():
+    log = EventLog(maxlen=10)
+    log.record(event="solve")
+    snap = log.snapshot(0)
+    assert snap["lines"] == []
+    assert snap["total"] == 1
+
+
+def test_concurrent_writes_do_not_lose_count():
+    """多线程并发写不丢计数、不抛异常（HTTP handler 是多线程的）。"""
+    import threading
+
+    log = EventLog(maxlen=50)
+    threads = [
+        threading.Thread(target=lambda: [log.record(event="solve", req_id="x") for _ in range(200)])
+        for _ in range(8)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert log.snapshot(0)["total"] == 1600
+
+
+# ─────────────────────────────────────────── HTTP 契约测试
+
+
+def test_status_requires_token(live_server):
+    status, body = _get(live_server, "/status")
+    assert status == 401
+    assert json.loads(body)["error_code"] == "unauthorized"
+
+
+def test_logs_requires_token(live_server):
+    status, body = _get(live_server, "/logs")
+    assert status == 401
+    assert json.loads(body)["error_code"] == "unauthorized"
+
+
+def test_status_answers_what_is_running(live_server):
+    status, body = _get(live_server, "/status", token="test-token")
+    assert status == 200
+    doc = json.loads(body)
+    assert doc["ok"] is True
+    assert doc["state"] == "ready"
+    assert doc["inflight_count"] == 0
+    assert doc["inflight"] == []
+    assert isinstance(doc["pid"], int)
+    assert doc["backends"] == ["camoufox"]
+    # 刻意不带 /health 完整体里的高敏字段
+    assert "last_error" not in doc
+    assert "proxies" not in doc
+    assert "ua_fingerprint" not in doc
+
+
+def test_logs_surface_failures_and_never_leak_token(live_server):
+    """一次真实的 400 会进缓冲，且响应里绝不出现 token。"""
+    code, payload = _post(live_server, "/solve", {"nope": 1}, token="test-token")
+    assert code == 400
+    assert payload["error_code"] == "invalid-request"
+
+    status, body = _get(live_server, "/logs?lines=10", token="test-token")
+    assert status == 200
+    assert "test-token" not in body, "/logs 泄露了 token"
+
+    doc = json.loads(body)
+    assert doc["total"] >= 1
+    solve_events = [ln for ln in doc["lines"] if ln.get("event") == "solve"]
+    assert solve_events, f"400 之后应当留下一条 solve 事件，实际：{doc['lines']}"
+    latest = solve_events[0]
+    assert latest["ok"] is False
+    assert latest["error_code"] == "invalid-request"
+    assert latest["req_id"], "没有 req_id 就无法和 stdout 的 JSON 行对上"
+
+
+def test_logs_lines_param_is_clamped_and_forgiving(live_server):
+    """`lines` 是调用方可控输入：非法值回默认、超大值夹取、负数夹到 0，都不报错。"""
+    for line in [ln for ln in ("?lines=1", "?lines=abc", f"?lines={MAX_LOG_LINES * 10}", "?lines=-5")]:
+        status, body = _get(live_server, f"/logs{line}", token="test-token")
+        assert status == 200, f"{line} 不该报错"
+        doc = json.loads(body)
+        assert doc["ok"] is True
+        assert len(doc["lines"]) <= MAX_LOG_LINES
+
+
+def test_logs_default_lines_when_no_param(live_server):
+    status, body = _get(live_server, "/logs", token="test-token")
+    assert status == 200
+    assert json.loads(body)["ok"] is True
+
+
+def test_status_counts_inflight_request(live_server):
+    """在途明细必须反映真实并发：慢请求期间 `/status` 应能看见它。"""
+    import threading
+
+    # 注意：这里必须用**脚本模式**的模块对象。
+    # `tests/test_service.py` 把 `solver/` 插进 sys.path 后 `import service`，而本文件顶部
+    # 用的是包模式 `solver.service` —— 两者是**两个不同的模块对象**（两个 Handler 类）。
+    # `live_server` fixture 把 solver 挂在脚本模式那个 Handler 上，读另一个对象永远是空的。
+    import service as svc
+
+    solver = svc.Handler.solver
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_solve():
+        # 直接打 solver 层：HTTP 层已有 _track_inflight 覆盖，这里验证
+        # "begin/end_request 的配对"与 status 的读取口径一致。
+        rid = solver.begin_request("POST", "/solve")
+        started.set()
+        release.wait(5.0)
+        solver.end_request(rid)
+
+    t = threading.Thread(target=slow_solve, daemon=True)
+    t.start()
+    assert started.wait(5.0)
+    try:
+        status, body = _get(live_server, "/status", token="test-token")
+        assert status == 200
+        doc = json.loads(body)
+        assert doc["inflight_count"] == 1
+        assert doc["inflight"][0]["path"] == "/solve"
+        assert doc["inflight"][0]["method"] == "POST"
+        assert doc["inflight"][0]["elapsed_sec"] >= 0.0
+    finally:
+        release.set()
+        t.join(5.0)
+
+    # 收尾后必须归零，否则就是"注册表泄漏"
+    status, body = _get(live_server, "/status", token="test-token")
+    assert json.loads(body)["inflight_count"] == 0
+
+
+def test_status_never_echoes_query_string(live_server):
+    """`/status` 是任何 token 持有者都能读的端点，绝不能把调用方的 query 回显出去。
+
+    具体场景：`POST /detect?url=https://internal-host/...` 里的内部主机名属于调用方的
+    敏感信息；若原样登记进在途注册表，`/status` 就会把它播给所有 token 持有者。
+    剥离做在 `Solver.begin_request` 里（纵深防御），所以这里直接测那一层。
+    """
+    from service import Handler  # 脚本模式模块：fixture 把 solver 挂在它上面
+
+    solver = Handler.solver
+    rid = solver.begin_request("GET", "/detect?url=https://internal-host.internal/secret&fresh=1")
+    try:
+        snap = solver.inflight_snapshot()
+        assert [r["path"] for r in snap] == ["/detect"], snap
+        assert "internal-host" not in json.dumps(snap, ensure_ascii=False)
+    finally:
+        solver.end_request(rid)
+
+
+# ─────────────────────────────────────────── 只读状态页（UI）
+
+def test_status_page_is_public_html(live_server):
+    """页面必须**免鉴权**且是 HTML —— 否则浏览器连页面都打不开。"""
+    status, body = _get(live_server, "/")
+    assert status == 200
+    assert "<!doctype html>" in body.lower()
+    assert "CF 求解服务" in body
+
+
+def test_status_page_contains_no_service_data(live_server):
+    """页面**不含任何服务端数据**：token 由用户在页面上填，数据靠浏览器的后续请求去拿。"""
+    _, body = _get(live_server, "/")
+    assert "test-token" not in body          # 服务器 token 绝不能出现在页面里
+    assert "cf_clearance" not in body.lower()
+
+
+def test_status_page_points_at_the_real_endpoints(live_server):
+    """页面上写的数据源必须与真实路由一致（改名/删除路由会在这里红）。"""
+    _, body = _get(live_server, "/")
+    for path in ("/health", "/status", "/logs"):
+        assert path in body, f"页面没有引用 {path}"
+    assert "sessionStorage" in body, "token 应当只存在 sessionStorage"
+
+
+def test_status_page_has_no_external_resources(live_server):
+    """零依赖：不引 CDN、不引字体、不引图标 —— 离线环境也必须能打开。"""
+    _, body = _get(live_server, "/")
+    lowered = body.lower()
+    for bad in ("http://", "https://", "<link ", "src=\"//"):
+        assert bad not in lowered, f"页面引用了外部资源：{bad}"
+
+
+def test_status_page_buttons_are_real_and_wired(live_server):
+    """按钮必须是真按钮且真的绑了行为（不是画上去的装饰）。"""
+    _, body = _get(live_server, "/")
+    for btn_id, handler in (
+        ("save", "saveBtn.addEventListener"),
+        ("refresh", "refreshBtn.addEventListener"),
+        ("auto", "autoBtn.addEventListener"),
+    ):
+        assert f'id="{btn_id}"' in body, f"缺少按钮 {btn_id}"
+        assert handler in body, f"按钮 {btn_id} 没有绑定事件"
+
+
+def test_status_page_escapes_untrusted_values(live_server):
+    """`esc()` 必须存在且覆盖 & < > \" ' —— 事件里的 host 是调用方可控输入。"""
+    _, body = _get(live_server, "/")
+    assert "function esc(" in body
+    assert "&amp;" in body and "&lt;" in body and "&quot;" in body
+
+
+def test_status_page_marks_previous_data_stale_when_unreachable(live_server):
+    """服务中途死掉时，页面**不许**继续用绿色显示上一次的数据。
+
+    这是截图验收时抓到的真缺陷：横幅说"连不上"，健康卡却还是绿色的 `ready/alive`，
+    在途卡还显示旧 pid —— 页面在用过期数据自相矛盾。
+    现在必须有 `markStale()` + "数据已过期 N 秒" 标记，并把卡片视觉降级。
+    """
+    _, body = _get(live_server, "/")
+    assert "markStale" in body
+    assert "数据已过期" in body
+    assert "classList.toggle(\"stale\"" in body
+    assert ".card.stale" in body
+
+
+def test_status_page_sends_hardening_headers(live_server):
+    """新增的公网可读端点必须自带防线（CSP / nosniff / 不许被 iframe 套壳 / 不发 Referer）。
+
+    为什么单列：它是对外**免鉴权**的页面，一旦将来有人往页面里塞了可变内容，
+    没有 CSP 就等于把 XSS 的后果放大到"能把 sessionStorage 里的 token 外传"。
+    """
+    import urllib.request
+
+    with urllib.request.urlopen(live_server + "/", timeout=10) as r:
+        h = {k.lower(): v for k, v in r.headers.items()}
+    assert "content-security-policy" in h, "缺少 CSP"
+    csp = h["content-security-policy"]
+    for directive in ("default-src 'none'", "connect-src 'self'", "frame-ancestors 'none'"):
+        assert directive in csp, f"CSP 缺少 {directive}"
+    assert h.get("x-content-type-options") == "nosniff"
+    assert h.get("referrer-policy") == "no-referrer"
+
+
+def test_allowed_fields_has_no_credential_like_names():
+    """反向断言：白名单里不能出现任何"看起来就是凭证"的字段名。
+
+    为什么需要它：`AUDIT_FIELDS ⊆ ALLOWED_FIELDS` 只能防"审计字段没进白名单"，
+    防不了"有人把 token 同时加进两个白名单"——那时子集关系依然成立、断言照样通过，
+    而凭证会进 `/logs`。这里用**名字黑名单**兜住这个方向。
+    """
+    # `clearance_len` 是**长度**（审计与 /logs 都只记长度，不记本体），显式豁免
+    SAFE = {"clearance_len"}
+    banned = ("token", "cookie", "clearance", "authorization", "secret", "password", "credential", "proxy")
+    offenders = sorted(
+        f for f in ALLOWED_FIELDS
+        if f not in SAFE and any(b in f.lower() for b in banned)
+    )
+    assert not offenders, f"这些字段名像凭证，不该进对外可读的 /logs：{offenders}"

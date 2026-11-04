@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import sys
 import threading
 import time
@@ -28,6 +29,8 @@ from errors import ErrorCode, SolveError  # noqa: E402
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:156.0) Gecko/20100101 Firefox/156.0"
 HOST = "https://example.com/"
+#: 原始 socket 用例手写 HTTP 报文时用（`b"\r\n"` 写成常量，避免在长行里混转义）
+CRLF = b"\r\n"
 GOOD_COOKIES = [
     {
         "name": "cf_clearance",
@@ -855,9 +858,208 @@ def test_oversized_body_on_detect_also_413(live_server):
     assert body["error_code"] == "payload-too-large"
 
 
+def test_oversized_body_finish_is_bounded(live_server):
+    """413 之后的收尾必须是**有界**的：声明值再大也不能一直读下去。
+
+    为什么单列一条：`Content-Length` 是**客户端声明**的，可以写 10GB。
+      · 读干净 → 把"拒绝请求"变成"帮攻击者下载流量"（DoS 放大器）；
+      · 一点不读 → 客户端还在写 body 时收到 RST，于是读不到 413
+        （实测约 1/30 抖动，见 workflow_status.md 批次 C 记录）；
+    正确解是有界读（`service.DRAIN_MAX_BYTES` / `DRAIN_TIMEOUT`）。本用例守它的两个边界：
+    既要拿到 413，又要在秒级内收尾，不能把 handler 线程钉住。
+    """
+    host, port = live_server.replace("http://", "").split(":")
+    declared = service.MAX_BODY_BYTES * 10  # 声明 10 倍，实际只发 1KB 就停
+    started = time.monotonic()
+    with socket.create_connection((host, int(port)), timeout=10.0) as sock:
+        head = (
+            b"POST /solve HTTP/1.1" + CRLF
+            + b"Host: 127.0.0.1" + CRLF
+            + b"Authorization: Bearer test-token" + CRLF
+            + b"Content-Type: application/json" + CRLF
+            + b"Content-Length: " + str(declared).encode() + CRLF
+            + CRLF
+        )
+        sock.sendall(head + b"x" * 1024)
+        data = sock.recv(4096)
+    elapsed = time.monotonic() - started
+    assert b"413" in data.split(CRLF, 1)[0], f"没拿到 413：{data[:200]!r}"
+    assert elapsed < 5.0, f"收尾耗时 {elapsed:.2f}s —— 有界收尾失效（要么读太多，要么没设短超时）"
+
+
 def test_oversized_body_hint_mentions_max_body_bytes(live_server):
     """413 的 hint 必须可执行：告诉调用方阈值与解决方向。"""
     oversized = b'{"url":"' + b"a" * (service.MAX_BODY_BYTES + 1) + b'"}'
     status, body = _post(live_server, "/solve", oversized, token="test-token")
     assert status == 413
     assert "--max-body-bytes" in body.get("hint", "")
+
+
+# ── P2-9：未预期异常必须有结构化日志（req_id + path），且栈不外泄到 /logs ──
+def test_internal_error_on_detect_is_logged_with_req_id(live_server, monkeypatch):
+    """`/detect` 的未预期异常：要能在 /logs 里按 req_id 找到它，且栈不进 /logs。"""
+    from service import Handler
+
+    def boom(*_a, **_k):
+        raise RuntimeError("boom-detect")
+
+    monkeypatch.setattr(Handler, "_run_detect", boom)
+    status, body = _post(live_server, "/detect", {"url": "http://127.0.0.1:1/"}, token="test-token")
+    assert status == 500
+    assert body["error_code"] == "internal"
+
+    _, logs_body = _get(live_server, "/logs?lines=20", token="test-token")
+    assert "Traceback" not in logs_body, "栈不该出现在对外可读的 /logs 里"
+    internal = [ln for ln in json.loads(logs_body)["lines"] if ln.get("event") == "internal"]
+    assert internal, "未预期异常必须留下一条 event=internal"
+    latest = internal[0]
+    assert latest["path"] == "/detect"
+    assert latest["req_id"], "没有 req_id 就无法和 stdout 的 JSON 行对上号"
+    assert latest["reason"].startswith("RuntimeError: boom-detect")
+    assert latest["error_code"] == "internal"
+
+
+def test_internal_error_on_solve_is_logged_with_req_id(live_server, monkeypatch):
+    """`/solve` 的未预期异常走同一条结构化出口（不是各写一套）。"""
+    from service import Handler
+
+    solver = Handler.solver
+
+    def boom(*_a, **_k):
+        raise ValueError("boom-solve")
+
+    monkeypatch.setattr(solver, "solve", boom)
+    status, body = _post(live_server, "/solve", {"url": HOST}, token="test-token")
+    assert status == 500
+    assert body["error_code"] == "internal"
+    assert "req_id" in body.get("hint", "") or "internal" in body.get("hint", "")
+
+    _, logs_body = _get(live_server, "/logs?lines=20", token="test-token")
+    internal = [ln for ln in json.loads(logs_body)["lines"] if ln.get("event") == "internal"]
+    assert internal and internal[0]["path"] == "/solve"
+    assert internal[0]["reason"].startswith("ValueError: boom-solve")
+
+
+def test_http_501_path_still_returns_structured_error_after_logging(live_server, monkeypatch):
+    """回归：改成 _log_internal 之后，异常路径**仍然**要回结构化 500，不能变成断连。"""
+    from service import Handler
+
+    def boom(*_a, **_k):
+        raise KeyError("nope")
+
+    monkeypatch.setattr(Handler, "_run_detect", boom)
+    status, body = _post(live_server, "/detect", {"url": "http://127.0.0.1:1/"}, token="test-token")
+    assert status == 500
+    assert set(body) >= {"ok", "error_code", "stage"}
+
+
+def test_ssrf_guard_still_runs_before_timeout_validation():
+    """组合非法输入（内网 URL + 坏 timeout）必须仍然报 **SSRF**，不能变成 timeout 文案。
+
+    这是 D1（请求解析下沉）最容易破的一条契约：一旦把 `clamp_timeout` 提前到解析期，
+    这类输入的错误文案就变了。夹取必须留在入口 SSRF 守卫**之后**。
+
+    注意：必须用**严格模式**（`allow_private_hosts=False`）的服务来测 ——
+    常用的 `live_server` 是宽松模式，SSRF 守卫直接放行，测不出顺序。
+    """
+    import json as _json
+
+    browser = FakeBrowser()
+    solver = service.Solver(browser_factory=factory_returning(browser),
+                            allow_private_hosts=False)
+    assert wait_until(lambda: solver.health()[0] == 200)
+    service.Handler.solver = solver
+    service.Handler.token = "strict-token"
+    srv = service.Server(("127.0.0.1", 0), service.Handler)
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    try:
+        status, body = _post(base, "/solve",
+                             {"url": "http://127.0.0.1:1/", "timeout": "not-a-number"},
+                             token="strict-token")
+        assert status == 400
+        assert body["error_code"] == "invalid-request"
+        text = _json.dumps(body, ensure_ascii=False)
+        assert "timeout" not in text, f"SSRF 守卫必须先于 timeout 校验：{text}"
+        assert "127.0.0.1" in text or "受限" in text, f"应当是 SSRF 拒绝：{text}"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        solver.close()
+
+
+def test_oversized_body_drain_has_wall_clock_deadline(live_server):
+    """滴流客户端不能把 handler 线程钉住（复审 B2）。
+
+    只限"单次 recv 超时"是不够的：客户端每 0.3 秒发 1 字节，每次 recv 都能按时返回，
+    字节数慢慢涨 → 128KB 能被拖十几个小时。必须有**总的**时间预算（先到者为准）。
+    """
+    host, port = live_server.replace("http://", "").split(":")
+    declared = service.MAX_BODY_BYTES * 100
+    started = time.monotonic()
+    resp = b""
+    with socket.create_connection((host, int(port)), timeout=15.0) as sock:
+        sock.sendall(
+            b"POST /solve HTTP/1.1" + CRLF
+            + b"Host: 127.0.0.1" + CRLF
+            + b"Authorization: Bearer test-token" + CRLF
+            + b"Content-Type: application/json" + CRLF
+            + b"Content-Length: " + str(declared).encode() + CRLF
+            + CRLF
+        )
+        sock.settimeout(0.3)
+        while time.monotonic() - started < 6.0:
+            try:
+                sock.sendall(b"x")          # 1 字节
+            except OSError:
+                break
+            try:
+                chunk = sock.recv(4096)
+                if chunk:
+                    resp += chunk
+                if CRLF + CRLF in resp:
+                    break
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+    elapsed = time.monotonic() - started
+    assert b"413" in resp.split(CRLF, 1)[0], f"没拿到 413：{resp[:120]!r}"
+    assert elapsed < 5.0, f"滴流收尾耗时 {elapsed:.2f}s —— drain 缺少总时限（B2 回归）"
+
+
+def test_oversized_body_larger_than_drain_still_returns_readable_413(live_server):
+    """body 远大于"读掉的上限"时，413 仍然必须**可读**（复审 B2 的核心场景）。
+
+    之前的实现是"先 drain ≤上限、再写 413"，于是 body 超过上限的残余留在接收缓冲里
+    就被 close，内核发 RST，客户端拿到的是 `Connection reset` 而不是 413。
+    正确顺序是**先写响应、再尽力读残余** —— 响应已经在客户端缓冲里，后来的 RST 不影响它。
+    """
+    host, port = live_server.replace("http://", "").split(":")
+    declared = 1024 * 1024                 # 1MB（远大于 DRAIN_MAX_BYTES=32KB）
+    payload = b"y" * (200 * 1024)          # 只发 200KB 就不再发了
+    resp = b""
+    with socket.create_connection((host, int(port)), timeout=10.0) as sock:
+        sock.sendall(
+            b"POST /solve HTTP/1.1" + CRLF
+            + b"Host: 127.0.0.1" + CRLF
+            + b"Authorization: Bearer test-token" + CRLF
+            + b"Content-Type: application/json" + CRLF
+            + b"Content-Length: " + str(declared).encode() + CRLF
+            + CRLF
+            + payload
+        )
+        # 注意：要一直读到 EOF/超时，**不能**头一到就跳出循环 —— 否则根本没读到 body，
+        # 断言会误报成"响应被挤掉"（我第一版就这么写错了）。
+        sock.settimeout(5.0)
+        while True:
+            try:
+                chunk = sock.recv(4096)
+            except (socket.timeout, OSError):
+                break
+            if not chunk:
+                break
+            resp += chunk
+    head = resp.split(CRLF, 1)[0]
+    assert b"413" in head, f"没拿到 413（拿到的是 {head!r}）—— 说明响应被残余数据挤掉了"
+    assert b"payload-too-large" in resp, f"413 的 body 不可读：{resp[:200]!r}"

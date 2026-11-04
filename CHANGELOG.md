@@ -2,6 +2,89 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [5.0.1] - 2026-11-04
+
+主题：**可观测性闭环 + 生态接入 + 门禁补强**（含一次独立复审与其修复；无破坏性变更）。
+
+### 新增
+
+- **只读状态页 `GET /`**（`solver/statuspage.py`）：单文件 HTML + 原生 JS，**零依赖零构建**。
+  三块面板（健康 / 在途请求 / 最近事件）；保存·刷新·自动刷新三个按钮；token 只存 `sessionStorage`。
+  页面**免鉴权但不含任何服务端数据**（数据要靠用户在页面上填 token 去读），并带严格 CSP
+  （`default-src 'none'` + `connect-src 'self'` + `frame-ancestors 'none'`）。
+  连不上服务时**刻意标"数据已过期 N 秒"并视觉降级** —— 页面不许用过期数据说"一切正常"。
+- **`GET /status`**：在途请求明细（最久的排最前），`exclude_rid` 把自己排除，另含 `compat` 计数。
+- **`GET /logs?lines=N`**：最近 200 条事件的环形缓冲（`solver/eventlog.py`），字段由**白名单**决定
+  （凭证类字段进不来），单值截断，`dropped_fields` 让"丢弃"可见。
+- **YesCaptcha 兼容层**：`POST /createTask` + `POST /getTaskResult`（`solver/compat.py`）。
+  3 种 task type（`AntiCloudflareTask` / `TurnstileTaskProxyless` / `RecaptchaV3TaskProxyless`）；
+  业务错误一律 **HTTP 200 + `errorId=1`**（生态客户端只看 errorId）；鉴权支持 Bearer **或** body `clientKey`。
+  **两条设计性拒绝**：不接受任务级代理（会让求解/回放出口不一致 → 稳定静默 403）、不提供 `getBalance`。
+- **`scripts/capture_sample.py`**：CF 挑战样本采集脚本化（替代 README 里"手工 curl + 手工抠 `_cf_chl_opt`"）。
+  默认 `--dry-run` 零网络；预算默认 5、硬上限 20；失败累计 ≥5 即停；产出带 **sha256** 的 manifest；
+  `Set-Cookie` 只记"有没有"，不记值。
+- **三道新门禁**：`scripts/validate-docs.mjs`（文档数字/版本以 `docs/facts.json` 为单一事实源）、
+  `scripts/check-coverage.mjs`（20 个模块**逐模块**覆盖率，未登记即红）、
+  `scripts/validate-openapi.mjs`（`docs/openapi.json` 与源码路由**双向**一致 + 鉴权声明 + 版本一致）。
+- `tests/test_detect_golden.py`：detect 签名表的 golden 差分（防"重新生成签名后分类结论静默漂移"）。
+- `tests/test_auth_matrix.py`：起真实服务逐个端点断言鉴权（**唯一能证明"鉴权真的在生效"**的检查）。
+- 启动参数 `--compat-max-pending`（兼容层待处理上限，默认 64）。
+
+### 变更
+
+- **`do_POST` 的请求解析与校验下沉到 `solver/request.py`**（纯函数，可脱离 HTTP 单测）：
+  `do_POST` 由 175 行降到 131 行；新增 52 项边界用例，**0.08s** 跑完。
+  **SSRF 守卫与 route 探测刻意不下沉**（一个是守卫、一个要出站），顺序与拆分前一致。
+- **日志贯穿**：`_track_inflight` 给每个 HTTP 请求分配一个 `req_id`，`/solve` 复用它；
+  三处 `traceback.print_exc()` 统一为 `Handler._log_internal()` —— 结构化行（`event=internal`
+  + `req_id` + `path`）进 stdout / 审计 / `/logs`，**完整栈仍只落 stderr**，并且消息里疑似路径被脱敏。
+- `AUDIT_FIELDS` 增 `path`，`/solve`、`/shutdown` 的日志调用点补齐，审计文件内键集一致。
+
+### 修复
+
+- `F-041`（high）：`solver/bootstrap.py` 的 `except (ValueError, SolveError)` 引用了**未导入**的
+  `SolveError` → 文档承诺的「引擎缺依赖 → 友好提示 + exit 2」变成 `NameError` 裸 traceback。
+  根因是 v5.0 把 `main()` 下沉到 `bootstrap.py` 时漏搬该符号；它藏在 38% 的覆盖率盲区里。
+- `F-042`（medium）：超大 body 返回 413 后不读请求体，客户端仍在写 → 收 RST 读不到 413
+  （实测 30 次抖动 1 次）。改为"先写响应、再用 `read1` + 墙钟 deadline 有界读残余"。
+- `F-043`（high）：镜像的 UBO 插件预热写的是 `|| echo WARN` → 构建 exit 0 但镜像缺件
+  （实测撞 `api.github.com` 403 限流）。改为**重试 3 次后硬失败**；并据此撤下"CI 里跑容器 e2e"的方案。
+- `F-044`（critical，复审发现，本轮引入本轮修）：上述 drain 只限单次 recv 超时，且用
+  `rfile.read(n)`（`BufferedReader` 会循环 raw read 凑满 n）→ 滴流客户端能把一条连接钉住约 20 分钟。
+  改用 `read1()` + 墙钟 deadline + 逐轮收紧超时。
+- `F-045`（critical，复审发现）：收尾顺序反了（先 drain 再写 413）→ body 超上限时残余仍在缓冲
+  就被 close → RST。改为"先响应、后读残余"。
+- `F-046` `F-047`（high/medium）：兼容层 `_run` 兜底范围不足（任务可永远 `processing`）、
+  `create()` 线程起不来不回滚（僵尸记录占配额）、保留期从创建时刻算（刚出结果就可能被清）。
+- `F-048`（medium）：非 ASCII `clientKey` 让 `secrets.compare_digest` 抛 `TypeError` → 500 + traceback 洪水。
+- `F-049`（high）：`validate-openapi.mjs` 的鉴权规则只看规格自洽、不看源码 → 「规格要鉴权、实现忘了」照样绿灯。
+  以 `tests/test_auth_matrix.py` 兜住。
+- `F-050`（high）：`capture_sample.py` 的 import 回退是死路，且 `detect_summary` 失败会让
+  `manifest.json` 丢失（真机预算已花）→ 改为仓库根入 path + `_safe_detect()`。
+
+### 不兼容变更
+
+- **无破坏性变更**：`/solve` 的成功响应体、`timeout` 的默认值与上下界、错误码语义**逐字未变**。
+- 唯一一处**对外文案**变更：`/solve` 的 `internal` 错误 `hint` 由「查看服务端 traceback」改为
+  「查看服务端日志中同 req_id 的 internal 事件」（已在 `docs/API.md` 记录）。
+- 审计 JSONL 新增 `path` 字段（只增不改，按固定键集解析的消费方需知悉）。
+
+### 验证
+
+- Python：**532 项**全绿；`solver/` 整体覆盖率 **86.42%**，**20 个模块逐模块门禁全达标**。
+- 接口规格：`validate-openapi.mjs` 12 个操作双向一致；文档数字 9 处一致；结论库 **50 条** exit 0。
+- 真实调用矩阵（真进程）：**27/27**；真实 E2E（真进程 + 真浏览器）：**30/30 / 25.7s**。
+- UI 截图验收（真 Chrome）：live 态 **12/12** + 服务中断态 **2/2**。
+- 真机（真实站点，本批用 **4 次**目标请求，累计失败 1/5）：
+  - `/detect` **3 站全部正确**：example.com→无防护(direct)、canva.com→**AWS WAF**(browser_cookie)、
+    udemy.com→**Cloudflare managed**(browser)；
+  - `route=auto` **2 站符合预期**：example.com 无盾 → `no_challenge=true`、**0.00s / 0 次求解**；
+    g2.com(DataDome) → 直接 `unsupported-provider` 拒绝（不白等 45s）；
+  - 真实求解 **1/1 成功**：udemy.com 18.32s 拿到 462 字节 `cf_clearance`，跨进程缓存命中 `cached=true`；
+  - **但回放未通过**：Python（单 cookie）与 Go 客户端（完整 2 cookie + 同 UA）回放 udemy 均返回
+    `status=200` 但**挑战页**（`Just a moment`）；glassdoor.co.uk 对照求解超时未完成，按纪律不重试。
+  - **结论：本版不声称「真机端到端通过」**。'solve 成功' ≠ '回放可用'，见 `findings` 的 `F-051`。
+
 ## [5.0.0] - 2026-11-03
 
 主题：**治理收尾 + 测试卫生（对照《下一步改进指南 v4.7→v5.0》W1/W3；T-53/T-54 受真机预算约束另行排期）。**

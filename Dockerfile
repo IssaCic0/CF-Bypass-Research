@@ -1,7 +1,7 @@
 # 求解服务镜像（v4.0 T-41）
 #
 # ✅ 状态：**已在本机实测**（v4.7，Docker 29.9.2 / linux-amd64）。
-#    构建：`docker build --build-arg SLIM_FONTS=1 -t cf-bypass-solver:4.7.0 .` → 3.52 GB
+#    构建：`docker build --build-arg SLIM_FONTS=1 -t cf-bypass-solver:5.0.1 .` → 3.52 GB
 #    运行：容器 **5–6s** 就绪（/health → state=ready）；`/detect` / `/solve` / `/metrics`
 #          / `/shutdown`（202 + exit 0）六项全部实测通过。见 `evidence/v47-container.md`。
 #    唯一需要重新确认的点：**换 camoufox 版本时** Debian 依赖包名可能变（base 是 python:3.12-slim，
@@ -77,8 +77,22 @@ RUN python -m camoufox fetch \
         if [ "$SLIM_FONTS" = "1" ]; then rm -rf "$B/fonts/M"; else rm -rf "$B/fonts"; fi; \
     fi \
  && if [ "$PREWARM_ADDONS" != "0" ]; then \
-        python -c "from camoufox.sync_api import Camoufox as C; c=C(headless=True); b=c.__enter__(); b.close(); c.__exit__(None,None,None)" \
-        || echo "WARN: 插件预热失败（离线构建？）—— 运行期首次启动会再尝试联网下载"; \
+        ok=0; \
+        for i in 1 2 3; do \
+            if python -c "from camoufox.sync_api import Camoufox as C; c=C(headless=True); b=c.__enter__(); b.close(); c.__exit__(None,None,None)"; then ok=1; break; fi; \
+            echo "插件预热第 $i 次失败，30s 后重试"; sleep 30; \
+        done; \
+        if [ "$ok" != "1" ]; then \
+            echo "ERROR: 插件预热失败，构建中止（不是『少个插件』那么简单）。"; \
+            echo "  实测（2026-11-04）：camoufox 的 UBO 插件源依赖 api.github.com 列 release，"; \
+            echo "  该接口会 403 限流 / 404 抖动；而真正的下载很慢（容器内首次启动实测 40s 才 7%，"; \
+            echo "  全量分钟级）。没有预热 → 每个新容器首启都要现场下载几分钟 → /health 长时间 503"; \
+            echo "  → 求解服务在 CI/离线环境里等于起不来。"; \
+            echo "  为什么不再只打 WARN：旧写法 exit 0 但镜像缺件，CI 会绿、发布物在有网环境下才偶然能用。"; \
+            echo "  当前可用的做法：构建时显式 --build-arg PREWARM_ADDONS=0（接受『首启慢数分钟』的代价），"; \
+            echo "  或先在能稳定访问 GitHub 的网络里构建一次并把 /home/solver/.cache 复用到镜像。"; \
+            exit 1; \
+        fi; \
     fi \
  && chown -R solver:solver /home/solver/.cache
 

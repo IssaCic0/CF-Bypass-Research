@@ -35,7 +35,7 @@ Go 网关(gocfsolve.Client/Pool) ──POST /solve──► solver/service.py (:
 
 | 组件 | 路径 | 状态 |
 |---|---|---|
-| 求解服务（多后端回落链，按域缓存，`/solve` `/detect` `/health` `/stats` `/metrics` `/shutdown`） | `solver/service.py` | ✅ 已实现并运行 |
+| 求解服务（多后端回落链，按域缓存，`/` 状态页 `/solve` `/detect` `/health` `/stats` `/status` `/logs` `/metrics` `/shutdown`；机器可读规格见 `docs/openapi.json`） | `solver/service.py` | ✅ 已实现并运行 |
 | **纯协议后端（cfsolve，Rust，无浏览器进程）** | `solver/cfsolve_backend.py` + `tools/cfsolve-patches/` | ✅ 同站 A/B 18.43s 最快（快于 Camoufox 19.56s） |
 | pydoll 后端（零 WebDriver CDP 直连 Chrome） | `solver/pydoll_backend.py` | ✅ steamdb/udemy 通过 |
 | Go 客户端（缓存 + 提前续期 + 403 自愈 + `Do()` 自动回放） | `gocfsolve/cfsolve.go` | ✅ 已实现 |
@@ -63,6 +63,13 @@ python solver/service.py --port 8878
 # 3) 跑端到端（会自动读 ./.env 里的 token）
 cd gocfsolve && go run ./examples/endtoend -target https://steamdb.info/
 ```
+
+> **开箱走的是浏览器路径，不是纯协议。** 上面两条准备命令只装了 Camoufox（浏览器后端，
+> 每次求解 16–20s、约 1.2GB 内存）。纯协议后端 `cfsolve` 是一个**需要单独构建的独立二进制**
+> （Rust，约 50MB），不在 pip 依赖里 —— 想要"纯协议优先"的 1.3–1.7s 回放速度，必须按
+> `docs/纯协议-cfsolve.md` 构建并把路径传给 `--cfsolve-bin`。
+> 运行 `python scripts/doctor.py` 会明确告知当前是哪种形态：`⚠ 纯协议后端 cfsolve: 未配置`
+> 表示当前只能用浏览器后端。
 
 ### 第 4 步：确认你成功了
 
@@ -234,6 +241,9 @@ solver/
   service.py            # ★ 服务主体：HTTP 层 + Solver 状态机（v5.0 下沉后 2073 行）
   bootstrap.py          # CLI 装配（参数解析 + 组件装配 + 信号处理，v5.0 下沉）
   metrics.py            # Prometheus 文本渲染（v5.0 下沉，覆盖率 95%）
+  request.py            # 请求解析与校验（D1 下沉：纯函数，52 项边界单测，覆盖率 99%）
+  compat.py             # YesCaptcha 兼容层（createTask/getTaskResult；映射纯函数 + 任务注册表）
+  statuspage.py         # 只读状态页（GET /，单文件 HTML+JS，零依赖零构建）
   errors.py             # 错误码与 SolveError（对外契约，HTTP 状态映射在此）
   cache.py              # 缓存层：SqliteStore(WAL，多进程共享) / FileStore / MemoryStore
   auth.py               # Bearer 鉴权 + token 首启自动生成（0600/指纹日志）
@@ -263,13 +273,14 @@ scripts/
   soak.py               # 长跑采样（--resume 断点续采、--token）
   loadtest.py           # 离线压测三模式（hot/cold/share）
   doctor.py             # 环境自检（起一次服务打 /health）
+  capture_sample.py     # CF 挑战样本采集（默认 dry-run；产出带 sha256 的 manifest）
   validate-findings.mjs # 校验 docs/findings.json（证据路径必须存在 + 定级规则）
   analyze.py            # 静态分析 jsd main.js：字符串字面量 / 码表 / 关键字命中
   scan_ctype.py         # 50 站采样，统计 CF 挑战类型 cType 分布
   probe_browser.py      # Playwright headless / headed 过盾对照实验
   probe_camoufox.py     # Camoufox 过盾实验
   diag_challenge.py     # 挑战页 DOM 诊断：iframe / checkbox / 按钮 / 截图
-tests/                  # 314 项 Python 测试（注入假浏览器/假后端，离线）
+tests/                  # 532 项 Python 测试（注入假浏览器/假后端，离线）
 docs/
   项目规格.md            # ★ 单一事实源：是什么/边界/承诺什么/不承诺什么
   API.md                # ★ 接口契约（参数/响应/错误码表）
@@ -361,6 +372,8 @@ python -m pytest tests/ -q                      # Python 侧（注入假浏览�
 python -m pytest tests/ -q --cov=solver --cov-fail-under=80   # 带覆盖率门槛
 cd gocfsolve && go vet ./... && go test -race ./...           # Go 侧（httptest + 竞态检测）
 node scripts/validate-findings.mjs              # 校验研究结论的证据链
+python scripts/capture_sample.py --url https://<target>/ --out samples/x        # 试运行（不联网）
+python scripts/capture_sample.py --url https://<target>/ --out samples/x --real # 真抓（受 --max-requests 预算约束）
 ```
 
 ### 压测与缓存共享演练（默认离线，不打真实站点）

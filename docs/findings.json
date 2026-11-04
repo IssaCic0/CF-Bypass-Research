@@ -688,6 +688,210 @@
           "locator": "原始 HEAD 上的间歇性红复现记录"
         }
       ]
+    },
+    {
+      "id": "F-041",
+      "verdict": "confirmed",
+      "severity": "high",
+      "claim": "`solver/bootstrap.py` 的 `except (ValueError, SolveError)` 引用了**未导入**的 `SolveError`，导致文档承诺的『浏览器引擎缺依赖 → 友好提示 + exit 2』这条路径实际抛 `NameError` 裸 traceback。实测复现：`python solver/service.py --engine cloakbrowser`（本机未装 cloakbrowser）→ `NameError: name 'SolveError' is not defined. Did you mean: 'ValueError'?`，退出码 1 且无安装提示。危害：用户按文档选择非默认引擎却拿不到『该装什么』的信息，只看到一串 traceback；而 `engines.py` 的设计意图正是『缺依赖启动即失败并给安装命令』。根因是 v5.0 T-56 把 `main()` 从 service.py 下沉到 bootstrap.py 时，两处 import 块漏了 `SolveError`（其余 18 个符号都搬了）。该路径一直没被发现，是因为 bootstrap.py 当时覆盖率只有 38%（`167-300` 整段未执行），而 `solver/` 整体 82% 的达标数字把这块盲区平均掉了 —— 本条同时印证了『整体覆盖率会给出虚假安全感』，已据此落地逐模块覆盖率门禁（docs/coverage-policy.json）。",
+      "evidence": [
+        {
+          "path": "solver/bootstrap.py",
+          "locator": "main() 的 except (ValueError, SolveError) 与两处 import 块（修复后 line 28/60 含 SolveError）"
+        },
+        {
+          "path": "tests/test_bootstrap.py",
+          "locator": "test_solveerror_is_imported_into_bootstrap_namespace / test_engine_preflight_failure_returns_2_with_friendly_message"
+        },
+        {
+          "path": "docs/coverage-policy.json",
+          "locator": "bootstrap.py min=87（修复前实测 38%）"
+        }
+      ]
+    },
+    {
+      "id": "F-042",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "claim": "超大请求体返回 413 之后直接关连接，**没有读掉请求体**，导致还在写 body 的客户端收到 RST、读不到那个 413 —— 也就是说 v5.0 T-51 定义的『413 = 可减小后重试』契约在真实网络下约 1/30 概率不成立。实测：`pytest tests/test_service.py -k oversized` 连跑 30 次失败 1 次（客户端异常是 ConnectionReset/Aborted，而不是拿到 413）。根因：`_read_body_raw` 在 `n > MAX_BODY_BYTES` 时只设 `close_connection=True` 就返回，未读的 body 留在 socket 里，服务端 close 时内核发 RST。修法：改为**有界**读掉前缀（`DRAIN_MAX_BYTES` = 2×上限、`DRAIN_TIMEOUT` = 1s 的短 socket 超时），既避免『读干净 = DoS 放大器』，也避免『一点不读 = 契约不可观测』。修后连跑 40 次 0 失败。注意这是**契约可观测性**问题，不是『偶发测试抖动』——同一个 bug 在真实调用方那里表现为『我发大 body 时有时拿不到结构化错误，只看到连接被重置』，会被误判成网络问题。",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "Handler._read_body_raw（超大分支）与 Handler._drain_bounded；常量 DRAIN_MAX_BYTES / DRAIN_TIMEOUT"
+        },
+        {
+          "path": "tests/test_service.py",
+          "locator": "test_oversized_body_finish_is_bounded（守有界收尾的上界与时效）"
+        },
+        {
+          "path": "workflow_status.md",
+          "locator": "批次 C 施工记录 → 413 收尾修复与 30 次/40 次重复实测数据"
+        }
+      ]
+    },
+    {
+      "id": "F-043",
+      "verdict": "confirmed",
+      "severity": "high",
+      "claim": "容器镜像的『UBO 插件预热』步骤是**静默降级**：`Dockerfile` 里写成 `python -c \"...Camoufox(headless=True)...\" || echo \"WARN: 插件预热失败...\"`，所以预热失败时构建仍然 **exit 0**，产出的是一个 addons 为空的镜像。实测（2026-11-04）：本机 docker build 时 `api.github.com/repos/camoufox/camoufox/releases` 返回 **403 rate limit exceeded** → 只打 WARN → 构建成功、镜像缺件。而缺件不是『少个插件』：用该镜像跑容器后 `/health` 在 51s 后仍是 **503**，日志显示 `Downloading addon (UBO): 0%→7%`（40s 才 7%，全量分钟级）——浏览器首启被插件下载拖住。也就是说这条静默降级会直接让『CI 绿 + 服务起不来』同时成立，正是本仓库在 cache.py 里明令禁止的『不允许静默降级』。修法：预热改为**重试 3 次后硬失败**（默认严格），要跳过必须显式 `--build-arg PREWARM_ADDONS=0`（docker-compose.yml 里已显式声明并写明代价）；同时因为该预热依赖上游 GitHub（403/404 抖动 + 下载极慢），『CI 里跑容器 e2e』的方案实测不可靠，已从 ci.yml 撤下并把判断依据写在文件末尾。",
+      "evidence": [
+        {
+          "path": "Dockerfile",
+          "locator": "RUN python -m camoufox fetch && ... 插件预热段（重试 3 次后 exit 1）"
+        },
+        {
+          "path": ".github/workflows/ci.yml",
+          "locator": "文件末尾『为什么这里没有 container / e2e job』与实测三步证据"
+        },
+        {
+          "path": "docker-compose.yml",
+          "locator": "x-solver.build.args.PREWARM_ADDONS: \"0\" 及其代价说明"
+        },
+        {
+          "path": "policy.md",
+          "locator": "§2『CI 永远离线』—— 2026-11-04 的联网例外已撤回"
+        }
+      ]
+    },
+    {
+      "id": "F-044",
+      "verdict": "confirmed",
+      "severity": "critical",
+      "claim": "`Handler._drain_bounded`（为修 F-042 而新增）只给了**单次 recv** 的 socket 超时，没有墙钟总预算；更糟的是它用 `rfile.read(n)`，而 `BufferedReader.read(n)` 会**循环 raw read 直到凑满 n 字节**。于是「100 字节 / 0.9 秒」滴流的客户端能让一次 `read(64KB)` 阻塞几百秒，外层循环的字节上限（128KB）根本拦不住 —— 一条连接就能把 一个 handler 线程钉住约 20 分钟，64~128 条连接即可打满 `ThreadingHTTPServer` 线程池。这是修 F-042 时**新引入**的可用性回归（改前是判定超大就立刻关连接，只占一个 RTT）。",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "Handler._drain_bounded（改用 read1 + 墙钟 deadline + 逐轮收紧 socket 超时）、常量 DRAIN_TIMEOUT / DRAIN_RECV_TIMEOUT"
+        },
+        {
+          "path": "tests/test_service.py",
+          "locator": "test_oversized_body_drain_has_wall_clock_deadline（滴流客户端必须在数秒内拿到 413）"
+        },
+        {
+          "path": "workflow_status.md",
+          "locator": "独立复审记录 → BLOCKER B1"
+        }
+      ]
+    },
+    {
+      "id": "F-045",
+      "verdict": "confirmed",
+      "severity": "critical",
+      "claim": "超大 body 的收尾顺序反了：先 drain 再写 413。标准 lingering-close 是「**先写响应、再读残余**」。顺序反了带来两个后果：①413 的发出被客户端上传速度拖住；②body 超过 drain 上限时，残余仍在接收缓冲里就被 close，内核发 RST，客户端拿到 `Connection reset` 而不是 413 —— 也就是说 F-042 要修的「413 契约在真实网络下不可靠」只是把失效阈值从 0 挪到了上限值。修法：把「登记待收尾」放在 `_read_body_raw`，真正的有界读移到 `_send()` 写完响应之后。",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "_read_body_raw 只设 self._drain_after_send；_send() 末尾调 _drain_after_response()"
+        },
+        {
+          "path": "tests/test_service.py",
+          "locator": "test_oversized_body_larger_than_drain_still_returns_readable_413（声明 1MB、只发 200KB，仍须读到 413 的 body）"
+        }
+      ]
+    },
+    {
+      "id": "F-046",
+      "verdict": "confirmed",
+      "severity": "high",
+      "claim": "YesCaptcha 兼容层的两处兜底缺失：①`TaskRegistry._run` 的 try 只圈住 `solver.solve()`，之后 `result.get(...)` / `solution_from_result(...)` 的任何意外都会让任务线程直接死掉、记录永远停在 `processing`（客户端 600s 内只拿到 processing，TTL 后才突然变 `TASK_ID_INVALID`）；②`create()` 先登记再 `Thread.start()`，线程起不来（如接近线程上限）时登记不回滚，留下永久 `processing` 的僵尸记录占着 `max_pending` 配额。修法：整个 `_run` 兜 `BaseException` 且 `_finish` 幂等；`start()` 失败回滚登记并回滚 `created_total`。",
+      "evidence": [
+        {
+          "path": "solver/compat.py",
+          "locator": "_run / _run_inner / _finish（幂等）/ create 的 start() 回滚"
+        },
+        {
+          "path": "tests/test_compat.py",
+          "locator": "test_solver_returning_non_dict_becomes_internal_error_not_stuck / test_thread_start_failure_rolls_back_registration / test_finish_is_idempotent"
+        }
+      ]
+    },
+    {
+      "id": "F-047",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "claim": "兼容层的结果保留期从**创建时刻**算，而不是完成时刻。后果：一个跑了很久的求解（真机 16–20s，超时上限 45s）刚出结果就可能被立刻清掉，调用方第一个 `getTaskResult` 就拿到 `ERROR_TASK_ID_INVALID` —— 与文档承诺的「结果保留 N 秒」矛盾。同时过期清理会删掉「还在跑」的记录，让客户端从 processing 直接跳到 TASK_ID_INVALID。修法：保留期从 `max(created_at, finished_at)` 起算；只清已完成的记录；并给 ready 记录加保留上限（防高频 create 把 `_tasks` 涨到几千条）。",
+      "evidence": [
+        {
+          "path": "solver/compat.py",
+          "locator": "_purge_locked（只清 ready、按 max(created_at, finished_at) 判过期、RETAIN_FACTOR 上限）"
+        },
+        {
+          "path": "tests/test_compat.py",
+          "locator": "test_purge_does_not_remove_processing_task / test_retained_ready_tasks_are_capped"
+        },
+        {
+          "path": "docs/API.md",
+          "locator": "YesCaptcha 兼容层 → 生命周期与上限（保留期从完成时刻起算）"
+        }
+      ]
+    },
+    {
+      "id": "F-048",
+      "verdict": "confirmed",
+      "severity": "medium",
+      "claim": "兼容层鉴权用 `secrets.compare_digest(str, str)` 比较 `clientKey`，而非 ASCII 字符串会让它抛 `TypeError`（该函数只对 bytes 做常量时间比较）。后果：任何人发 `{\"clientKey\":\"密码\"}` 就能让服务返回 `ERROR_INTERNAL` + 打一条 stderr traceback + 一条 `internal` 事件 —— 既是误诊（应为 KEY_DOES_NOT_EXIST），也给了未鉴权者一个零成本的日志放大手段。修法：先 `.encode('utf-8')` 再比较。",
+      "evidence": [
+        {
+          "path": "solver/service.py",
+          "locator": "Handler._authorized_compat（encode 后比较）"
+        },
+        {
+          "path": "tests/test_auth_matrix.py",
+          "locator": "test_compat_non_ascii_client_key_does_not_500"
+        }
+      ]
+    },
+    {
+      "id": "F-049",
+      "verdict": "confirmed",
+      "severity": "high",
+      "claim": "`scripts/validate-openapi.mjs` 的「鉴权规则」只校验**规格自洽**（有没有写 `security: []`），完全不看源码里该路由有没有真的调 `_authorized()`。于是「规格声明要鉴权、实现忘了鉴权」这种偏离在双向比对里照样通过 → 门禁给出虚假安全感。修法：不靠解析源码（脆弱），改为新增 `tests/test_auth_matrix.py` —— 起一次真实服务，对每个受保护端点发**无 token** 请求断言 401，对公开端点断言 200，兼容层断言 200+errorId=1。这是唯一能证明「鉴权真的在生效」的检查。",
+      "evidence": [
+        {
+          "path": "tests/test_auth_matrix.py",
+          "locator": "PROTECTED / PUBLIC_GET / COMPAT 三组参数化用例"
+        },
+        {
+          "path": "scripts/validate-openapi.mjs",
+          "locator": "PUBLIC_PATHS 白名单 + 注释说明鉴权执行由 auth matrix 覆盖"
+        }
+      ]
+    },
+    {
+      "id": "F-050",
+      "verdict": "confirmed",
+      "severity": "high",
+      "claim": "`scripts/capture_sample.py`（E2 新增）有两处会让「真机预算白花」的缺陷：①`sys.path` 插的是 `ROOT/solver` 而回退写 `from solver.detect import ...`（ROOT 不在 path 上），两条 import 路只有一条能成立 → 回退永远是死的；②`detect_summary(page)` 无保护，它抛异常会把 `capture()` 打穿，产物已落盘但 `manifest.json` 不会写 —— 恰好毁掉本脚本要解决的「可复现」问题。另有两处：`--max-scripts` 只在 dry-run 提示里生效、`build_plan`/`CapturePlan` 是死代码。修法：path 指仓库根 + 单一 import 形式；detect 失败写进 manifest 的 `detect.error` 而不中断；`max_scripts` 真传进 `capture()`；删除死代码。",
+      "evidence": [
+        {
+          "path": "scripts/capture_sample.py",
+          "locator": "sys.path.insert(0, str(ROOT)) / _safe_detect / capture(max_scripts=)"
+        },
+        {
+          "path": "tests/test_capture_sample.py",
+          "locator": "14 项（含 JSON 坏体、预算、硬上限、detect 结论）"
+        }
+      ]
+    },
+    {
+      "id": "F-051",
+      "verdict": "confirmed",
+      "severity": "high",
+      "claim": "2026-11-04 真机 E2E 实测：**求解能力在真实站点可用，但回放没有通过**。①`https://www.udemy.com/`（detect 判为 Cloudflare managed）：`POST /solve` 成功，18.32s 拿到 462 字节 `cf_clearance`；随后同一 clearance 跨进程命中缓存（`cached=true`，0.00s，cookies=2）—— 说明求解与缓存链路在真站是通的。②但**回放拿到的是挑战页**：Python 回放（只带 cf_clearance 单条 cookie）与 Go 客户端回放（带完整 2 条 cookie + 同 UA）都是 `status=200` 但 `挑战页=true`（body 含 `Just a moment` / `cf-mitigated`），`examples/endtoend` 判定 `❌ 端到端未通过`。③对照组 `https://www.glassdoor.co.uk/` 求解**超时未完成**（Go 客户端 `context deadline exceeded`），按实验纪律不重试，本批到此为止（累计失败 1/5）。**必须如实记录的是**：'solve 成功' 不等于 '回放可用'。udemy 是 managed 挑战，仅靠 `cf_clearance` 很可能不足以回放（推断：还需要浏览器会话里拿到的其它 cookie / sensor 状态）—— 这一条属**推断，未验证**。因此 5.0.1 的发布说明**不得**声称『真机端到端通过』。",
+      "evidence": [
+        {
+          "path": "evidence/real-e2e-20261104.json",
+          "locator": "rows[0]: udemy solve ok=true elapsed=18.32 replay{status:200, challenge:true} replay_ok=false"
+        },
+        {
+          "path": "workflow_status.md",
+          "locator": "真机 E2E 记录（2026-11-04）"
+        },
+        {
+          "path": "policy.md",
+          "locator": "§2 预算台账（本批用 4 次）"
+        }
+      ]
     }
   ]
 }

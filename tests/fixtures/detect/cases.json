@@ -1,0 +1,117 @@
+{
+  "_note": [
+    "detect 签名表的 golden 夹具。存在理由：solver/detect.py 的 SIGNATURES 是**生成物**",
+    "（scripts/gen_detect_signatures.py 可从 scrapfly/Antibot-Detector 重新生成），",
+    "一旦上游改了某条规则的字面量或置信度，detect() 的分类结果会**静默变化**——",
+    "而 97% 的覆盖率对此毫无防护（覆盖率只看代码行有没有被执行，不看结果对不对）。",
+    "本文件把'同一批输入应得到同一批结论'固定下来。",
+    "",
+    "改这些期望值前必须先回答：这条结论是**我想要的**，还是**现在恰好是这样**？",
+    "只有前者才允许改（并把理由写进 commit）。"
+  ],
+  "cases": [
+    {
+      "name": "cf-managed-header",
+      "why": "CF 用 cf-mitigated 头标记 managed challenge，必须判成需浏览器",
+      "input": {
+        "status": 403,
+        "headers": { "cf-mitigated": "challenge" },
+        "body": "",
+        "url": "https://x.test/"
+      },
+      "expect": { "detections": [["detect-cloudflare", 100]], "ctype": "managed", "route": "browser" }
+    },
+    {
+      "name": "cf-jsd-ctype",
+      "why": "老式 jsd 站是纯协议唯一有机会的地方，ctype 判错就等于白等 20s 浏览器",
+      "input": {
+        "status": 503,
+        "headers": {},
+        "body": "<script>window._cf_chl_opt={cType: 'jsd', cvId: '3'};</script>",
+        "url": "https://x.test/"
+      },
+      "expect": { "detections": [["detect-cloudflare", 95]], "ctype": "jsd", "route": "pure_protocol_may_work" }
+    },
+    {
+      "name": "cf-turnstile-widget",
+      "why": "Turnstile 要的是 token 不是 cf_clearance，路由必须分叉到 browser_token",
+      "input": {
+        "status": 403,
+        "headers": {},
+        "body": "<script src=\"https://challenges.cloudflare.com/turnstile/v0/api.js\"></script>",
+        "url": "https://x.test/"
+      },
+      "expect": { "detections": [["detect-cloudflare", 100]], "ctype": "turnstile", "route": "browser_token" }
+    },
+    {
+      "name": "cf-no-challenge-markers",
+      "why": "CF 在场但当前响应无挑战标记：应先直接抓，被拦了再求解（不能上来就起浏览器）",
+      "input": {
+        "status": 200,
+        "headers": {},
+        "body": "<html>hello</html>",
+        "url": "https://x.test/",
+        "cookies": { "__cf_bm": "abc" }
+      },
+      "expect": { "detections": [["detect-cloudflare", 50]], "ctype": "", "route": "direct_unless_blocked" }
+    },
+    {
+      "name": "cf-challenge-platform-url",
+      "why": "挑战脚本走 302 到 challenge-platform：body 为空时只能靠 url 判 managed",
+      "input": {
+        "status": 302,
+        "headers": {},
+        "body": "",
+        "url": "https://x.test/cdn-cgi/challenge-platform/h/b/orchestrate/jsch/v1"
+      },
+      "expect": { "detections": [], "ctype": "managed", "route": "browser" }
+    },
+    {
+      "name": "akamai-abck",
+      "why": "非 CF/AWS 的盾必须被判成 unsupported，避免把浏览器时间烧在解不了的目标上",
+      "input": {
+        "status": 200,
+        "headers": {},
+        "body": "",
+        "url": "https://x.test/",
+        "cookies": { "_abck": "ABC~-1~YAAQ" }
+      },
+      "expect": { "detections": [["detect-akamai", 100]], "ctype": "", "route": "unsupported_or_browser" }
+    },
+    {
+      "name": "aws-waf-token",
+      "why": "AWS WAF 有专门的 want=awswaf 通道，路由不能落到 unsupported",
+      "input": {
+        "status": 405,
+        "headers": {},
+        "body": "",
+        "url": "https://x.test/",
+        "cookies": { "aws-waf-token": "eyJ0eXAi" }
+      },
+      "expect": { "detections": [["detect-aws-waf", 100]], "ctype": "", "route": "browser_cookie" }
+    },
+    {
+      "name": "datadome-cookie",
+      "why": "DataDome 是明确不支持的一类，必须给出 unsupported 而不是静默直连",
+      "input": {
+        "status": 403,
+        "headers": {},
+        "body": "",
+        "url": "https://x.test/",
+        "cookies": { "datadome": "AbC~dEf" }
+      },
+      "expect": { "detections": [["detect-datadome", 100]], "ctype": "", "route": "unsupported_or_browser" }
+    },
+    {
+      "name": "clean-site",
+      "why": "无盾站是 route=auto 的主要收益来源：必须判 direct（0 次求解）",
+      "input": {
+        "status": 200,
+        "headers": {},
+        "body": "<html>nothing special</html>",
+        "url": "https://x.test/"
+      },
+      "expect": { "detections": [], "ctype": "", "route": "direct" }
+    }
+  ]
+}

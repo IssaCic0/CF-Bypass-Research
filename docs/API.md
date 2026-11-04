@@ -338,6 +338,163 @@ POST /shutdown      Authorization: Bearer <token>
 `/health` 的同义别名（字段一致）。**注意**：它现在要求 token（v2 起除 `/health` 外全部需要鉴权），
 所以"旧客户端不带 token 直接调"会得到 401 —— 如果你有这种客户端，改成用公开的 `/health`。
 
+## YesCaptcha 兼容层：`POST /createTask` + `POST /getTaskResult`（可选）
+
+**为什么要它**：存量爬虫/自动化栈大量按 YesCaptcha（2Captcha 系）的"异步任务"协议写代码。
+本服务原生是**同步** `POST /solve`，接进去要写适配器。这两个端点是给那类客户端的**薄兼容层**，
+让它们把 base_url 一改就能用，不必改代码。
+
+**它只是适配层**：内部仍然调用 `/solve` 的同一套求解链路（同一份缓存、同一套准入、同一份指标），
+没有第二条求解路径。不传这两个端点时，`/solve` 的行为**一个字节都没变**。
+
+### 鉴权
+
+三选一，优先 Bearer：
+
+| 方式 | 用法 |
+|---|---|
+| `Authorization: Bearer <token>` | 与本服务其它端点一致（推荐） |
+| body 里的 `clientKey` | YesCaptcha 客户端的习惯写法；值与 Bearer token 相同 |
+
+### `POST /createTask`
+
+```json
+{ "clientKey": "<token>", "task": { "type": "TurnstileTaskProxyless",
+                                    "websiteURL": "https://example.com/",
+                                    "websiteKey": "0x4AAAAAAA..." } }
+```
+
+响应（成功）：
+
+```json
+{ "errorId": 0, "errorCode": "", "errorDescription": "", "taskId": "a1b2c3d4e5f60718" }
+```
+
+### `POST /getTaskResult`
+
+```json
+{ "clientKey": "<token>", "taskId": "a1b2c3d4e5f60718" }
+```
+
+未完成：
+
+```json
+{ "errorId": 0, "errorCode": "", "errorDescription": "", "status": "processing" }
+```
+
+完成：
+
+```json
+{ "errorId": 0, "errorCode": "", "errorDescription": "", "status": "ready",
+  "solution": { "token": "0.abc...", "userAgent": "Mozilla/5.0 ..." } }
+```
+
+### 支持的 task type（**刻意只做 3 种**）
+
+| `task.type` | 映射到 | 必填 | 可选 | `solution` 结构 |
+|---|---|---|---|---|
+| `AntiCloudflareTask` | `want=clearance` | `websiteURL` | — | `{"cookies":{"cf_clearance":"…"},"userAgent":"…"}` |
+| `TurnstileTaskProxyless` | `want=turnstile` | `websiteURL`、`websiteKey` | `action`、`cdata` | `{"token":"…","userAgent":"…"}` |
+| `RecaptchaV3TaskProxyless` | `want=recaptcha_v3` | `websiteURL`、`websiteKey` | `pageAction` | `{"gRecaptchaResponse":"…","userAgent":"…"}` |
+
+未知类型返回 `errorId=1` + `ERROR_TASK_TYPE_NOT_SUPPORTED`，并在 `errorDescription` 里列出上面这 3 个。
+**不做的**：图片/滑块类（`ImageToTextTask` 等）、Akamai/DataDome/PerimeterX（本服务解不了，
+返回明确错误而不是让你白等）。
+
+### 两条刻意的拒绝（都不是"没实现"，是设计）
+
+1. **不接受任务级代理**（`proxyType`/`proxyAddress`/`proxyPort` 等字段）。
+   本项目的凭证是"绑定求解时出口 IP"的，而回放侧按 `--egress-id` 选出口。
+   若允许任务级代理，就会出现"求解走代理 A、回放走出口 B"→ **稳定的静默 403**
+   （这正是 `solver/service.py` 里 `--proxy` 与 `--cfsolve-bin/--pydoll` 被设为启动硬冲突的同一条原因）。
+   需要换出口请用启动参数 `--proxy` / `--egress-id`。
+   传了任务级代理字段 → `ERROR_PROXY_NOT_SUPPORTED` + 说明。
+2. **不提供 `getBalance`**。本服务没有计费模型，返回一个假的余额数字只会误导客户端。
+
+### 业务错误一律 HTTP 200 + `errorId=1`
+
+YesCaptcha 生态的客户端**按 `errorId` 判断成败**，不看 HTTP 状态码。所以这两个端点的业务错误
+（含鉴权失败）统一返回 `200` + `errorId=1`，否则客户端会把它当网络错误无限重试。
+唯一例外是**传输层畸形**（body 不是 JSON、超过 `--max-body-bytes`）：那属于客户端 bug，
+仍按本服务既有约定返回 `400` / `413`。
+
+| `errorCode` | 触发 |
+|---|---|
+| `ERROR_KEY_DOES_NOT_EXIST` | 缺少/错误的 token 或 clientKey |
+| `ERROR_TASK_TYPE_NOT_SUPPORTED` | 未知 `task.type` |
+| `ERROR_TASK_PARAM_INVALID` | 必填字段缺失/超长/类型错 |
+| `ERROR_PROXY_NOT_SUPPORTED` | 传了任务级代理字段 |
+| `ERROR_TASK_ID_INVALID` | `taskId` 不存在、已过期（结果保留 10 分钟）或已清理 |
+| `ERROR_NO_SLOT_AVAILABLE` | 待处理任务已达上限（`--compat-max-pending`，默认 64） |
+| `ERROR_CAPTCHA_UNSOLVABLE` | 求解失败（浏览器跑完但没拿到凭证 / 目标站拒绝） |
+| `ERROR_SERVICE_OVERLOAD` | 本服务准入拒绝（队列满 / 并发上限） |
+| `ERROR_TIMEOUT` / `ERROR_TRANSPORT` / `ERROR_INTERNAL` | 与 `/solve` 的 `timeout`/`transport`/`internal` 一一对应 |
+
+### 一个必须知道的代价：兼容层**没有** `route=auto`
+
+YesCaptcha 的协议里没有 `route` 字段，所以兼容层一律按 `fixed` 走 —— 也就是说它**不会**先探测。
+
+实测（2026-11-04，真进程）：对 `https://example.com/`（无 CF 挑战）发一个
+`AntiCloudflareTask`，会**白等满 45 秒**才返回 `ERROR_CAPTCHA_UNSOLVABLE: 45s 内未取得 cf_clearance`。
+
+而同样的目标用原生 `POST /solve {"url": "...", "route": "auto"}` 只需 **0.55 秒、0 次求解**
+（探测判定"无盾"直接放行，见 `docs/检测-防护识别.md`）。
+
+**所以**：能用原生 `/solve` 的场景就用原生；兼容层是给"客户端代码已经按 YesCaptcha 写好、
+不想改"的情况用的。要这个收益，请在调用侧先走一次 `POST /detect`，只把真有 CF 标记的站
+丢给 `/createTask`（`scripts/pick-prewarm-targets.py` 就是按这个思路筛目标的，可直接借鉴）。
+
+### 生命周期与上限（防止把兼容层变成资源泄漏）
+
+- 结果保留 **10 分钟**（`COMPAT_TASK_TTL`，**从任务完成时刻起算**，不是从创建时刻），过期后 `getTaskResult` 返回 `ERROR_TASK_ID_INVALID`；
+- 待处理任务上限默认 **64**（`--compat-max-pending`），满了立刻 `ERROR_NO_SLOT_AVAILABLE`；
+- 每个任务跑在守护线程里，进程退出不会挂在上面；`POST /shutdown` 的优雅退出照常生效。
+
+## GET /status — 需要 token
+
+"**现在正在干什么**"。与 `/stats` 的分工：`/stats` 给总量与运维全量字段，
+`/status` 给**在途请求明细**（排障第一问："是卡在哪个请求上、卡了多久"）。
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8878/status
+```
+
+```json
+{
+  "ok": true, "code": 200, "state": "ready", "pid": 12345,
+  "backends": ["camoufox"], "cache_backend": "sqlite:/data/cache",
+  "uptime_sec": 812.4, "queue_depth": 0,
+  "inflight_count": 1, "events_total": 37,
+  "inflight": [{ "rid": 12, "method": "POST", "path": "/solve", "elapsed_sec": 3.21 }]
+}
+```
+
+- `inflight` **最久的排最前**（卡住的就是它）。
+- `GET /status` **不会把自己算进 `inflight_count`**（否则调用方每次都要减一）。
+- 参与上表：**刻意不含** `last_error`、代理地址、UA 指纹 —— 那些属于 `/stats`（同样需要 token，
+  但 `/status` 的目标读者是"盯着面板看的人"，没必要把这些高敏字段也铺在屏幕上）。
+
+## GET /logs — 需要 token
+
+"**刚才那几条为什么失败**"。内存环形缓冲（最近 200 条），新的在前。
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8878/logs?lines=5'
+```
+
+```json
+{ "ok": true, "total": 37, "kept": 37, "dropped_fields": 0,
+  "lines": [{ "ts": 1762..., "event": "solve", "req_id": "a1b2c3d4", "host": "example.com",
+              "ok": false, "error_code": "timeout", "stage": "solve" }] }
+```
+
+- `total` 是**进入缓冲的累计条数**（缓冲定长，`kept` 才是当前保留数）。
+- `lines` 参数是**调用方可控输入**：`lines=abc` 回默认 50，`lines=9999` 夹到 200，`lines=-5` 当 0 —— **都不报 400**
+  （只读诊断端点，为参数写错返回错误只会让排障更烦）。
+- **字段安全靠白名单**（`solver/eventlog.py` 的 `ALLOWED_FIELDS`）：token / cookie / authorization
+  这类字段即使被误传也进不来；被丢弃的字段数会体现在 `dropped_fields` 里，不静默。
+- 每个 worker 各有自己的一份（多进程部署时逐个查）。
+
 ## GET /metrics — 需要 token
 
 Prometheus 文本格式。暴露的指标：
@@ -407,7 +564,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8878/metrics
 | `--cfsolve-profile` | 空 | 纯协议后端：浏览器 profile（`profiles/*.json`） |
 | `--cfsolve-timeout` | `120` | 纯协议后端单次超时（秒） |
 | `--flaresolverr` | 空 | 可选兜底后端地址（自托管 FlareSolverr 兼容服务） |
-| `--token-file` | `.env` | token 文件；首启自动生成 `CF_SOLVE_TOKEN=` |
+| `--token-file` | 环境变量 `CF_SOLVE_TOKEN_FILE`，未设置时 `.env` | token 文件；首启自动生成 `CF_SOLVE_TOKEN=`。容器里务必指到**挂载卷**（如 `/data/.env`）：token 变了派生密钥就变，共享缓存会被整库作废 |
 | `--no-auth` | 关 | 关闭鉴权，**仅限本机调试** |
 | `--allow-private-hosts` | 关 | 允许访问私网/回环目标，**仅限本机联调** |
 | `--headed` | 关 | 有头模式，调试用 |
