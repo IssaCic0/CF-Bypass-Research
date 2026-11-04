@@ -1056,3 +1056,63 @@ udemy 是 managed 挑战，光靠 `cf_clearance` 很可能不够（**推断，�
 
 policy.md §5 要求"一个任务卡 = 一个可独立回滚的 commit"。本轮为了发版合并成**一个 release commit**
 （逐项清单在 CHANGELOG 的 5.0.1 段，可按该清单回滚）。**这是已知偏差**，不是疏忽。
+
+---
+
+## v5.0.2（2026-11-04）：真机结论更正 + 判据收敛 + 一次几乎发生的凭证泄露
+
+### 真机续测：**推翻了我自己上一轮的结论**
+
+用户追加授权真机预算后继续查 "udemy 回放为什么失败"。结论是：**它没失败，是我的判据错了**。
+
+| 对照（同一套 fresh cookie，各 1 次） | 结果 |
+|---|---|
+| **带 cookie** | `200` / **306,752 字节** / 标题 `Udemy: Online Courses for Skills, Careers & AI` |
+| **不带 cookie** | `403` / **5,777 字节** / 标题 `Just a moment...` / 含 `_cf_chl_opt` |
+| 回放页面**前 2048 字节**逐条 marker 检查 | `just a moment` / `cf-mitigated` / `/cdn-cgi/challenge-platform/` / `challenges.cloudflare.com` **全部 0 命中** |
+
+⇒ **回放其实成功**。`Just a moment` 出现在 udemy **真实页面深处的 JS 文案**里。
+
+### 根因：两个**验证工具**各自复制了一份粗判据（`F-052`）
+
+| 位置 | 判据 | 对不对 |
+|---|---|---|
+| `gocfsolve/cfsolve.go::looksBlocked`（**生产客户端**） | 只看前 2048 字节；只在 200+html 时读正文；`cf-mitigated` 头与 403 优先 | ✅ 本来就是对的 |
+| `gocfsolve/examples/endtoend/main.go` | **整段 400KB body** `strings.Contains("Just a moment")` | ❌ 误报源 |
+| `scripts/verify_real.py` | **整段 body** `b"Just a moment" in body` | ❌ 误报源 |
+
+修法：判据收敛成一份 —— Go 导出 `gocfsolve.LooksBlocked()` 供 example 复用；
+Python 新增 `verify_real.is_challenge(status, headers, body)`（前缀 + 头/状态优先，与 Go 同口径）。
+两边都补了"marker 在深处不算挑战"的回归用例（Go 5 条 + Python 10 条）。
+
+### `F-051` 撤回为 `rejected`
+
+"udemy 回放未通过" 这条结论**已被实测推翻**，标 `rejected` 并**保留原文**——
+因为它曾被我写进 v5.0.1 的 CHANGELOG 与 Release notes，留痕比擦掉有用。
+v5.0.1 的 Release notes 已加顶部更正说明。
+
+### ⚠️ 一次几乎发生的凭证泄露（**在推送前拦下**）
+
+| 项 | 内容 |
+|---|---|
+| 发生了什么 | 取证时我写了临时文件 `_cookie_dump.json`（含真实 `cf_clearance` 462 字符 + `__cf_bm`），`git add -A` 把它一起 staged 了，进了 v5.0.2 的第一个提交 `cc60854` |
+| 何时发现 | 提交后**立刻**核对 `git show --name-only` 时发现；当时该提交**尚未 push** |
+| 处置 | `git reset --soft HEAD~1` 撤销提交 → 删除文件 → 写进 `.gitignore`（`_cookie_dump.json` / `*_cookie_dump.json`）→ 重新提交 |
+| 同类排查 | 全仓扫 `cf_clearance`：`docs/openapi.json` / `docs/findings.json` / `tests/fixtures/` / `plans/证据/*` **全部只是字段名，无真实值** |
+| 凭证轮换 | 该 clearance TTL ≤25 分钟且已过期；对应服务端缓存目录 `/tmp/realA` 已删除 |
+| 教训 | **`git add -A` 在"取证/实验"会话里是危险动作**。以后：①临时产物一律放仓库外或先加 .gitignore；②提交前必须 `git diff --cached --name-only` 人眼过一遍；③不能把"提交成功"当成"提交正确" |
+
+### 本批真机预算台账
+
+本批用 **6 次**（fresh solve 1 + 带/不带头探测 3 + 前 2048 字节探测 1 + Go 回放 1），累计失败仍为 **1/5**。
+累计用量 ≈**56 / 80**。
+
+### 其他修复
+- `tests/test_compat.py::test_purge_does_not_remove_processing_task` 的**时序脆弱**（TTL 0.01s 与轮询撞车，我自己写坏的）
+  → 改为 TTL 0.3s / delay 0.5s，连跑 3 次稳定。
+
+### 发版 v5.0.2
+commit `b62bb44` · tag `v5.0.2` · **CI 绿**（run 41757326587，4 job 全过）·
+Release: https://github.com/lza6/CF-Bypass-Research/releases/tag/v5.0.2
+门禁：Python **542** / Go **46** / 覆盖率 86% / 20 模块 / 12 操作 / 文档 9 处 / findings **52**（45/5/2）
+
