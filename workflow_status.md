@@ -1224,4 +1224,17 @@ R-E2E-1 4 次 → R-E2E-2 6 次 → R-E2E-3 2 次 = 本轮共 **12 次**；累�
 - **K-1 不变**：本版仍**不承诺** stage2 对最新变体收敛；只交付"收敛过程可视化"。
 - 差分报告的字段名集合会把长 URL 编码串当字段名（噪声），已记录为 P3。
 
+---
 
+## v6.0.1 发布记录（2026-11-04，修 CI 红）
+
+| 项 | 内容 |
+|---|---|
+| 触发 | v6.0.0 的 CI 在 `python (3.11)` job 红：`run.py::cmd_stop` 用了**跨行 f-string**（PEP 701 是 Python 3.12+）→ `SyntaxError`。本机 3.14 全绿，**只有 CI 能抓到** |
+| 修法 | 先算 `reason` 再插值，不再跨行 |
+| 一次无效尝试（留痕） | 先写了 `scripts/check_py_compat.py` 用 `ast.parse(feature_version=(3,11))` 做门禁，**实测放过了真实失败样例**（feature_version 不覆盖 3.12 的新 f-string tokenizer）→ **脚本与 CI 步骤已删除**。"看起来能拦、实际拦不住"的门禁比没有更坏 |
+| 补漏 | v6.0.0 的路径白名单提交漏了 `run.ps1`（T-80 转发改动），已在 `e413bbd` 补上 |
+| tag 移动 | `v6.0.1` 从 `bc1ccb3` 移到 `e413bbd`：原 tag 缺 `run.ps1`，checkout 会得到不完整内容（policy §5 tag 移动例外规则） |
+| CI | run `41801357561`（bc1ccb3）与 `41802654863`（e413bbd）**4 job 全绿** |
+| Release | https://github.com/lza6/CF-Bypass-Research/releases/tag/v6.0.1 |
+| 门禁 | Python **652 passed / 7 skipped** · 覆盖率 **87.50%** · 21 模块达标 · openapi 13 操作 · 文档 9 处一致 · findings 54 |
