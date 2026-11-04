@@ -13,8 +13,16 @@
   PEP 701（f-string 内换行）是 **Python 3.12+**，CI 的 `python (3.11)` job 直接
   `SyntaxError: unterminated string literal` → 测试与覆盖率门槛失败。
   本机 3.14 能跑，所以本地全绿掩盖了它 —— 这正是 CI 存在的价值。
-- 已改为先算 `reason` 再插值，并对**全仓 `.py` 用 `ast.parse(feature_version=(3,11))`
-  扫了一遍**：0 个 3.11 不兼容文件。
+- 已改为先算 `reason` 再插值。
+
+### 防复发：没有可靠的本地方案，只能靠 CI 的 3.11 job
+
+先试过 `ast.parse(source, feature_version=(3, 11))`，**实测它放过了那个真实的失败样例** ——
+`feature_version` 不覆盖 Python 3.12 引入的新 f-string tokenizer（PEP 701 是词法层变化）。
+一个"看起来能拦、实际拦不住"的门禁比没有门禁更坏，所以**没有把它留在仓库里**，也没写进 CI。
+
+结论（如实）：这类版本兼容问题**本机无可靠检测手段**，唯一有效的是 CI 的
+`python (3.11)` job —— 它这次确实抓到了，也正是它存在的价值。
 
 ### 验证
 

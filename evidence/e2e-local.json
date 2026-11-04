@@ -2,14 +2,14 @@
   "task_id": "e2e-local",
   "status": "done",
   "result": "passed",
-  "timestamp": "2026-11-03T04:02:32+0800",
-  "baseline_commit": "4b43a69",
-  "duration_sec": 17.0,
+  "timestamp": "2026-11-04T12:03:59+0800",
+  "baseline_commit": "ef55d0f",
+  "duration_sec": 26.8,
   "commands_executed": [
     {
       "cmd": "python scripts/e2e_local.py --json-out evidence/e2e-local.json",
       "exit_code": 0,
-      "raw_output_tail": "[PASS] B02_detect_plain_site_is_direct  — status=200 protected=False route=direct\n[PASS] B03_route_auto_skips_solve  — status=200 no_challenge=True solves=0->0 elapsed=0.00s\n[PASS] B04_route_auto_is_fast  — elapsed=0.00s (<10s)\n[PASS] B05_route_auto_returns_decision  — routed_by={\"mode\": \"auto\", \"action\": \"skip\", \"reason\": \"no-protection\", \"prefer\": \"any\", \"hint\": \"探测未命中任何防护特征，直接请求目标站即可（省掉一次 16–20s 的浏览器求解）\", \"detail\": {\"status\": 200}, \"\n[PASS] B06_fixed_path_structured_result  — status=200 solved=False ok=False error_code=unsolved\n[PASS] B07_alive_after_browser_run  — state=ready failures=1\n[PASS] B08_audit_log_written  — 2 行\n[PASS] B09_audit_has_solve_event  — events=solve\n[PASS] B10_audit_has_no_token  — token 未出现在审计文件中\n[PASS] B11_shutdown_202  — http=202\n[PASS] B12_shutdown_exit_code_0  — exit=0\n[PASS] B13_no_traceback_in_log\n"
+      "raw_output_tail": "[PASS] B02_detect_plain_site_is_direct  — status=200 protected=False route=direct\n[PASS] B03_route_auto_skips_solve  — status=200 no_challenge=True solves=0->0 elapsed=0.02s\n[PASS] B04_route_auto_is_fast  — elapsed=0.02s (<10s)\n[PASS] B05_route_auto_returns_decision  — routed_by={\"mode\": \"auto\", \"action\": \"skip\", \"reason\": \"no-protection\", \"prefer\": \"any\", \"hint\": \"探测未命中任何防护特征，直接请求目标站即可（省掉一次 16–20s 的浏览器求解）\", \"detail\": {\"status\": 200}, \"\n[PASS] B06_fixed_path_structured_result  — status=200 solved=False ok=False error_code=unsolved\n[PASS] B07_alive_after_browser_run  — state=ready failures=1\n[PASS] B08_audit_log_written  — 2 行\n[PASS] B09_audit_has_solve_event  — events=solve\n[PASS] B10_audit_has_no_token  — token 未出现在审计文件中\n[PASS] B11_shutdown_202  — http=202\n[PASS] B12_shutdown_exit_code_0  — exit=0\n[PASS] B13_no_traceback_in_log\n"
     }
   ],
   "files_changed": [],
@@ -18,7 +18,7 @@
       "name": "A01_service_ready",
       "type": "e2e",
       "status": "pass",
-      "evidence": "port=44944 token_file=有"
+      "evidence": "port=47838 token_file=有"
     },
     {
       "name": "A02_token_file_created",
@@ -42,7 +42,7 @@
       "name": "A05_health_auth_full_view",
       "type": "e2e",
       "status": "pass",
-      "evidence": "cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-e2e-hhfvv32f\\cache solves=0"
+      "evidence": "cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-e2e-_6s9zn4u\\cache solves=0"
     },
     {
       "name": "A06_metrics_without_token_401",
@@ -120,7 +120,7 @@
       "name": "B01_service_ready",
       "type": "e2e",
       "status": "pass",
-      "evidence": "port=44986"
+      "evidence": "port=47912"
     },
     {
       "name": "B02_detect_plain_site_is_direct",
@@ -132,13 +132,13 @@
       "name": "B03_route_auto_skips_solve",
       "type": "e2e",
       "status": "pass",
-      "evidence": "status=200 no_challenge=True solves=0->0 elapsed=0.00s"
+      "evidence": "status=200 no_challenge=True solves=0->0 elapsed=0.02s"
     },
     {
       "name": "B04_route_auto_is_fast",
       "type": "e2e",
       "status": "pass",
-      "evidence": "elapsed=0.00s (<10s)"
+      "evidence": "elapsed=0.02s (<10s)"
     },
     {
       "name": "B05_route_auto_returns_decision",
@@ -199,7 +199,7 @@
     {
       "name": "A01_service_ready",
       "ok": true,
-      "detail": "port=44944 token_file=有"
+      "detail": "port=47838 token_file=有"
     },
     {
       "name": "A02_token_file_created",
@@ -219,7 +219,7 @@
     {
       "name": "A05_health_auth_full_view",
       "ok": true,
-      "detail": "cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-e2e-hhfvv32f\\cache solves=0"
+      "detail": "cache=sqlite:C:\\Users\\ADMINI~1.DES\\AppData\\Local\\Temp\\cfsolve-e2e-_6s9zn4u\\cache solves=0"
     },
     {
       "name": "A06_metrics_without_token_401",
@@ -284,7 +284,7 @@
     {
       "name": "B01_service_ready",
       "ok": true,
-      "detail": "port=44986"
+      "detail": "port=47912"
     },
     {
       "name": "B02_detect_plain_site_is_direct",
@@ -294,12 +294,12 @@
     {
       "name": "B03_route_auto_skips_solve",
       "ok": true,
-      "detail": "status=200 no_challenge=True solves=0->0 elapsed=0.00s"
+      "detail": "status=200 no_challenge=True solves=0->0 elapsed=0.02s"
     },
     {
       "name": "B04_route_auto_is_fast",
       "ok": true,
-      "detail": "elapsed=0.00s (<10s)"
+      "detail": "elapsed=0.02s (<10s)"
     },
     {
       "name": "B05_route_auto_returns_decision",
