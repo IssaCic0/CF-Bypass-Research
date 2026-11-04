@@ -18,8 +18,8 @@
   ],
   "modules": {
     "solver/auth.py": {
-      "min": 72,
-      "why": "凭证入口；未覆盖的是多进程首启竞态与 OSError 分支"
+      "min": 85,
+      "why": "凭证入口；T-82 起门槛 85%（并发首启竞态/追加/OSError 分支已由 tests/test_auth_probe_gaps.py 覆盖）"
     },
     "solver/backends.py": {
       "min": 93,
@@ -71,8 +71,8 @@
       "why": "保活续期：退避 + 抖动"
     },
     "solver/probe.py": {
-      "min": 73,
-      "why": "探测工具；非主链路"
+      "min": 85,
+      "why": "逐跳重定向守卫；T-82 起门槛 85%（重定向链/熔断/无 Location/非 3xx/传输错误已由 tests/test_auth_probe_gaps.py 覆盖）"
     },
     "solver/proxypool.py": {
       "min": 89,
@@ -97,6 +97,10 @@
     "solver/statuspage.py": {
       "min": 100,
       "why": "只读状态页的 HTML/JS 常量：它是常量不是逻辑，覆盖率天然 100%；契约由 test_observability 的 6 条页面用例守住（免鉴权/无数据/无外部资源/按钮真绑/转义）"
+    },
+    "solver/console_html.py": {
+      "min": 100,
+      "why": "T-78 只读控制台的 HTML/JS 常量：与 statuspage.py 同性质（常量非逻辑），契约由 tests/test_console.py 的 9 条用例守住（401/无写面/CSP/no-store/不含 token/白名单渲染/四区块空态/无外部资源）"
     }
   }
 }

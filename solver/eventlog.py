@@ -29,6 +29,7 @@ ALLOWED_FIELDS = frozenset(
     {
         "event",      # solve / detect / shutdown / shutdown-denied …
         "req_id",     # 短随机串，用于把同一请求的多行串起来
+        "request_id", # T-79：对外契约的贯穿 ID（与 req_id 同值，非敏感）
         "host",       # 目标域名（运维必须知道是哪个站出的问题）
         "ok",         # bool
         "elapsed",    # 秒（浮点）

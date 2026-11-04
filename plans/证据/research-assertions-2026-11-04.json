@@ -1,0 +1,39 @@
+{
+  "generated_utc": "2026-11-04T08:09:57Z",
+  "strength": "literal-substring",
+  "strength_note": "断言为字面量子串存在性（如 'counter' in js），不是 AST 结构校验；通过 ≠ 结构未变，只说明该标记仍出现。升级路径见 plans/下一步改进指南.md T-72",
+  "assertions": [
+    "dispatcher",
+    "collection_fn",
+    "probe_state",
+    "counter",
+    "token",
+    "input",
+    "A_inline_chl_opt",
+    "B_static_token",
+    "C_encoder_shape"
+  ],
+  "variants": [
+    {
+      "id": "2026-11-04-6c02e277",
+      "assertions": {
+        "dispatcher": "skip",
+        "collection_fn": "skip",
+        "probe_state": "skip",
+        "counter": "skip",
+        "token": "skip",
+        "input": "skip",
+        "A_inline_chl_opt": "pass",
+        "B_static_token": "pass",
+        "C_encoder_shape": "fail"
+      },
+      "skip_reason": "样本未走到 stage2（无 response.decoded.txt）：stage2 结构断言不可判定，需一份到 probe POST 的完整会话"
+    }
+  ],
+  "totals": {
+    "pass": 2,
+    "fail": 1,
+    "skip": 6
+  },
+  "skip_reason": null
+}

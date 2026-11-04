@@ -1,0 +1,866 @@
+# cfsolve 计算属性别名规则「数据驱动化」补丁 (2026-11-04, T-71)
+# 任务卡: plans/下一步改进指南.md T-71（L2）
+# 基线: upstream master b5a9eb3（本地副本 HEAD 之前）
+# 内容: ① 前置——11-03 补丁组的 alias 表预取（本轮开始前已 staged 在本地索引里，原样保留，
+#          对应本地 commit 073fe49，见 PATCHES.json 的 prerequisite 说明）
+#       ② T-71 本体（本地 commit aeacaa5）
+# 用法: git apply（在 b5a9eb3 之上）→ 再应用 cfsolve-stage2-counter-diag-20261104.patch
+# 校验: cargo test --lib alias_rules / cargo test --lib deobfuscate::analysis::properties
+#       cargo test --lib challenge::expression
+# 开关: CFSOLVE_ALIAS_RULES=off 逐字恢复 11-03 的手写判定
+diff --git a/src/alias_rules.json b/src/alias_rules.json
+new file mode 100644
+index 0000000..f539a5d
+--- /dev/null
++++ b/src/alias_rules.json
+@@ -0,0 +1,50 @@
++{
++  "BINOP(+)": {
++    "count": 1,
++    "dynamic_instances": 1,
++    "examples": [
++      {
++        "file": "alias-rules.js",
++        "line": 30
++      }
++    ],
++    "static_evaluable": false,
++    "static_instances": 0
++  },
++  "CALL(IDENT,[])": {
++    "count": 1,
++    "dynamic_instances": 1,
++    "examples": [
++      {
++        "file": "alias-rules.js",
++        "line": 28
++      }
++    ],
++    "static_evaluable": false,
++    "static_instances": 0
++  },
++  "CALL(MEMBER(IDENT,IDENT),[])": {
++    "count": 1,
++    "dynamic_instances": 1,
++    "examples": [
++      {
++        "file": "alias-rules.js",
++        "line": 29
++      }
++    ],
++    "static_evaluable": false,
++    "static_instances": 0
++  },
++  "MEMBER(IDENT,IDENT)": {
++    "count": 1,
++    "dynamic_instances": 0,
++    "examples": [
++      {
++        "file": "alias-rules.js",
++        "line": 25
++      }
++    ],
++    "static_evaluable": true,
++    "static_instances": 1
++  }
++}
+diff --git a/src/alias_rules.rs b/src/alias_rules.rs
+new file mode 100644
+index 0000000..69528ea
+--- /dev/null
++++ b/src/alias_rules.rs
+@@ -0,0 +1,414 @@
++//! Rules for computed keys that alias a static string.
++//!
++//! The 11-03 patch relaxed two hand-written checks — [`crate::deobfuscate`]'s
++//! `is_static_member_key` and the `Member` branch of
++//! [`crate::challenge::expression::evaluate`] — to read a computed key that is itself a static
++//! member read, `record[helper.key]`. Both checks now consult the same embedded rule table, so a
++//! new obfuscator shape is added once, as data, instead of twice, as code.
++//!
++//! The table is generated, not written: `tools/cfsolve-patches/analyze/alias_shapes.py` (in the
++//! CF-Bypass-Research checkout) normalizes every computed-key expression in a rule corpus to a
++//! *shape signature* — the expression with every variable name erased — and reports whether its
++//! evaluator resolved that shape without running code. A shape that resolved only sometimes
++//! stays dynamic, because the generator reports `static_evaluable` only when every instance
++//! resolved. Shapes the table does not name are dynamic.
++//!
++//! That default is what keeps the relaxation from overshooting. `record[getKey()]` has no rule,
++//! so it stays dynamic even if the alias table happens to hold a value under a key of that name,
++//! and the object it reads stays opaque instead of being rewritten on a guessed key.
++//!
++//! `CFSOLVE_ALIAS_RULES=off` restores the hard-coded checks, for bisecting a regression against
++//! the 11-03 path.
++
++use std::collections::BTreeMap;
++use std::sync::OnceLock;
++
++use anyhow::{Context, Result};
++use serde_json::Value;
++use swc_core::ecma::ast::{Expr, Lit, MemberProp};
++
++/// The generated rule table, embedded so the solver reads no file at runtime.
++///
++/// Regenerate it from the rule corpus, then copy it here:
++///
++/// ```text
++/// python tools/cfsolve-patches/analyze/alias_shapes.py \
++///     tools/cfsolve-patches/analyze/fixtures/alias-rules.js \
++///     --out /d/cfsolve-upstream/src/alias_rules.json
++/// ```
++///
++/// `--check` compares a generated table against this file and exits non-zero on drift.
++const GENERATED: &str = include_str!("alias_rules.json");
++
++/// The switch that restores the hard-coded checks.
++const SWITCH: &str = "CFSOLVE_ALIAS_RULES";
++
++/// Whether a computed key of this shape is an alias for a static string.
++pub(crate) fn is_alias_key(expression: &Expr) -> bool {
++    is_alias_key_with(expression, enabled())
++}
++
++/// Whether [`signature`] is admitted by the embedded table.
++#[cfg(test)]
++fn is_admitted(signature: &str) -> bool {
++    rules().is_static(signature)
++}
++
++/// Reads the switch once: the rules are either on or off for the life of the process.
++fn enabled() -> bool {
++    static ENABLED: OnceLock<bool> = OnceLock::new();
++    *ENABLED.get_or_init(|| switch(std::env::var(SWITCH).ok().as_deref()))
++}
++
++/// Whether the switch `value` leaves the rule table in charge. Only an explicit off value hands
++/// control back to the hard-coded checks, so an unset or unrelated value changes nothing.
++fn switch(value: Option<&str>) -> bool {
++    match value {
++        Some(value) => !matches!(
++            value.trim().to_ascii_lowercase().as_str(),
++            "off" | "0" | "false"
++        ),
++        None => true,
++    }
++}
++
++/// [`is_alias_key`] with the data-driven decision chosen by the caller, for tests and for the
++/// command-level switch.
++fn is_alias_key_with(expression: &Expr, data_driven: bool) -> bool {
++    if data_driven {
++        return rules().is_static(&signature(expression));
++    }
++    // The 11-03 check, unchanged: `record[helper.key]`, spelled with a plain `.key`.
++    match expression.unwrap_parens() {
++        Expr::Member(member) => {
++            member.obj.as_ident().is_some() && matches!(member.prop, MemberProp::Ident(_))
++        }
++        _ => false,
++    }
++}
++
++/// The rule table. A malformed embedded table parses as empty, which leaves every shape dynamic:
++/// the table can only admit keys the generator measured, never guessed ones.
++#[derive(Default)]
++struct Rules {
++    /// Whether every generated instance of a shape signature resolved without running code.
++    shapes: BTreeMap<String, bool>,
++}
++
++impl Rules {
++    fn parse(json: &str) -> Result<Self> {
++        let table: BTreeMap<String, Value> =
++            serde_json::from_str(json).context("reading the alias rule table")?;
++        let mut shapes = BTreeMap::new();
++        for (signature, entry) in table {
++            let static_evaluable = entry
++                .get("static_evaluable")
++                .and_then(Value::as_bool)
++                .with_context(|| format!("alias rule {signature} has no static_evaluable"))?;
++            shapes.insert(signature, static_evaluable);
++        }
++        Ok(Self { shapes })
++    }
++
++    /// Whether the shape is an alias key. Unnamed shapes are dynamic.
++    fn is_static(&self, signature: &str) -> bool {
++        self.shapes.get(signature).copied().unwrap_or(false)
++    }
++}
++
++/// The embedded table, parsed once.
++fn rules() -> &'static Rules {
++    static RULES: OnceLock<Rules> = OnceLock::new();
++    RULES.get_or_init(|| Rules::parse(GENERATED).unwrap_or_default())
++}
++
++/// The shape signature of a key expression: the expression with every variable name erased.
++///
++/// Mirrors `render` in `alias_shapes.py`. The two must agree, or a signature the table names
++/// will never match; [`tests`] pins the spellings this code produces.
++pub(crate) fn signature(expression: &Expr) -> String {
++    match expression.unwrap_parens() {
++        // `undefined` is a literal to the generator, and reads as one here: no rule can name it.
++        Expr::Ident(name) if &*name.sym == "undefined" => "LIT".to_owned(),
++        Expr::Ident(_) => "IDENT".to_owned(),
++        Expr::Lit(_) => "LIT".to_owned(),
++        Expr::Member(member) => format!(
++            "MEMBER({},{})",
++            signature(&member.obj),
++            property(&member.prop)
++        ),
++        Expr::Call(call) => {
++            let arguments: Vec<&str> = call
++                .args
++                .iter()
++                .map(|argument| {
++                    if argument.spread.is_none() && is_literal(&argument.expr) {
++                        "LIT"
++                    } else {
++                        "EXPR"
++                    }
++                })
++                .collect();
++            let callee = call
++                .callee
++                .as_expr()
++                .map_or_else(|| "EXPR".to_owned(), |callee| signature(callee));
++            format!("CALL({callee},[{}])", arguments.join(","))
++        }
++        Expr::Bin(binary) => format!("BINOP({})", binary.op.as_str()),
++        Expr::Unary(unary) => format!("UNARY({})", unary.op.as_str()),
++        Expr::Fn(_) | Expr::Arrow(_) => "FUNC(...)".to_owned(),
++        Expr::Array(array) => {
++            let literal = !array.elems.is_empty()
++                && array.elems.iter().all(|element| {
++                    element.as_ref().is_some_and(|element| {
++                        element.spread.is_none() && is_literal(&element.expr)
++                    })
++                });
++            if literal {
++                "ARRAY([LIT])".to_owned()
++            } else {
++                "ARRAY([...])".to_owned()
++            }
++        }
++        Expr::Object(_) => "OBJECT({...})".to_owned(),
++        _ => "EXPR".to_owned(),
++    }
++}
++
++/// A member's property as the generator spells it. A name and a string literal collapse to the
++/// same signature, because obfuscators write the same alias as `.key` and as `["key"]`.
++fn property(property: &MemberProp) -> String {
++    match property {
++        MemberProp::Ident(_) => "IDENT".to_owned(),
++        MemberProp::Computed(computed) => match computed.expr.unwrap_parens() {
++            Expr::Lit(Lit::Str(_)) => "IDENT".to_owned(),
++            expression => signature(expression),
++        },
++        MemberProp::PrivateName(_) => "EXPR".to_owned(),
++    }
++}
++
++/// Whether an expression is a literal to the generator: `render` gives these the `LIT` signature
++/// wherever they sit in a call argument or array element.
++fn is_literal(expression: &Expr) -> bool {
++    match expression.unwrap_parens() {
++        Expr::Lit(_) => true,
++        Expr::Ident(name) => &*name.sym == "undefined",
++        _ => false,
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use swc_core::ecma::ast::Expr;
++
++    use super::{
++        GENERATED, Rules, SWITCH, enabled, is_admitted, is_alias_key, is_alias_key_with, signature,
++        switch,
++    };
++    use crate::js::ast;
++
++    fn key(source: &str) -> Expr {
++        ast::parse_expression("key", source).unwrap()
++    }
++
++    /// Every shape the table names, regenerated from the rule corpus, keeps its five fields.
++    #[test]
++    fn embedded_rules_carry_the_generated_fields() {
++        let table: std::collections::BTreeMap<String, serde_json::Value> =
++            serde_json::from_str(GENERATED).expect("the embedded table is JSON");
++        assert!(!table.is_empty(), "the embedded table admits no shape");
++        for (signature, entry) in &table {
++            for field in [
++                "count",
++                "static_evaluable",
++                "static_instances",
++                "dynamic_instances",
++                "examples",
++            ] {
++                assert!(
++                    entry.get(field).is_some(),
++                    "{signature} has no {field}: regenerate with alias_shapes.py"
++                );
++            }
++        }
++        // A table that will not parse leaves every shape dynamic, so it is worth failing loudly.
++        Rules::parse(GENERATED).expect("the embedded table parses");
++        assert!(
++            is_admitted("MEMBER(IDENT,IDENT)"),
++            "the alias shape is missing"
++        );
++    }
++
++    /// Renaming the variables of an expression does not change its signature, which is what
++    /// lets a rule written once apply to every build.
++    #[test]
++    fn signature_normalization_is_stable() {
++        for (left, right) in [
++            ("helper.key", "h.k"),
++            ("helper['key']", "hkey.name"),
++            ("getKey()", "other()"),
++            ("a + b", "first + second"),
++            ("helper[0]", "other[0]"),
++        ] {
++            assert_eq!(
++                signature(&key(left)),
++                signature(&key(right)),
++                "{left}/{right}"
++            );
++        }
++    }
++
++    /// The spellings this code produces for the shapes that matter. `alias_shapes.py` writes the
++    /// same strings for the same expressions; a change here breaks the table silently otherwise.
++    #[test]
++    fn signature_spellings_match_the_generator() {
++        for (source, expected) in [
++            ("helper.key", "MEMBER(IDENT,IDENT)"),
++            ("helper['key']", "MEMBER(IDENT,IDENT)"),
++            ("helper[0]", "MEMBER(IDENT,LIT)"),
++            ("helper[key]", "MEMBER(IDENT,IDENT)"),
++            ("getKey()", "CALL(IDENT,[])"),
++            ("helper.get()", "CALL(MEMBER(IDENT,IDENT),[])"),
++            ("a + b", "BINOP(+)"),
++            ("-a", "UNARY(-)"),
++            ("'name'", "LIT"),
++            ("undefined", "LIT"),
++            ("helper[`key`]", "MEMBER(IDENT,EXPR)"),
++            ("helper[key[0]]", "MEMBER(IDENT,MEMBER(IDENT,LIT))"),
++        ] {
++            assert_eq!(signature(&key(source)), expected, "{source}");
++        }
++    }
++
++    /// The regression pair the relaxation must keep apart: a member read resolves to a literal
++    /// key, a call can name any property.
++    #[test]
++    fn reverse_cases_keep_calls_dynamic() {
++        let static_keys = ["helper.key", "helper['key']"];
++        let dynamic_keys = [
++            "getKey()",
++            "helper.get()",
++            "a + b",
++            "helper[0]",
++            "key",
++            "helper[`key`]",
++            "helper[Object.keys(a)[0]]",
++            "helper[this.key]",
++        ];
++        for source in static_keys {
++            assert!(
++                is_alias_key(&key(source)),
++                "{source} must stay a static alias"
++            );
++        }
++        for source in dynamic_keys {
++            assert!(
++                !is_alias_key(&key(source)),
++                "{source} must stay dynamic: the relaxation overshot"
++            );
++        }
++    }
++
++    /// A signature erases names, so a computed property whose key is itself a variable spells
++    /// like a name: `record[helper[key]]` is admitted even though no literal key can be read
++    /// off it. The reader then fails loudly (`unsupported computed property`) instead of
++    /// resolving a guessed key, so the gap costs a solve, not a wrong payload. Recorded here
++    /// so it is not mistaken for a guarantee.
++    #[test]
++    fn a_variable_key_spells_like_a_name() {
++        assert_eq!(
++            signature(&key("helper.key")),
++            signature(&key("helper[key]"))
++        );
++        assert!(is_alias_key(&key("helper[key]")));
++    }
++
++    /// The switch restores the hard-coded check exactly, including the spellings it did not
++    /// accept: the 11-03 check only took a plain `.key`, so `helper['key']` was dynamic.
++    #[test]
++    fn switch_restores_the_hard_coded_check() {
++        assert!(is_alias_key_with(&key("helper.key"), false));
++        for source in [
++            "helper['key']",
++            "helper[`key`]",
++            "helper[0]",
++            "getKey()",
++            "a + b",
++        ] {
++            assert!(
++                !is_alias_key_with(&key(source), false),
++                "{source} was dynamic before the rule table"
++            );
++        }
++        // The whole point of the table: the same alias written the other way is accepted.
++        assert!(is_alias_key_with(&key("helper['key']"), true));
++    }
++
++    /// Only an explicit off value switches the rules off.
++    #[test]
++    fn switch_reads_only_an_explicit_off() {
++        for value in [
++            None,
++            Some(""),
++            Some("on"),
++            Some("ON"),
++            Some("1"),
++            Some("true"),
++        ] {
++            assert!(switch(value), "{value:?} must leave the rules on");
++        }
++        for value in [
++            Some("off"),
++            Some("OFF"),
++            Some(" off "),
++            Some("0"),
++            Some("false"),
++        ] {
++            assert!(!switch(value), "{value:?} must switch the rules off");
++        }
++    }
++
++    /// The switch is read from the environment at first use. A fresh process is the only way to
++    /// prove that without mutating this one.
++    #[test]
++    fn environment_switch_forks_a_fresh_process() {
++        // `helper['key']` separates the two decisions: an alias to the table, dynamic to the
++        // check. Everything else would pass either way and prove nothing.
++        let separator = key("helper['key']");
++        if std::env::var_os("CFSOLVE_ALIAS_RULES_CHILD").is_some() {
++            assert_eq!(std::env::var(SWITCH).as_deref(), Ok("off"));
++            assert!(!enabled(), "{SWITCH}=off must switch the table off");
++            assert!(
++                !is_alias_key(&separator),
++                "the switch must restore the hard-coded check"
++            );
++            assert!(
++                is_admitted("MEMBER(IDENT,IDENT)"),
++                "the table is still loaded: the switch changes the decision, not the data"
++            );
++            return;
++        }
++        assert!(
++            is_alias_key(&separator),
++            "the table must treat `helper['key']` as the alias `helper.key`"
++        );
++        let executable = std::env::current_exe().expect("locate the test executable");
++        let child = std::process::Command::new(executable)
++            .args([
++                "--exact",
++                "alias_rules::tests::environment_switch_forks_a_fresh_process",
++            ])
++            .env(SWITCH, "off")
++            .env("CFSOLVE_ALIAS_RULES_CHILD", "1")
++            .output()
++            .expect("run the test executable");
++        assert!(
++            child.status.success(),
++            "{SWITCH}=off is ignored: {}{}",
++            String::from_utf8_lossy(&child.stdout),
++            String::from_utf8_lossy(&child.stderr)
++        );
++    }
++}
+diff --git a/src/bin/dumpstage2/main.rs b/src/bin/dumpstage2/main.rs
+index 062aa28..29bc1c2 100644
+--- a/src/bin/dumpstage2/main.rs
++++ b/src/bin/dumpstage2/main.rs
+@@ -5,6 +5,36 @@ use std::{env, fs};
+ 
+ fn main() -> Result<()> {
+     let args: Vec<String> = env::args().skip(1).collect();
++
++    if args.len() == 1 {
++        let script_text = fs::read_to_string(&args[0])?;
++        let source = Source::try_new(&script_text)?;
++        let machine = source.machine()?;
++        let listing = machine.disassemble(&[]);
++        let machine = match source.machine() {
++            Ok(machine) => machine,
++            Err(error) => {
++                println!("offline: machine() FAILED: {error:#}");
++                return Ok(());
++            }
++        };
++        println!("offline: machine() constructed");
++        // Full parameter-extraction chain: the same path `solve` takes before merging.
++        let url = url::Url::parse("https://challenges.cloudflare.com/")?;
++        match cfsolve::challenge::program::PreparedSession::try_new(&source, &url) {
++            Ok(session) => {
++                let program = session.program();
++                println!(
++                    "offline: PreparedSession extracted: cf-chl={} payload_fields={}",
++                    program.request.cf_chl,
++                    program.payload_fields.len(),
++                );
++            }
++            Err(error) => println!("offline: PreparedSession FAILED: {error:#}"),
++        }
++        let _ = machine;
++        return Ok(());
++    }
+     let [script_path, program_path] = &args[..] else {
+         anyhow::bail!("Usage: dumpstage2 <iframe.deobfuscated.js> <stage2-program.bin>");
+     };
+diff --git a/src/challenge/expression.rs b/src/challenge/expression.rs
+index 0893027..6c15f58 100644
+--- a/src/challenge/expression.rs
++++ b/src/challenge/expression.rs
+@@ -1,13 +1,18 @@
+ //! AST helpers for challenge-script expressions: `_cf_chl_opt` reads and writes, padded build
+ //! hashes, objects built in a block, and expressions used to construct options and payloads.
+ 
++use std::cell::RefCell;
++
+ use anyhow::{Context, Result, bail, ensure};
+ use swc_core::ecma::ast::{
+     AssignExpr, AssignTarget, BinExpr, BinaryOp, BlockStmt, Expr, Lit, MemberProp,
+     SimpleAssignTarget, Stmt, UnaryOp,
+ };
+ 
++use swc_core::ecma::visit::{Visit, VisitWith};
++
+ use crate::js::{self, JsValue, Options, Window, ast};
++use crate::vm::HashMap;
+ 
+ /// Reads the build hash from `"0…0" + <number>.toString(16)`. The zero literal sets the
+ /// hexadecimal width. Requires an integer literal that fits without truncation; accepts any
+@@ -33,6 +38,98 @@ pub(crate) fn padded_build(sum: &BinExpr) -> Option<String> {
+         .then(|| format!("{:0width$x}", number as u64))
+ }
+ 
++thread_local! {
++    /// String-alias entries collected by [`prime_aliases`]: `helper.key -> value`. The
++    /// computed-key fallback consults this instead of re-evaluating member reads, which
++    /// re-walks large subtrees per read and exhausts memory on newer challenge builds.
++    static ALIASES: RefCell<HashMap<(String, String), String>> = RefCell::new(HashMap::default());
++}
++
++/// Collects `helper.key = "value"` assignments across `script` for the computed-key fallback.
++pub(crate) fn prime_aliases(script: &swc_core::ecma::ast::Script) {
++    let mut collector = Collector(HashMap::default());
++    script.visit_with(&mut collector);
++    ALIASES.with(|aliases| *aliases.borrow_mut() = collector.0);
++}
++
++/// Primes the alias table from an already-parsed script (see [`prime_aliases`]).
++pub(crate) fn prime_aliases_program(parsed: &crate::js::ast::ParsedScript) {
++    prime_aliases(&parsed.script);
++}
++
++/// The string a primed alias gives the computed key `expression`, or `None` when the table has
++/// no entry for it.
++///
++/// The shapes admitted here are chosen by [`crate::alias_rules`], so this only has to resolve
++/// the two the collector records. A shape the rules admit but this cannot resolve fails the read
++/// as unsupported instead of resolving a guessed key.
++fn alias_key(expression: &Expr) -> Option<JsValue> {
++    let text = match expression.unwrap_parens() {
++        // `record[helper.key]`: the pair the collector stored for a name assigned on a helper.
++        Expr::Member(member) => {
++            let object = member.obj.as_ident()?;
++            let key = ast::member_str(&member.prop)?;
++            let pair = (object.sym.to_string(), key.to_owned());
++            ALIASES.with(|aliases| aliases.borrow().get(&pair).cloned())?
++        }
++        // `record[alias]`: a name spelled by a bare identifier. The collector only records
++        // helper pairs, so this arm has no entries today; it stays so that a collector which
++        // also records `var alias = "text"` needs no change here.
++        Expr::Ident(name) => {
++            let pair = (String::new(), name.sym.to_string());
++            ALIASES.with(|aliases| aliases.borrow().get(&pair).cloned())?
++        }
++        _ => return None,
++    };
++    Some(JsValue::String(text))
++}
++
++/// Collects string-alias assignments: `helper.key = "value"` and
++/// `var helper = { key: "value", … }`.
++struct Collector(HashMap<(String, String), String>);
++
++impl Visit for Collector {
++    fn visit_assign_expr(&mut self, assignment: &AssignExpr) {
++        if assignment.op == swc_core::ecma::ast::AssignOp::Assign
++            && let swc_core::ecma::ast::AssignTarget::Simple(
++                swc_core::ecma::ast::SimpleAssignTarget::Member(member),
++            ) = &assignment.left
++            && let Expr::Ident(object) = &*member.obj
++            && let MemberProp::Ident(key) = &member.prop
++            && let Some(Expr::Lit(Lit::Str(text))) =
++                Some(&*assignment.right.unwrap_parens())
++            && let Some(value) = text.value.as_str()
++        {
++            self.0.insert(
++                (object.sym.to_string(), key.sym.to_string()),
++                value.to_owned(),
++            );
++        }
++        assignment.visit_children_with(self);
++    }
++
++    fn visit_var_declarator(&mut self, declarator: &swc_core::ecma::ast::VarDeclarator) {
++        if let Some(target) = declarator.name.as_ident()
++            && let Some(Expr::Object(object)) = declarator.init.as_deref()
++        {
++            for property in &object.props {
++                if let swc_core::ecma::ast::PropOrSpread::Prop(prop) = property
++                    && let swc_core::ecma::ast::Prop::KeyValue(key_value) = &**prop
++                    && let swc_core::ecma::ast::PropName::Ident(key) = &key_value.key
++                    && let Expr::Lit(Lit::Str(text)) = &*key_value.value
++                    && let Some(value) = text.value.as_str()
++                {
++                    self.0.insert(
++                        (target.id.sym.to_string(), key.sym.to_string()),
++                        value.to_owned(),
++                    );
++                }
++            }
++        }
++        declarator.visit_children_with(self);
++    }
++}
++
+ /// Resolves a static expression using known options (see [`evaluate`]). Unknown options have no
+ /// static value.
+ #[must_use]
+@@ -246,14 +343,24 @@ pub(crate) fn evaluate(
+             let key = match ast::member_str(&member.prop) {
+                 Some(key) => key.to_owned(),
+                 None => match &member.prop {
++                    // The alias shapes are data, shared with the deobfuscation property
++                    // analysis: see `crate::alias_rules`. Other computed keys go to the static
++                    // evaluator, which is what keeps `object["a" + "b"]` working; the alias
++                    // table is consulted instead of re-evaluating member reads, which re-walks
++                    // large subtrees per read and exhausts memory on newer builds.
++                    MemberProp::Computed(computed)
++                        if crate::alias_rules::is_alias_key(&computed.expr) =>
++                    {
++                        alias_key(&computed.expr)
++                    }
+                     MemberProp::Computed(computed) => evaluate(&computed.expr)?,
+                     _ => None,
+                 }
+-                    .and_then(|value| match value {
+-                        JsValue::String(text) => Some(text),
+-                        _ => None,
+-                    })
+-                    .context("unsupported computed property")?,
++                .and_then(|value| match value {
++                    JsValue::String(text) => Some(text),
++                    _ => None,
++                })
++                .context("unsupported computed property")?,
+             };
+             let key = &*key;
+             match &*member.obj {
+@@ -302,3 +409,70 @@ pub(crate) fn is_options(expression: &Expr) -> bool {
+         Expr::Member(member) if ast::member_str(&member.prop) == Some("_cf_chl_opt")
+     )
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::{evaluate, prime_aliases};
++    use crate::js::{JsValue, Options, Window, ast};
++
++    /// A helper object the collector turns into alias entries, and nothing else.
++    const ALIASES: &str = "var helper = { key: 'name' };\n";
++
++    /// The window the reads below resolve against: a read of `object[key]` whose object is an
++    /// identifier takes its value from the global named `key`.
++    fn globals() -> Window {
++        [("name".to_owned(), JsValue::String("value".to_owned()))]
++            .into_iter()
++            .collect()
++    }
++
++    /// Primes the alias table from `script`, replacing whatever a previous case left there.
++    fn primed(script: &str) {
++        let parsed = ast::parse_iframe_javascript(script).expect("the script parses");
++        prime_aliases(&parsed.script);
++    }
++
++    fn read(source: &str) -> anyhow::Result<Option<JsValue>> {
++        let expression = ast::parse_expression("read", source).expect("the read parses");
++        evaluate(&expression, &Options::new(), &globals())
++    }
++
++    /// `record[helper.key]` is a literal read once the alias is resolved, in either spelling.
++    #[test]
++    fn resolves_a_helper_alias_key() {
++        primed(ALIASES);
++        for source in ["record[helper.key]", "record[helper['key']]"] {
++            assert_eq!(
++                read(source).expect("the alias resolves"),
++                Some(JsValue::String("value".to_owned())),
++                "{source}"
++            );
++        }
++    }
++
++    /// The alias table is what resolves it: without the collector's entries the key is
++    /// unsupported, so a read never invents a name.
++    #[test]
++    fn an_unprimed_alias_table_leaves_the_key_unsupported() {
++        primed("var unrelated = 1;\n");
++        let error = read("record[helper.key]").expect_err("no alias, no key");
++        assert!(
++            format!("{error:#}").contains("unsupported computed property"),
++            "{error:#}"
++        );
++    }
++
++    /// A call can name any property, so it must not resolve through the alias table even when
++    /// the table holds a same-named entry.
++    #[test]
++    fn rejects_a_call_key() {
++        primed(ALIASES);
++        for source in [
++            "record[getKey()]",
++            "record[helper.get()]",
++            "record[helper.key()]",
++        ] {
++            assert!(read(source).is_err(), "{source} must stay dynamic");
++        }
++    }
++}
+diff --git a/src/challenge/program.rs b/src/challenge/program.rs
+index 217e2ba..b7e4cf9 100644
+--- a/src/challenge/program.rs
++++ b/src/challenge/program.rs
+@@ -132,6 +132,10 @@ impl<'source> PreparedSession<'source> {
+     pub fn try_new(source: &'source Source, iframe_url: &Url) -> Result<Self> {
+         use base64::Engine;
+ 
++        // Prime the string-alias table once: the computed-key fallback consults it instead of
++        // re-evaluating member reads, which exhausted memory on newer challenge builds.
++        crate::challenge::expression::prime_aliases_program(source.parsed());
++
+         let parsed = source.parsed();
+         let request = InitialRequest::from_parsed(parsed, iframe_url)?;
+         let runner =
+diff --git a/src/deobfuscate/analysis/properties.rs b/src/deobfuscate/analysis/properties.rs
+index afb84d3..f19b23e 100644
+--- a/src/deobfuscate/analysis/properties.rs
++++ b/src/deobfuscate/analysis/properties.rs
+@@ -362,18 +362,17 @@ pub(crate) fn member_key(property: &MemberProp) -> Option<Atom> {
+         .map(Atom::from)
+ }
+ 
+-/// Whether a computed member key is a static member read (`obj.key`), whose value a later
+-/// inlining pass can turn into a literal. Matches only identifier objects with static keys.
++/// Whether a computed member key is an alias for a static string, whose value a later inlining
++/// pass can turn into a literal.
++///
++/// The accepted shapes are data — see [`crate::alias_rules`] — and the challenge-side evaluator
++/// reads the same table, so the two cannot disagree about what an alias key is. When that table
++/// admits a shape this reader cannot resolve, the read fails loudly rather than resolving a
++/// guessed key. `CFSOLVE_ALIAS_RULES=off` restores the hard-coded 11-03 check.
+ #[must_use]
+ fn is_static_member_key(property: &MemberProp) -> bool {
+     match property {
+-        MemberProp::Computed(computed) => match &*computed.expr {
+-            Expr::Member(member) => {
+-                member.obj.as_ident().is_some()
+-                    && matches!(&member.prop, MemberProp::Ident(_))
+-            }
+-            _ => false,
+-        },
++        MemberProp::Computed(computed) => crate::alias_rules::is_alias_key(&computed.expr),
+         _ => false,
+     }
+ }
+@@ -407,7 +406,7 @@ mod tests {
+     use swc_core::atoms::Atom;
+     use swc_core::ecma::ast::{Expr, MemberProp, Program, PropName};
+ 
+-    use super::{Properties, member_key, prop_key};
++    use super::{Properties, is_static_member_key, member_key, prop_key};
+     use crate::deobfuscate::analysis::Bindings;
+     use crate::deobfuscate::testing;
+     use crate::js::ast;
+@@ -551,4 +550,48 @@ mod tests {
+             );
+         }
+     }
++
++    /// The accepted alias shapes come from the shared rule table, so this reader and the
++    /// challenge evaluator cannot disagree about what a static key is.
++    #[test]
++    fn admits_only_alias_shaped_keys() {
++        for (source, static_key) in [
++            ("o[h.key]", true),
++            ("o[h['key']]", true),
++            ("o[h[`key`]]", false),
++            ("o[getKey()]", false),
++            ("o[h.get()]", false),
++            ("o[k]", false),
++            ("o[k + 1]", false),
++            ("o[0]", false),
++        ] {
++            assert_eq!(
++                is_static_member_key(&member(source)),
++                static_key,
++                "{source}"
++            );
++        }
++    }
++
++    /// An alias-keyed read leaves the object static, because the key becomes a literal once the
++    /// helper inlines. A call-keyed read can name any property, so the object must go opaque.
++    #[test]
++    fn alias_shaped_keys_leave_the_object_static() {
++        for (source, opaque) in [
++            ("h = {}; h[helper.key];", false),
++            ("h = {}; h[helper['key']];", false),
++            ("h = {}; h[getKey()];", true),
++            ("h = {}; h[helper.get()];", true),
++            ("h = {}; h[k];", true),
++            ("h = {}; h[k + 1];", true),
++            ("h = {}; h[helper.key] = 1;", true),
++        ] {
++            testing::check(
++                &format!("function f(h, helper, getKey, k) {{ {source} }}"),
++                |program, id| {
++                    assert_eq!(properties(program).is_opaque(&id("h")), opaque, "{source}");
++                },
++            );
++        }
++    }
+ }
+diff --git a/src/lib.rs b/src/lib.rs
+index 6545568..a27547e 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -35,6 +35,7 @@
+     allow(dead_code, unreachable_pub, unused_imports)
+ )]
+ 
++mod alias_rules;
+ mod browser;
+ mod candidates;
+ mod deep_stack;

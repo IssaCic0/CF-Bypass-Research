@@ -79,3 +79,28 @@ cargo build --release --bin capture-proxy
 不适合当作"补个工具链"。
 
 **结论**：本补丁把"从 0 到能跑"这段打通了 2/3；剩下的 1/3 建议等上游适配，或按上面思路单独立项。
+
+## 分析器（T-70 / T-71，Python 侧）
+
+| 脚本 | 做什么 | 命令 |
+|---|---|---|
+| `analyze/primitive_gap.py` | deobf 脚本调用了哪些内建原语 / VM 实现了哪些 / 缺哪些 | `python tools/cfsolve-patches/analyze/primitive_gap.py <iframe.deobfuscated.js> [--vm-dir D:\cfsolve-upstream\src\vm] [--json --out x.json]` |
+| `analyze/alias_shapes.py` | 计算属性 `obj[expr]` 的形态签名聚类 + 「是否可静态求值」实测 | `python tools/cfsolve-patches/analyze/alias_shapes.py <iframe.deobfuscated.js> [--out alias-shapes.json]` |
+| `scripts/research.py gaps <corpus-id> [--json]` | 直接对 corpus 里的会话快照跑缺口清单（VM 目录取 `CFSOLVE_VM_DIR` 或 upstream/src/vm） | `python scripts/research.py gaps 2026-11-03-abcd1234` |
+| `scripts/research.py diff <id-a> <id-b>` | 两份快照的五段 Markdown 差分报告，落 `plans/证据/research-diff-<a>-<b>.md` | `python scripts/research.py diff <a> <b>` |
+
+### 口径（`静态确认`）
+
+- **已实现清单来自 `builtins!` 注册表**（`src/vm/interpret/builtin.rs` 的 `BUILTINS`），正则提取，不手抄。
+- `STRING_MEMBERS`（access.rs）是「识别但显式 unsupported」，`CONSTRUCTORS` / `STATIC_FUNCTIONS` 是「可解析但常返回 Symbolic」——**都不算实现**，故不纳入已实现清单（否则会把真缺口算成已实现）。
+- 注册表目录缺失或提取到 0 条时**直接失败**（`RegistryError`），不输出空集。
+- 注释与字符串里的属性名**不算调用**；同输入两次输出逐字节一致（无时间戳、键排序稳定）。
+
+### 已知局限（**不是全自动适配**）
+
+1. **字面扫描看不到运行时拼出的方法名**——新版 CF 的 computed-key 手法（`obj[["sli","ce"].join("")]` 之类）扫不出来。它消除的是 80% 的常见缺失，**不是**「自动适配新版本」。
+2. 裸 `recv.method(` 的字面扫描**无法判定 receiver 类型**，一律归入口径 `*.prototype.method`：只要有任一原型实现了该方法名就算已实现（`String.prototype.slice` 在，就不会因为 `s.slice()` 报缺）。误报/漏报的风险在此，不在别处。
+3. 不做数据流/别名传播、不解析 `eval`、不展开模板字面量里的代码。
+4. `alias_shapes.py` 的「是否可静态求值」由一个**简化求值器**实测：只认字面量、`const/let/var` 声明的常量与常量对象、成员取值、`+` 连接；`CALL`/`FUNC` 一律判动态。它证明的是「按这套求值器算不出来」，不是「运行期一定算不出来」。
+5. **Rust 侧未接入**：`properties.rs` / `expression.rs` 的白名单仍是硬编码；改成「读清单」属 L3（触及 11-03 刚打穿的核心路径），需独立 commit + 反向用例；`CFSOLVE_ALIAS_RULES=off` 开关也尚未实现。
+

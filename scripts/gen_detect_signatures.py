@@ -1,7 +1,8 @@
 """从 scrapfly/Antibot-Detector（MIT）的 detectors/*/*.json 重新生成特征表。
 
 用法：
-    python scripts/gen_detect_signatures.py D:\\参考项目\\Antibot-Detector
+    python scripts/gen_detect_signatures.py D:\\参考项目\\Antibot-Detector [--commit <sha>]
+    python scripts/gen_detect_signatures.py --check [D:\\参考项目\\Antibot-Detector]
 
 为什么单独做成脚本：特征表会随上游更新；把生成过程留痕，比手抄一份 JSON 更可维护，
 也避免"表是哪来的说不清"。
@@ -98,20 +99,113 @@ def render(rows: list[dict]) -> str:
     return "\n".join(out)
 
 
-def main() -> int:
-    if len(sys.argv) < 2:
-        print(__doc__)
-        return 2
-    rows = extract(sys.argv[1])
+def _render_meta(rows: list[dict], commit: str) -> str:
+    """生成 SIGNATURES_SOURCE 常量块（T-77：特征表的新鲜度元数据）。"""
+    import datetime
+
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines = [
+        "SIGNATURES_SOURCE = {",
+        f"    'repo': 'scrapfly/Antibot-Detector',",
+        f"    'commit': {commit!r},  # 上游 HEAD sha；无 git 时如实写 unknown",
+        f"    'generated_at': {now!r},",
+        f"    'count': {len(rows)},",
+        "}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _read_current_meta(source: str) -> dict:
+    """从 detect.py 源码里读出当前 SIGNATURES_SOURCE（生成器不 import solver）。"""
+    match = re.search(r"^SIGNATURES_SOURCE = \{(.*?)^\}", source, re.S | re.M)
+    if not match:
+        return {}
+    body = match.group(1)
+    meta: dict = {}
+    for key, val in re.findall(r"'(\w+)':\s*(.+?),", body):
+        val = val.strip()
+        if val.startswith(("'", '"')):
+            meta[key] = val.strip("'\"")
+        else:
+            try:
+                meta[key] = int(val)
+            except ValueError:
+                meta[key] = val
+    return meta
+
+
+def _check(upstream: str | None) -> int:
+    """--check：重新生成并与当前表逐项比较。上游不在 → SKIP（不许静默通过）。"""
+    if not upstream or not os.path.isdir(os.path.join(upstream, "detectors")):
+        print(f"SKIP：上游目录不在或缺少 detectors/（{upstream or '未提供路径'}）——本次无法核对特征表新鲜度")
+        print("SKIP：状态=待验证（CI 绿不等于表还是上游最新；请在有上游 checkout 的环境补跑）")
+        return 0
+    rows = extract(upstream)
     if not rows:
-        print("没抽到任何特征——检查路径是否指向 Antibot-Detector 仓库根目录")
-        return 1
+        print(f"SKIP：在 {upstream} 没抽到任何特征——路径可能不是 Antibot-Detector 仓库根目录；状态=待验证")
+        return 0
     block = render(rows)
     source = io.open(OUT, encoding="utf-8").read()
     start = source.index(HEADER_MARK)
     end = source.index("\n\n@dataclass", start)
-    io.open(OUT, "w", encoding="utf-8", newline="\n").write(source[:start] + block + source[end:])
-    print(f"已更新 {OUT}：{len(rows)} 个厂商")
+    current = source[start:end]
+    if current != block:
+        print(f"不一致：重新生成的特征表与 {OUT} 中的表有差异（{len(rows)} 个厂商）。")
+        cur_lines, new_lines = current.splitlines(), block.splitlines()
+        import difflib
+
+        diff = list(difflib.unified_diff(cur_lines, new_lines, "current", "regenerated", lineterm=""))
+        for line in diff[:80]:
+            print(line)
+        if len(diff) > 80:
+            print(f"…（共 {len(diff)} 行 diff，已截断）")
+        print("若差异是上游正常更新：跑生成脚本刷新表 + 更新 SIGNATURES_SOURCE；否则排查谁改了表。")
+        return 1
+    meta = _read_current_meta(source)
+    problems = []
+    if not meta:
+        problems.append("detect.py 缺 SIGNATURES_SOURCE 常量")
+    else:
+        if meta.get("count") != len(rows):
+            problems.append(f"count={meta.get('count')} 与实际 {len(rows)} 不符")
+        if not meta.get("commit"):
+            problems.append("commit 为空")
+    if problems:
+        print("不一致：元数据问题——" + "；".join(problems))
+        return 1
+    print(f"一致：特征表与上游 {len(rows)} 个厂商逐项一致，元数据完整。")
+    return 0
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if args and args[0] == "--check":
+        return _check(args[1] if len(args) > 1 else None)
+    commit = "unknown"
+    if "--commit" in args:
+        idx = args.index("--commit")
+        commit = args[idx + 1] if len(args) > idx + 1 else "unknown"
+        del args[idx:idx + 2]
+    if len(args) < 1:
+        print(__doc__)
+        return 2
+    upstream = args[0]
+    if not os.path.isdir(os.path.join(upstream, "detectors")):
+        print(f"SKIP：上游目录不在或缺少 detectors/（{upstream}）——未写入任何内容；状态=待验证")
+        return 0
+    rows = extract(upstream)
+    if not rows:
+        print("没抽到任何特征——检查路径是否指向 Antibot-Detector 仓库根目录")
+        return 1
+    block = _render_meta(rows, commit) + render(rows)
+    source = io.open(OUT, encoding="utf-8").read()
+    meta_start = source.index("SIGNATURES_SOURCE = {")
+    start = source.index(HEADER_MARK)
+    end = source.index("\n\n@dataclass", start)
+    io.open(OUT, "w", encoding="utf-8", newline="\n").write(
+        source[:meta_start] + block + source[end:])
+    print(f"已更新 {OUT}：{len(rows)} 个厂商，commit={commit}")
     return 0
 
 

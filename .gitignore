@@ -52,3 +52,18 @@ htmlcov/
 
 # codegraph 本地索引缓存（可重建：codegraph index）
 .codegraph/
+
+# 会话快照归档（T-66：CF 版权代码 + 体积 + 脱敏后仍有指纹价值，不入库；
+# 入库的是 corpus/INDEX.json 元数据摘要）
+corpus/
+
+# 运行产物（T-69）：任何缓存库、盐、pid、日志都不属于仓库；
+# plans/证据/ 只放不可再生的验收输出（见 plans/证据/README.md 三条硬规则）
+plans/证据/**/cache/
+plans/证据/**/*.sqlite3*
+plans/证据/**/salt.bin
+plans/证据/**/pid.txt
+plans/证据/**/*.log
+plans/证据/**/.env
+# 会话快照语料（体积大，只入库 corpus/INDEX.json 元数据；T-66）
+corpus/

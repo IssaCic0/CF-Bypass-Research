@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "CF-Bypass-Research 求解服务",
-    "version": "5.0.3",
+    "version": "6.0.0",
     "description": "Cloudflare `cf_clearance` / Turnstile token / reCAPTCHA v3 / AWS WAF token 的获取与回放服务。\n\n**这份规格是手写的**（本项目不引入 FastAPI/pydantic，见 policy.md 的『零新依赖』），因此必须由 `scripts/validate-openapi.mjs` 反向核对：规格里声明的 `path + method` 必须与 `solver/service.py` 里实际存在的路由**完全一致**，多一个少一个都报错。\n\n约定：\n- 鉴权：`Authorization: Bearer <token>`；`/health` 免鉴权（容器探活）。\n- 错误响应体：2xx 读 `ok`，非 2xx 读 `error_code`（另有 `stage` / `hint` 供自动重试与自助修复）。\n- `POST /shutdown` 额外限制来源必须是回环地址（除非启动时加 `--allow-remote-shutdown`）。"
   },
   "servers": [
@@ -69,6 +69,10 @@
           "hint": {
             "type": "string",
             "description": "给人看的下一步建议（不是给机器解析的）"
+          },
+          "request_id": {
+            "type": "string",
+            "description": "与响应头 X-Request-Id 相同的值（v6.0 T-79）"
           }
         }
       },
@@ -164,6 +168,10 @@
           "routed_by": {
             "type": "object",
             "description": "route=auto 时的决策记录"
+          },
+          "request_id": {
+            "type": "string",
+            "description": "与响应头 X-Request-Id 相同的值（v6.0 T-79）"
           }
         }
       },
@@ -302,10 +310,26 @@
         "security": [],
         "responses": {
           "200": {
-            "description": "ready"
+            "description": "ready",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "503": {
-            "description": "starting / degraded"
+            "description": "starting / degraded",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }
@@ -332,6 +356,14 @@
                   "$ref": "#/components/schemas/SolveResponse"
                 }
               }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           },
           "400": {
@@ -342,10 +374,26 @@
                   "$ref": "#/components/schemas/Error"
                 }
               }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           },
           "401": {
-            "$ref": "#/components/responses/Unauthorized"
+            "$ref": "#/components/responses/Unauthorized",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "413": {
             "description": "请求体超过 --max-body-bytes（可减小后重试）",
@@ -355,10 +403,26 @@
                   "$ref": "#/components/schemas/Error"
                 }
               }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           },
           "429": {
-            "$ref": "#/components/responses/Busy"
+            "$ref": "#/components/responses/Busy",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }
@@ -387,7 +451,15 @@
         ],
         "responses": {
           "200": {
-            "description": "探测结论 + 建议路由"
+            "description": "探测结论 + 建议路由",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "description": "参数非法",
@@ -397,13 +469,37 @@
                   "$ref": "#/components/schemas/Error"
                 }
               }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           },
           "401": {
-            "$ref": "#/components/responses/Unauthorized"
+            "$ref": "#/components/responses/Unauthorized",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "429": {
-            "$ref": "#/components/responses/Busy"
+            "$ref": "#/components/responses/Busy",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       },
@@ -421,7 +517,15 @@
         },
         "responses": {
           "200": {
-            "description": "探测结论 + 建议路由"
+            "description": "探测结论 + 建议路由",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "description": "参数非法",
@@ -431,10 +535,26 @@
                   "$ref": "#/components/schemas/Error"
                 }
               }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           },
           "401": {
-            "$ref": "#/components/responses/Unauthorized"
+            "$ref": "#/components/responses/Unauthorized",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "413": {
             "description": "请求体超限",
@@ -444,10 +564,26 @@
                   "$ref": "#/components/schemas/Error"
                 }
               }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           },
           "429": {
-            "$ref": "#/components/responses/Busy"
+            "$ref": "#/components/responses/Busy",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }
@@ -457,10 +593,26 @@
         "summary": "运维视图（等同于 /health 的完整版）",
         "responses": {
           "200": {
-            "description": "完整运维字段（含 last_error / 代理快照 / UA 指纹）"
+            "description": "完整运维字段（含 last_error / 代理快照 / UA 指纹）",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "401": {
-            "$ref": "#/components/responses/Unauthorized"
+            "$ref": "#/components/responses/Unauthorized",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }
@@ -471,10 +623,26 @@
         "description": "与 /stats 的差别：这里有 inflight 明细（rid / method / path / elapsed_sec）。响应**刻意不含** last_error、代理地址、UA 指纹等高敏字段。",
         "responses": {
           "200": {
-            "description": "状态 + 在途明细"
+            "description": "状态 + 在途明细",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "401": {
-            "$ref": "#/components/responses/Unauthorized"
+            "$ref": "#/components/responses/Unauthorized",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }
@@ -498,10 +666,26 @@
         ],
         "responses": {
           "200": {
-            "description": "{ok, total, kept, dropped_fields, lines[]}"
+            "description": "{ok, total, kept, dropped_fields, lines[]}",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "401": {
-            "$ref": "#/components/responses/Unauthorized"
+            "$ref": "#/components/responses/Unauthorized",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }
@@ -518,10 +702,26 @@
                   "type": "string"
                 }
               }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           },
           "401": {
-            "$ref": "#/components/responses/Unauthorized"
+            "$ref": "#/components/responses/Unauthorized",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           }
         }
       }
@@ -532,7 +732,15 @@
         "description": "三道门：① Bearer 鉴权 ② 来源必须是回环地址（除非 --allow-remote-shutdown）③ 先回 202 再真正退出。",
         "responses": {
           "202": {
-            "description": "已接受，进程将排空在途请求后退出"
+            "description": "已接受，进程将排空在途请求后退出",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "401": {
             "description": "缺少 token，或来源不是回环地址",
@@ -540,6 +748,14 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -570,6 +786,14 @@
                   "$ref": "#/components/schemas/CompatError"
                 }
               }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           },
           "400": {
@@ -580,6 +804,14 @@
                   "$ref": "#/components/schemas/Error"
                 }
               }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
             }
           },
           "413": {
@@ -588,6 +820,14 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -621,7 +861,15 @@
         },
         "responses": {
           "200": {
-            "description": "{errorId,errorCode,errorDescription,status,solution?}；任务不存在/过期返回 errorId=1 ERROR_TASK_ID_INVALID"
+            "description": "{errorId,errorCode,errorDescription,status,solution?}；任务不存在/过期返回 errorId=1 ERROR_TASK_ID_INVALID",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
           },
           "400": {
             "description": "传输层畸形",
@@ -629,6 +877,14 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
                 }
               }
             }
@@ -639,6 +895,51 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/console": {
+      "get": {
+        "summary": "只读控制台（HTML，需要 token）",
+        "description": "T-78 单文件只读控制台：四个区块（服务状态/缓存与命中/研究资产/最近错误）。五条硬约束：零写入（无 form/POST）；零新依赖（单文件内联）；token 保护（页面不含 token，前端 prompt() 现问存 sessionStorage）；CSP default-src 'none' + Cache-Control: no-store；数据只渲染白名单字段（不渲染 last_error 原文，仅 has_last_error 布尔 + last_error_at 时间戳）。安全说明：单文件零构建 ⇒ 内联脚本需 script-src 'unsafe-inline'（已知代价；若要更严，下一版迁静态文件 + script-src 'self'）。",
+        "responses": {
+          "200": {
+            "description": "text/html；Cache-Control: no-store；Content-Security-Policy: default-src 'none'",
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized",
+            "headers": {
+              "X-Request-Id": {
+                "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
+                "schema": {
+                  "type": "string"
                 }
               }
             }

@@ -280,7 +280,7 @@ scripts/
   probe_browser.py      # Playwright headless / headed 过盾对照实验
   probe_camoufox.py     # Camoufox 过盾实验
   diag_challenge.py     # 挑战页 DOM 诊断：iframe / checkbox / 按钮 / 截图
-tests/                  # 542 项 Python 测试（注入假浏览器/假后端，离线）
+tests/                  # 659 项 Python 测试（注入假浏览器/假后端，离线）
 docs/
   项目规格.md            # ★ 单一事实源：是什么/边界/承诺什么/不承诺什么
   API.md                # ★ 接口契约（参数/响应/错误码表）
@@ -491,8 +491,11 @@ CF 的 `chl_page` 三者全中。这就是"离线纯算"走不通的机理说明
 
 1. **生产用多后端回落链**：纯协议 cfsolve（首选，72MB 无浏览器）→ pydoll → Camoufox（浏览器兜底）
    + Go 原生回放，已实测贯通两端。缓存命中热路径零 Python 参与。
-2. **别丢掉纯 JS 引擎**：goja 67ms 跑通 575 KB 混淆脚本，很适合做 **CF 版本变更探针**——
-   定时抓脚本比对结构，一变就告警，比等线上注册失败强得多。成本 ≈50 MB / 一次 67ms。
+2. **结构假设要变成可执行断言**（v6.0 已落地，不再是"未来建议"）：`scripts/research.py`
+   把 CF 脚本的结构假设做成断言矩阵 + 差分报告，配合 `corpus/` 快照做离线回归；
+   `research.py gaps` 能从真实脚本自动推出 VM 原语缺口清单。
+   CF 一改版就跑 `research.py assertions` / `diff`，直接指出"哪条断言坏了、坏在哪一行"，
+   **不需要再起真机猜**。详见 `plans/下一步改进指南.md` 的 T-66~T-77。
 3. **优先"绕开"而不是"过"**：很多场景换入口域名 / 上游 API 直连比过盾便宜一个数量级。
 4. **TLS 指纹是回放层技术**，不是求解层：没有 cookie 时光有 JA3 也没用。
 

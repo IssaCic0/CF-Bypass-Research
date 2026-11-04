@@ -262,7 +262,25 @@ UA **不在缓存键里**，所以两个进程这个值不同**照样共享缓�
 ```
 
 语义：`skipped` 是"剩余寿命还够、无需续期"的次数；单个域连续失败会进入指数退避
-（`next_attempt_in_sec` 可见），**不会原速重试**（对已提分的域连续求解只会更糟）。
+（`next_attempt_at` 可见），**不会原速重试**（对已提分的域连续求解只会更糟）。
+
+### research 段（T-76，**仅带 token 的完整视图**）
+
+```json
+"research": {
+  "corpus_variants": 3,
+  "assertions_total": 6,
+  "assertions_skipped": 1,
+  "last_snapshot_at": 1761000000.0,
+  "last_diff_at": 1761000100.0,
+  "note": ""
+}
+```
+
+数据源：`corpus/INDEX.json`（variants 计数）与 `corpus/assertions.json`（断言矩阵，
+由 `scripts/research.py` 产出）。**防御性读取**：文件缺失（当前仓库默认状态）时全 0 /
+`null`，且 `note` 必须非空说明原因 —— "没有样本/断言全在 skip"这件事**不可能被忘记**。
+免鉴权最小集**不含**此段。
 
 ---
 
@@ -513,12 +531,64 @@ Prometheus 文本格式。暴露的指标：
 | `cfsolve_browser_alive` | gauge | 浏览器存活（0/1） |
 | `cfsolve_queue_depth` | gauge | 队列深度 |
 | `cfsolve_solve_seconds` | histogram | 求解耗时分布 |
+| `cfsolve_research_corpus_variants` | gauge | 研究语料变体数（T-76；数据源 `corpus/INDEX.json`，缺失时为 0） |
+| `cfsolve_research_assertions{state}` | gauge | 断言矩阵按状态计数（`state=pass\|fail\|skip`；矩阵文件缺失时全 0） |
+| `cfsolve_research_snapshot_age_seconds` | gauge | 距上次研究快照的秒数；**无快照时为 `NaN`，绝不填 0**（0 会假装"刚拍过快照"） |
 
 不暴露任何域名、cookie 或 token。
 
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8878/metrics
 ```
+
+---
+
+## GET /console — 需要 token（T-78 只读控制台）
+
+单文件 HTML 控制台，**零构建、零新依赖、零写入**。四个区块：服务状态 / 缓存与命中 /
+研究资产（`/health.research`）/ 最近错误。每块都有空态文案，不会出现空白面板。
+
+**五条硬约束（tests/test_console.py 逐条锁死）**：
+
+1. **零写入**：无表单、无 POST、无任何改状态入口
+2. **零新依赖**：HTML/CSS/JS 全部内联在 `solver/console_html.py` 的一个字符串常量
+3. **token 保护**：与其它数据端点同一套 Bearer 鉴权；**页面不含 token**，
+   前端 `prompt()` 现问、只存 `sessionStorage`（不写 localStorage）
+4. **CSP + 无内联事件**：响应头 `Content-Security-Policy: default-src 'none'`、
+   `Cache-Control: no-store`、`X-Content-Type-Options: nosniff`；
+   DOM 只用 `textContent`/`createElement`，**禁止 innerHTML**，事件全部 `addEventListener`
+5. **数据脱敏**：只渲染白名单字段；`last_error` **原文不下发到控制台**
+   （健康视图提供 `has_last_error` 布尔 + `last_error_at` 时间戳，控制台只显示
+   "有没有错 + 何时"，原文在服务端日志按 request_id 对取）
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8878/console -o console.html
+```
+
+**安全说明**：单文件零构建 ⇒ 内联脚本必须 `script-src 'unsafe-inline'`（这是
+"零依赖"的已知代价，与 `GET /` 状态页同一防线；`connect-src 'self'` 保证页面里的
+fetch 只能打本服务，被注入也无法把 token 外传）。若要更严，下一版迁静态文件 +
+`script-src 'self'`。
+
+---
+
+## request_id 贯穿（T-79）
+
+每个请求有一个 12 位小写十六进制标识（`uuid4().hex[:12]`），**四处同值**：
+
+| 出口 | 形式 |
+|---|---|
+| 响应头 | `X-Request-Id: <rid>`（所有 JSON 响应） |
+| 响应体 | envelope 顶层字段 `request_id`（成功与错误 envelope 都有） |
+| 审计 JSONL | `request_id` 列（白名单内，与既有 `req_id` 同值） |
+| `/solve` 的 `attempts` | 每跳附 `rid` 字段（成功结果与错误 extra 两条路径都覆盖） |
+
+**调用方自带**：请求带 `X-Request-Id` 头时，若值合法（`[A-Za-z0-9_-]{1,64}`）则**原样沿用**
+（便于调用方侧串联自己的日志）；非法（含空格/控制字符/超长/HTML 片段）**丢弃并新生成**，
+绝不反射回显 —— 这是头注入与日志注入的第一道防线。
+
+**高基数纪律**：rid **绝不**进入 `/metrics` 的 label（tests 锁死）。要按 rid 查，走审计
+JSONL 或 `GET /logs`。
 
 ---
 

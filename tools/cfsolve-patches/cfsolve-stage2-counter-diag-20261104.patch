@@ -1,0 +1,571 @@
+# cfsolve stage2 counter 断言「候选集 → 逐个校验」补丁 (2026-11-04, T-72)
+# 任务卡: plans/下一步改进指南.md T-72（L3，只动错误报告结构）
+# 基线: 需先应用 cfsolve-alias-rules-20261104.patch（本地 commit aeacaa5）
+# 内容: 本地 commit 640516a —— envelope::recover 的 6 个字段断言不再互相掩盖；counter 拆成
+#       候选集生成 + 逐个校验；原错误串保留为 detail 字段
+# 用法: git apply
+# 校验: cargo test --lib stage2::analysis::envelope
+# 边界: 不承诺 stage2 对最新变体收敛，只承诺失败时给出候选、位置、形态
+diff --git a/src/stage2/analysis/envelope.rs b/src/stage2/analysis/envelope.rs
+index 7b90950..fce01df 100644
+--- a/src/stage2/analysis/envelope.rs
++++ b/src/stage2/analysis/envelope.rs
+@@ -1,8 +1,9 @@
+ //! Recovers field names for the envelope around each probe result.
+ 
+ use std::collections::{BTreeMap, BTreeSet};
++use std::fmt::{self, Display, Formatter};
+ 
+-use anyhow::{Context, Result};
++use anyhow::Result;
+ 
+ use crate::js::JsValue;
+ use crate::listing::fold::{Frame, Known};
+@@ -10,7 +11,16 @@ use crate::listing::query::Store;
+ use crate::listing::{Index, query};
+ use crate::stage2::payload::RecordLiteral;
+ use crate::stage2::records::{Completion, Envelope, INITIAL_STATUS, Probe};
+-use crate::vm::{Effect, Term};
++use crate::vm::{Effect, Listing, Term};
++
++/// How many rejected candidates a failure lists before it counts the rest.
++const MAX_CANDIDATES: usize = 8;
++
++/// Where a failed assertion looked. A returned program is analyzed as a listing, not as script
++/// text, so candidates are located by program counter: this layer has no `iframe.deobfuscated.js`
++/// line to point at, and saying so is more useful than a line number that would not exist.
++const LOCATION: &str = "iframe.deobfuscated.js (no line: candidates are in the returned program's listing, \
++     located by program counter)";
+ 
+ /// Recovers record-envelope fields: creation counter, literal token and input, wrapper status
+ /// and message, and completion timestamps and duration.
+@@ -30,29 +40,33 @@ pub(super) fn recover(
+     for (register, name) in super::field_names::recover(listing) {
+         names.entry(register).or_insert(name);
+     }
+-    let counter = creation
+-        .iter()
+-        .filter_map(|pc| listing.instructions.get(pc))
+-        .flat_map(|instruction| instruction.effects())
+-        .find_map(|effect| match effect {
+-            Effect::SetProperty { key, .. } if let Term::Reg(register) = **key => {
+-                names.get(&register).cloned()
+-            }
+-            _ => None,
+-        })
+-        .context("record counter field not found")?;
+-    let written_from = |matches: &dyn Fn(&Probe, &JsValue) -> bool| {
+-        literals
+-            .iter()
+-            .find(|literal| {
+-                literal.created && probes.iter().any(|probe| matches(probe, &literal.value))
+-            })
+-            .map(|literal| literal.field.clone())
++    // Each field is one named assertion, and every assertion runs before the analysis gives up:
++    // a field a challenge build renamed must not hide the candidates for the ones it did not.
++    let mut failures = Vec::new();
++    let mut checked = |result: std::result::Result<String, Failure>| match result {
++        Ok(field) => Some(field),
++        Err(failure) => {
++            failures.push(failure);
++            None
++        }
+     };
+-    let token = written_from(&|probe, value| value.as_str() == Some(probe.token.as_str()))
+-        .context("record token field not found")?;
+-    let input = written_from(&|probe, value| *value == probe.input)
+-        .context("record input field not found")?;
++    let counter = checked(counter_field(creation, listing, &names));
++    let token = checked(written_field(
++        "token",
++        "a created record literal holding a probe's token",
++        "the written value is not any probe's token",
++        literals,
++        probes,
++        |probe, value| value.as_str() == Some(probe.token.as_str()),
++    ));
++    let input = checked(written_field(
++        "input",
++        "a created record literal holding a probe's input",
++        "the written value is not any probe's input",
++        literals,
++        probes,
++        |probe, value| *value == probe.input,
++    ));
+     // Inspect only the wrapper body, excluding created functions and exception handlers.
+     let main = query::walk(
+         listing,
+@@ -63,27 +77,65 @@ pub(super) fn recover(
+         },
+     );
+     let wrapper = property_values(index, &main);
+-    let wrapper_field = |what: &str, wanted: fn(&Known<Term>) -> bool| {
+-        wrapper
+-            .iter()
+-            .find(|(field, value)| header.values().any(|name| name == field) && wanted(value))
+-            .map(|(field, _)| field.clone())
+-            .with_context(|| format!("record {what} field not found"))
+-    };
+-    let status = wrapper_field("status", |value| {
+-        matches!(value, Known::Literal(status)
+-            if status.as_f64() == Some(f64::from(INITIAL_STATUS)))
+-    })?;
+-    let message = wrapper_field(
++    let status = checked(wrapper_field(
++        "status",
++        "a wrapper write holding the initial status",
++        "the written value is not the initial status",
++        &wrapper,
++        header,
++        |value| {
++            matches!(value, Known::Literal(status)
++                if status.as_f64() == Some(f64::from(INITIAL_STATUS)))
++        },
++    ));
++    let message = checked(wrapper_field(
+         "message",
++        "a wrapper write holding an empty message",
++        "the written value is not empty",
++        &wrapper,
++        header,
+         |value| matches!(value, Known::Literal(JsValue::String(text)) if text.is_empty()),
+-    )?;
++    ));
+     let finishing: Vec<&Store> = index
+         .stores()
+         .iter()
+         .filter(|store| finish.contains(&store.pc))
+         .collect();
+-    let [started, finished, duration] = index.clock_marks(&finishing)?;
++    let marks = match index.clock_marks(&finishing) {
++        Ok(marks) => Some(marks),
++        Err(error) => {
++            // `clock_marks` already names the store it wanted; keep its message verbatim and add
++            // the stores it was choosing between.
++            let candidates = finishing
++                .iter()
++                .map(|store| {
++                    Candidate::at(
++                        store.pc,
++                        format!("store {}.{}", store.object, store.key),
++                        "not the finished - started store this reads",
++                    )
++                })
++                .collect();
++            failures.push(Failure::new(
++                "clock marks",
++                "a finished - started store, and one write for each mark",
++                candidates,
++                format!("{error:#}"),
++            ));
++            None
++        }
++    };
++    let (
++        Some(counter),
++        Some(token),
++        Some(input),
++        Some(status),
++        Some(message),
++        Some([started, finished, duration]),
++    ) = (counter, token, input, status, message, marks)
++    else {
++        return Err(Report(failures).into());
++    };
+     Ok(Envelope {
+         counter,
+         token,
+@@ -98,6 +150,259 @@ pub(super) fn recover(
+     })
+ }
+ 
++/// Finds the field the record's creation pass writes its counter into.
++///
++/// Every property write whose key is a register is a candidate, because the name lands in the
++/// register earlier builds kept constant. When none passes, the candidates are what a renamed
++/// field costs: they name the registers that had no recovered name, and the recovered names the
++/// creation pass never writes as a key.
++fn counter_field(
++    creation: &BTreeSet<u32>,
++    listing: &Listing,
++    names: &BTreeMap<u8, String>,
++) -> std::result::Result<String, Failure> {
++    let mut candidates = Vec::new();
++    let mut keyed = BTreeSet::new();
++    let mut found = None;
++    for pc in creation {
++        let Some(instruction) = listing.instructions.get(pc) else {
++            continue;
++        };
++        for effect in instruction.effects() {
++            let Effect::SetProperty { key, .. } = effect else {
++                continue;
++            };
++            let Term::Reg(register) = **key else {
++                candidates.push(Candidate::at(
++                    *pc,
++                    format!("key {key:?}"),
++                    "the property key is not a register, so no recovered name applies",
++                ));
++                continue;
++            };
++            keyed.insert(register);
++            match names.get(&register) {
++                Some(name) => {
++                    if found.is_none() {
++                        found = Some(name.clone());
++                    }
++                }
++                None => candidates.push(Candidate::at(
++                    *pc,
++                    format!("register r{register}"),
++                    "no field name was recovered for this register",
++                )),
++            }
++        }
++    }
++    if let Some(found) = found {
++        return Ok(found);
++    }
++    // The names that were recovered but never reached a property write: the likeliest cause of a
++    // build that moved the counter, and the answer to "what else could it be".
++    for (register, name) in names {
++        if !keyed.contains(register) {
++            candidates.push(Candidate::at(
++                0,
++                format!("register r{register} = {name}"),
++                "a recovered name the creation pass never writes as a property key",
++            ));
++        }
++    }
++    Err(Failure::new(
++        "counter",
++        "a creation-pass write whose key register holds a recovered field name",
++        candidates,
++        "record counter field not found".to_owned(),
++    ))
++}
++
++/// Finds the field a probe's value is written through, or reports the literals it considered.
++fn written_field(
++    assertion: &'static str,
++    expected: &'static str,
++    mismatch: &'static str,
++    literals: &[RecordLiteral],
++    probes: &[Probe],
++    matches: impl Fn(&Probe, &JsValue) -> bool,
++) -> std::result::Result<String, Failure> {
++    let mut candidates = Vec::new();
++    for literal in literals {
++        if !literal.created {
++            candidates.push(Candidate::at(
++                literal.pc,
++                format!("field {}", literal.field),
++                "the literal belongs to the payload, not to a created record",
++            ));
++            continue;
++        }
++        if probes.iter().any(|probe| matches(probe, &literal.value)) {
++            return Ok(literal.field.clone());
++        }
++        candidates.push(Candidate::at(
++            literal.pc,
++            format!("field {}", literal.field),
++            mismatch,
++        ));
++    }
++    Err(Failure::new(
++        assertion,
++        expected,
++        candidates,
++        format!("record {assertion} field not found"),
++    ))
++}
++
++/// Finds a wrapper field holding a value of the wanted shape. Only header names are wrappers:
++/// the payload's own fields are written in the same body.
++fn wrapper_field(
++    assertion: &'static str,
++    expected: &'static str,
++    mismatch: &'static str,
++    wrapper: &[(String, Known<Term>)],
++    header: &BTreeMap<u8, String>,
++    wanted: impl Fn(&Known<Term>) -> bool,
++) -> std::result::Result<String, Failure> {
++    let mut candidates = Vec::new();
++    for (field, value) in wrapper {
++        if !header.values().any(|name| name == field) {
++            candidates.push(Candidate::new(
++                "wrapper",
++                format!("field {field}"),
++                "the field is not a header name, so it is not a wrapper field",
++            ));
++            continue;
++        }
++        if wanted(value) {
++            return Ok(field.clone());
++        }
++        candidates.push(Candidate::new(
++            "wrapper",
++            format!("field {field}"),
++            mismatch,
++        ));
++    }
++    Err(Failure::new(
++        assertion,
++        expected,
++        candidates,
++        format!("record {assertion} field not found"),
++    ))
++}
++
++/// One candidate an assertion rejected, and why.
++#[derive(Debug)]
++struct Candidate {
++    /// Where it was read from: a program counter, or the wrapper body.
++    locator: String,
++    /// What the candidate is: a register, a field name, or a store.
++    subject: String,
++    /// Why the assertion passed it over.
++    rejected: &'static str,
++}
++
++impl Candidate {
++    fn at(pc: u32, subject: String, rejected: &'static str) -> Self {
++        Self {
++            locator: format!("pc {pc}"),
++            subject,
++            rejected,
++        }
++    }
++
++    fn new(locator: &str, subject: String, rejected: &'static str) -> Self {
++        Self {
++            locator: locator.to_owned(),
++            subject,
++            rejected,
++        }
++    }
++}
++
++/// One envelope assertion that found no field, with everything needed to see why.
++#[derive(Debug)]
++pub(super) struct Failure {
++    /// The envelope field this assertion recovers.
++    assertion: &'static str,
++    /// The shape a candidate must have to pass.
++    expected: &'static str,
++    /// Rejected candidates, in program order, up to [`MAX_CANDIDATES`].
++    candidates: Vec<Candidate>,
++    /// Rejected candidates past the ones listed.
++    omitted: usize,
++    /// The message this assertion reported before the report was structured, kept verbatim so
++    /// existing matches on it keep working.
++    detail: String,
++}
++
++impl Failure {
++    fn new(
++        assertion: &'static str,
++        expected: &'static str,
++        mut candidates: Vec<Candidate>,
++        detail: String,
++    ) -> Self {
++        let omitted = candidates.len().saturating_sub(MAX_CANDIDATES);
++        candidates.truncate(MAX_CANDIDATES);
++        Self {
++            assertion,
++            expected,
++            candidates,
++            omitted,
++            detail,
++        }
++    }
++}
++
++impl Display for Failure {
++    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
++        writeln!(
++            f,
++            "assertion {}: record {} field not found",
++            self.assertion, self.assertion
++        )?;
++        writeln!(f, "  expected: {}", self.expected)?;
++        writeln!(f, "  location: {LOCATION}")?;
++        writeln!(
++            f,
++            "  candidates: {} rejected",
++            self.candidates.len() + self.omitted
++        )?;
++        for candidate in &self.candidates {
++            writeln!(
++                f,
++                "    {} {}: {}",
++                candidate.locator, candidate.subject, candidate.rejected
++            )?;
++        }
++        if self.omitted > 0 {
++            writeln!(f, "    … and {} more", self.omitted)?;
++        }
++        write!(f, "  detail: {}", self.detail)
++    }
++}
++
++/// Every envelope assertion that failed, reported together so one missing field does not hide
++/// the candidates for another.
++#[derive(Debug)]
++pub(super) struct Report(Vec<Failure>);
++
++impl Display for Report {
++    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
++        write!(
++            f,
++            "{} record-envelope assertion(s) found no field",
++            self.0.len()
++        )?;
++        for (index, failure) in self.0.iter().enumerate() {
++            write!(f, "\n[{}] {failure}", index + 1)?;
++        }
++        Ok(())
++    }
++}
++
++impl std::error::Error for Report {}
++
+ /// Propagates local values to identify wrapper property names. Preserves register-dependent
+ /// expressions without executing them.
+ fn property_values(index: &Index<'_>, pcs: &BTreeSet<u32>) -> Vec<(String, Known<Term>)> {
+@@ -126,3 +431,133 @@ fn property_values(index: &Index<'_>, pcs: &BTreeSet<u32>) -> Vec<(String, Known
+     }
+     writes
+ }
++
++#[cfg(test)]
++mod tests {
++    use std::collections::{BTreeMap, BTreeSet};
++
++    use super::{Report, counter_field, written_field};
++    use crate::vm::{Effect, Exit, Instruction, Listing, Path, Term};
++
++    /// One instruction whose single path carries `effects`.
++    fn instruction(pc: u32, effects: Vec<Effect>) -> Instruction {
++        Instruction {
++            pc,
++            key: 0,
++            opcode: 0,
++            paths: vec![Path {
++                conditions: Vec::new(),
++                effects,
++                exit: Exit::Return,
++            }],
++        }
++    }
++
++    /// `record[r7] = r1` at `pc`: a property write keyed by a register.
++    fn keyed_write(pc: u32, register: u8) -> Instruction {
++        instruction(
++            pc,
++            vec![Effect::SetProperty {
++                object: Box::new(Term::Reg(0)),
++                key: Box::new(Term::Reg(register)),
++                value: Box::new(Term::Reg(1)),
++            }],
++        )
++    }
++
++    /// A failed counter lookup reports its candidates, where they were read from, and the message
++    /// it used to report alone. Before this, the whole diagnostic was that one message.
++    #[test]
++    fn counter_candidates_are_reported_on_failure() {
++        let mut listing = Listing::default();
++        listing.instructions.insert(10, keyed_write(10, 7));
++        let mut names = BTreeMap::new();
++        names.insert(3, "unreached".to_owned());
++        let failure = counter_field(&BTreeSet::from([10]), &listing, &names)
++            .expect_err("r7 has no recovered name");
++        let report = failure.to_string();
++        for expected in [
++            "assertion counter",
++            "expected: a creation-pass write whose key register holds a recovered field name",
++            "iframe.deobfuscated.js",
++            "candidates: 2 rejected",
++            "pc 10 register r7: no field name was recovered for this register",
++            "register r3 = unreached",
++            "detail: record counter field not found",
++        ] {
++            assert!(
++                report.contains(expected),
++                "{expected} missing from:\n{report}"
++            );
++        }
++    }
++
++    /// The first named write stays the answer, so the report does not change which field is read.
++    #[test]
++    fn counter_field_keeps_the_first_named_write() {
++        let mut listing = Listing::default();
++        listing.instructions.insert(10, keyed_write(10, 7));
++        listing.instructions.insert(20, keyed_write(20, 8));
++        let mut names = BTreeMap::new();
++        names.insert(7, "dd".to_owned());
++        names.insert(8, "other".to_owned());
++        assert_eq!(
++            counter_field(&BTreeSet::from([10, 20]), &listing, &names).expect("r7 is named"),
++            "dd"
++        );
++    }
++
++    /// A property write keyed by something other than a register is reported as such, instead of
++    /// vanishing from the candidate list.
++    #[test]
++    fn a_non_register_key_is_a_candidate() {
++        let mut listing = Listing::default();
++        listing.instructions.insert(
++            10,
++            instruction(
++                10,
++                vec![Effect::SetProperty {
++                    object: Box::new(Term::Reg(0)),
++                    key: Box::new(Term::Const(crate::vm::Constant::String(
++                        "constant".to_owned(),
++                    ))),
++                    value: Box::new(Term::Reg(1)),
++                }],
++            ),
++        );
++        let failure = counter_field(&BTreeSet::from([10]), &listing, &BTreeMap::new())
++            .expect_err("no register was keyed");
++        assert!(
++            failure
++                .to_string()
++                .contains("the property key is not a register"),
++            "{failure}"
++        );
++    }
++
++    /// Every failed assertion is reported, so the first one does not hide the rest.
++    #[test]
++    fn assertions_do_not_mask_each_other() {
++        let listing = Listing::default();
++        let counter = counter_field(&BTreeSet::from([10]), &listing, &BTreeMap::new())
++            .expect_err("nothing to read");
++        let token = written_field("token", "expected", "mismatch", &[], &[], |_, _| false)
++            .expect_err("no literals");
++        let report = Report(vec![counter, token]).to_string();
++        assert!(
++            report.starts_with("2 record-envelope assertion(s) found no field"),
++            "{report}"
++        );
++        for expected in [
++            "[1] assertion counter",
++            "[2] assertion token",
++            "detail: record counter field not found",
++            "detail: record token field not found",
++        ] {
++            assert!(
++                report.contains(expected),
++                "{expected} missing from:\n{report}"
++            );
++        }
++    }
++}

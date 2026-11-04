@@ -1148,3 +1148,80 @@ Release（Latest）: https://github.com/lza6/CF-Bypass-Research/releases/tag/v5.
 ### 预算台账（最终）
 R-E2E-1 4 次 → R-E2E-2 6 次 → R-E2E-3 2 次 = 本轮共 **12 次**；累计 ≈**58 / 80**；**累计失败 1/5**（远低于停止线）。
 
+---
+
+## v6.0.0 施工记录（2026-11-04，研究工程化）
+
+### 用户本轮拍板（两项，本轮唯一的新增授权）
+
+| 编号 | 决策点 | 用户结论 | 落地情况 |
+|---|---|---|---|
+| **E-2'** | 真机预算 | 在 E-2（0 次）基础上**追加 R-1 最小真机包：抓 3 份真实会话快照** | 已用 1 次（见下），剩 2 次 |
+| **RUST-1** | T-71/T-72 的 Rust 侧改动 | **接 Rust，但独立 commit + `CFSOLVE_ALIAS_RULES=off` 开关** | 独立代理施工中，未完成前 T-71/T-72 记 PARTIAL |
+
+### 任务卡状态（只有观察到交付物+证据才记 DONE）
+
+| 卡 | 状态 | 交付物 | 证据（实际运行） |
+|---|---|---|---|
+| **T-66** 会话快照归档 | **DONE** | `scripts/corpus.py`（376 行，add/list/verify/redact） | `tests/test_corpus.py` 11 passed；真实样本入库 `corpus/2026-11-04-6c02e277`（1.15 MB，redact_hits=0） |
+| **T-67** 离线分析台 | **DONE** | `scripts/research.py`（doctor/build/stage2/vm/diff/gaps/run/patch） | `research.py doctor` **EXIT=0，13 项全 PASS**；`build` **EXIT=0 / 4m24s**，5 个 example 真实编出 |
+| **T-68** 结构断言矩阵 | **DONE** | `tests/test_research_assertions.py` + `assertions_matrix()` | 真样本上 **pass=2 fail=1 skip=6**（stage2 层因样本未到 stage2 而 skip，带 reason） |
+| **T-69** 仓库卫生 | **DONE** | `scripts/check_repo_hygiene.py`；7 个运行产物 `git rm --cached` | `[OK] 仓库干净：194 个跟踪文件中无运行产物`；`git ls-files` 零命中 |
+| **T-70** VM 原语缺口 | **DONE** | `tools/cfsolve-patches/analyze/primitive_gap.py`（317 行） | 真样本：**783 调用点 / 105 缺口 / 35 已实现**（ArrayBuffer·Map·Set·Symbol·Uint8Array·Worker…） |
+| **T-71** 别名规则 | **PARTIAL** | Python 侧 `analyze/alias_shapes.py`（616 行）DONE；Rust 侧数据驱动化施工中 | 12 passed（含 `obj[helper.key]` 判静态 / `obj[getKey()]` 判动态）；Rust 侧未接 → `test_alias_rule_set_matches_rust_side` 未写 |
+| **T-72** counter 断言收敛 | **PARTIAL** | 差分可视化 DONE；`envelope.rs` 候选集报告施工中 | 差分真跑报出 **`counter: pass → fail`** 并映射到补丁 `newcf-computed-key-20261103` |
+| **T-73** 反混淆预算护栏 | **DONE** | `research.py run --max-mb/--max-sec` + `infer_stage()` | 阶段推断表驱动 5 态用例；本轮真机正是靠它定位"内存爆炸卡在哪" |
+| **T-74** 补丁集演进 | **DONE** | `tools/cfsolve-patches/PATCHES.json` + `patch --check/--verify` | `patch --check` 真实报出 2 份补丁的冲突文件与行号 |
+| **T-75** 快照差分报告 | **DONE** | `research.py diff` | 五段齐全；`plans/证据/research-diff-*.md` |
+| **T-76** research 指标暴露 | **DONE** | `/health.research` + `/metrics` 三条序列 | `tests/test_research_exposure.py` 9 例（含"无快照必须 NaN 不许 0"） |
+| **T-77** detect 签名新鲜度 | **DONE** | `SIGNATURES_SOURCE` + `gen_detect_signatures.py --check` | 41 条 detect 既有用例全过（特征零改动）；5 例新测试 |
+| **T-78** 只读控制台 `/console` | **DONE** | `solver/console_html.py`（269 行）+ 路由 | 9 例契约测试（含"无写面"灵魂断言）+ **Playwright 真浏览器 E2E PASS** + 截图 `plans/证据/console-20261104.png` |
+| **T-79** request_id 贯穿 | **DONE** | 响应头 + envelope + 审计 + attempts | 7 例（含"绝不进 metrics label"防高基数锁死） |
+| **T-80** 跨平台入口 `run.py` | **DONE** | `run.py`（341 行、12 子命令）+ `run.ps1` 转发 | 2 例（子命令集合与 run.ps1 相等 / fail-fast）；WSL 真跑留证 |
+| **T-81** 依赖决策 | **DONE** | hypothesis 6.170.14 + ruff 0.14.9（dev） | 3 条性质测试 passed；ruff exit 0；模糊测试未发现真实缺陷（正面结论） |
+| **T-82** 门禁修正 | **DONE** | ResourceWarning 替身 close + 竞态收敛 + stdout 卫生 + 局部覆盖率 | `-W error::ResourceWarning` **单次 641 passed / 7 skipped**；连跑 5 次记录见 `plans/证据/a4-resourcewarning-5runs.log` |
+| **T-83** 文档回填 | **DONE** | `项目规格.md`「没有 UI」已改；README goja 建议改写；`00-索引.md` 加研究台；`plans/README.md` 主施工图指向 | `validate-docs.mjs` **9 处一致**（version 5.0.3 / 648 用例 / 87% / 46 Go / 54 findings） |
+| **T-84** 发版 v6.0.0 | **见下** | — | — |
+
+### 本轮真机记录（E-2' 追加授权，用 1/3）
+
+| # | 站 | 结果 | 产物 | 判定 |
+|---|---|---|---|---|
+| R-S1 | `steamdb.info` | 反混淆**成功**（orchestrator.js 622 KB → deobf 528 KB），随后 stage2 阶段**内存吃满 24.6 GB**，按 PID 精确终止 | `corpus/2026-11-04-6c02e277`（已脱敏入库，redact_hits=0） | **失败 1/5**（内存爆炸，历史已知问题；本轮教训：真机必须走 `research.py run` 护栏） |
+
+**如实结论**：本轮**没有**拿到走到 stage2 的完整会话，因此 stage2 的 6 条结构断言在真样本上仍是 `skip`（不是 pass，也不是 fail）。这份样本仍然证明了三件事：①断言矩阵在真实输入上真的会判断（A/B pass、C fail）；②T-70 缺口扫描器有真输入；③归档/脱敏/校验链路对真数据成立。
+
+### 本轮实测暴露并修复的 6 个真缺陷（全部有"改前红"）
+
+| # | 缺陷 | 怎么暴露的 | 修法 |
+|---|---|---|---|
+| **V-1** | `corpus.py` 只认 `iframe.deobfuscated.js`，而新版 cfsolve 产物叫 `orchestrator.*` → **真样本会被拒收** | 首次真机入库被拒 | 改按后缀 `*.deobfuscated.js` 识别（`pick_deobf`） |
+| **V-2** | 同一硬编码在 `assertions_matrix` / `cmd_vm` / `_snapshot` / `cmd_gaps` 共 4 处 → 有真样本也全 skip | 入库后矩阵仍全 skip | 4 处统一改用 `corpus.pick_deobf` |
+| **V-3** | stage2 断言在"样本未走到 stage2"时报 `fail` → 会被误读成"CF 改版了" | 真样本 pass=4/fail=5 时人工复核 | 判据收敛：无 `response.decoded.txt` 时标 `skip` 并写明原因 |
+| **V-4** | `doctor` 不检查 cmake/nasm/libclang/CMakeCache → cargo 甩 cmake panic 与 bindgen 栈 | `build` 两次失败（generator 冲突 → libclang 缺失） | doctor 增加 4 项检查；`build` **自动注入** `LIBCLANG_PATH` 与 nasm PATH |
+| **V-5** | example 产物在 `target/release/examples/`，而 doctor/`_binary` 只在 `release/` 找 → **构建成功仍报 FAIL**（G0 永远过不了） | build EXIT=0 但 doctor 仍 5 项 FAIL | 新增 `_binary_path()` 两处位置都找 |
+| **V-6** | 三个新脚本在 Windows cp936 控制台下中文乱码；`subprocess` 用 GBK 解码 Rust 的 UTF-8 输出直接崩 | `research.py doctor` / `stage2` 实测 | 统一 `sys.stdout.reconfigure(utf-8)` + 5 处 `subprocess` 加 `encoding="utf-8"` |
+
+### 门禁实测（2026-11-04，全部真实执行）
+
+| 门禁 | 结果 |
+|---|---|
+| Python 全量 | **641 passed, 7 skipped**（7 skip = stage2 断言因样本未到 stage2） |
+| 覆盖率 | solver 整体 **87.46%**；`check-coverage.mjs` **21 模块全达标** |
+| openapi | **13 个操作**与源码双向一致 |
+| 文档数字 | `validate-docs.mjs` **9 处一致** |
+| findings | **54 条**（47/5/2）exit 0 |
+| 仓库卫生 | `check_repo_hygiene.py` exit 0（194 跟踪文件） |
+| **G0（研究台 doctor）** | **EXIT=0，13 项全 PASS** |
+| 构建 | `research.py build` **EXIT=0 / 4m24s**，5 个 example 真实产出 |
+| A4 ResourceWarning | 单次绿；5 连跑见 `plans/证据/a4-resourcewarning-5runs.log` |
+| 真浏览器 | `/console` Playwright E2E PASS + 截图 |
+
+### 本轮未做（如实，不许读成已闭环）
+
+- **T-71/T-72 的 Rust 侧**：施工中。未完成前，别名规则仍是 Python 侧清单生成，Rust 的 `properties.rs`/`expression.rs` 仍硬编码，`CFSOLVE_ALIAS_RULES=off` 开关不存在 → 相应的 `test_alias_rule_set_matches_rust_side` 未写。
+- **完整 stage2 会话**：真机 1 次失败（内存爆炸），剩 2 次额度未用。stage2 的 6 条断言在真样本上仍为 `skip`。
+- **K-1 不变**：本版仍**不承诺** stage2 对最新变体收敛；只交付"收敛过程可视化"。
+- 差分报告的字段名集合会把长 URL 编码串当字段名（噪声），已记录为 P3。
+
+

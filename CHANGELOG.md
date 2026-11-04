@@ -2,6 +2,94 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [6.0.0] - 2026-11-04
+
+主题：**研究工程化 —— 把「CF 改版就要重新赌一把」变成「样本驱动、离线可复现的回归工程」**。
+
+> **breaking change：无。** 本版对既有端点为**纯增量**：新增 `GET /console`、响应头
+> `X-Request-Id`、`/health` 的 `research` 段、`/metrics` 三条 `cfsolve_research_*` 序列。
+> 既有字段、状态码、错误结构、鉴权语义均未改。
+
+### 核心交付：研究台（`scripts/research.py` + `scripts/corpus.py`）
+
+CF 改版后，"哪条结构假设破了"过去只能靠真机跑一遍看报错。本版把这件事变成离线可查：
+
+| 能力 | 命令 | 本轮实测 |
+|---|---|---|
+| 构建前置自检（G0 门禁） | `research.py doctor` | **EXIT=0，13 项全 PASS** |
+| 编译 5 个离线分析 example | `research.py build` | **EXIT=0 / 4m24s** |
+| 结构断言矩阵 | `research.py assertions` | 真样本上 **pass=2 fail=1 skip=6**（skip 有明确原因） |
+| 两份快照差分 | `research.py diff <a> <b>` | 真跑报出 **`counter: pass → fail`** 并映射到补丁 |
+| VM 原语缺口清单 | `research.py gaps <id>` | 真样本 **783 调用点 / 105 缺口 / 35 已实现** |
+| 预算护栏 + 阶段推断 | `research.py run --max-mb --max-sec` | 5 态表驱动用例 |
+| 补丁集演进 | `research.py patch --check` | 真实报出 2 份补丁的冲突文件与行号 |
+| 会话快照归档/脱敏 | `corpus.py add/list/verify/redact` | 真实样本入库，`redact_hits=0` |
+
+### 新增
+
+- `GET /console`：**单文件只读控制台**（`solver/console_html.py`，零依赖零构建、CSP、无 innerHTML、
+  无内联事件）。五条硬约束各有用例；**Playwright 真浏览器 E2E 通过**并留截图。
+- `X-Request-Id` 贯穿（响应头 / 成功与错误 envelope / 审计 JSONL / `/solve` attempts 每跳），
+  并有用例锁死「绝不做成 metrics label」（防高基数）。
+- `/health` 的 `research` 段（仅带 token 时）与 `/metrics` 的三条 `cfsolve_research_*` 序列
+  （无快照时 `snapshot_age_seconds` 必须是 `NaN`，不许填 0）。
+- `run.py`：跨平台统一入口（12 子命令），`run.ps1` 改为转发，子命令集合由用例锁死相等。
+- `scripts/check_repo_hygiene.py`（接进 verify 与 CI）+ 7 个运行产物出库。
+- `detect.py` 的 `SIGNATURES_SOURCE` 元数据 + `gen_detect_signatures.py --check`（特征本身零改动）。
+- dev 依赖 `hypothesis` / `ruff`（含依赖决策记录：不引 prometheus_client / mypy 的理由）。
+
+### 本轮实测暴露并修复的 6 个真缺陷
+
+| # | 缺陷 | 触发 | 影响 |
+|---|---|---|---|
+| V-1/V-2 | 反混淆产物名硬编码 `iframe.deobfuscated.js`（共 5 处），新版 cfsolve 产出 `orchestrator.*` | 首次真机入库 | **真样本被拒收 / 断言矩阵有样本也全 skip** |
+| V-3 | stage2 断言在「样本未走到 stage2」时报 `fail` | 真样本 pass=4/fail=5 复核 | 会把「缺输入」误读成「CF 改版了」 |
+| V-4 | `doctor` 不查 cmake/nasm/libclang/CMakeCache | `build` 两次失败 | cargo 甩 cmake panic / bindgen 栈，看不出该装什么 |
+| V-5 | example 产物在 `target/release/examples/`，却只在 `release/` 找 | build 成功仍报 FAIL | **G0 永远过不了** |
+| V-6 | cp936 控制台中文乱码；`subprocess` 用 GBK 解码 Rust 的 UTF-8 输出直接崩 | `doctor` / `stage2` 实测 | 工具在中文 Windows 上不可用 |
+
+### 真机（用户追加授权 R-1 共 3 次，本版用 1 次）
+
+- `steamdb.info`：反混淆**成功**（622 KB → 528 KB），随后 stage2 阶段**内存吃满 24.6 GB**，
+  按 PID 精确终止。样本仍入库（脱敏后 1.15 MB）。
+- **如实结论**：本版**没有**拿到走到 stage2 的完整会话，因此 stage2 的 6 条结构断言在真样本上
+  仍是 `skip`（既非 pass 也非 fail）。这份样本证明的是：断言矩阵在真实输入上真的会判断
+  （A/B pass、C fail）、缺口扫描器有真输入、归档/脱敏/校验对真数据成立。
+- 教训：**真机必须走 `research.py run` 护栏**（本轮第一次没走，直接吃满 24.6 GB）。
+
+### 未完成（如实，不许读成已闭环）
+
+- **T-71/T-72 的 Rust 侧**（`properties.rs`/`expression.rs` 数据驱动化、`CFSOLVE_ALIAS_RULES=off`
+  开关、`envelope.rs` counter 候选集报告）**未落地** → 别名规则目前只有 Python 侧清单生成，
+  `test_alias_rule_set_matches_rust_side` 未写。
+- 本版**不承诺** stage2 对最新变体收敛（K-1 不变）；只交付「收敛过程可视化」。
+
+### 独立复审（`claude -p` 独立进程，只喂 diff 不喂结论）
+
+**第 1 轮：Request Changes** —— 5 条 blocking，全部**经复核成立**，已全部修复并补「改前必红」用例：
+
+| # | 缺陷 | 修法 |
+|---|---|---|
+| **B1** | `/health.research` 与 `/metrics` 的数据源 schema 与生产者**对不上**（`corpus.py` 写 `entries`，服务读 `variants`；`corpus/assertions.json` 根本没人产出）→ 真实语料也恒报 0，**且没有 note 解释**。原测试用的是"服务端期望的形状"，属**测试为谎言背书** | 服务改读 `entries`；`assertions_matrix()` 落 `corpus/assertions.json` 摘要；用例改用**生产者的真实形状**造夹具 |
+| **B2** | `/metrics` 把 `pass = total − skip`、`fail` 恒写 0 —— 真实的 1 条 fail 被记进 pass，**而测试把这个口径锁成了契约** | 三态各自独立取数；三态之和 ≠ total 时不静默凑数而是暴露不一致 |
+| **B3** | `corpus.py add` 的"脱敏闸门"**名不副实**：命中明文只记进 manifest 并 `return 0`，文件原样落盘；`scan_secrets` 对 JSON 形态（`"cf_clearance": "..."`、`{"Cookie": ...}`、`Authorization: Bearer`）**全部漏检** | 入库前**真做脱敏改写**（clearance→长度、cookie 值→REDACTED、query 丢弃）；脱敏后仍命中则**默认拒绝入库**（`--allow-secrets` 才放行）；正则覆盖 JSON 形态并排除自身占位符 |
+| **B4** | `diff` 的 `_assertion_states` 不用 `_has_stage2_program` 判据 → 把 V-3 刚修好的"缺输入不许报 fail"**又退回去了**，证据文件已在建议"为 dispatcher 新增补丁" | 差分复用同一判据；新增用例锁死"未走到 stage2 时必须 skip" |
+| **B5** | 9 条结构断言是**字面量子串存在性**（`"counter" in js`），而 README/CHANGELOG 的措辞夸大成"指出坏在哪一行 AST" | **如实收敛表述**：断言矩阵输出增加 `strength: literal-substring` 与 `strength_note`，明确"通过 ≠ 结构未变，只说明该标记仍出现"；升级路径指向 T-72 |
+
+复审同时确认：`/console` 的只读五条约束与 request_id 的头注入防护**基本成立**，是本轮质量最好的部分。
+
+### 能力边界（必须与上面的成绩一起读）
+
+- **断言强度是字面量级**，不是 AST 级。它回答"这个结构标记还在不在"，**回答不了**"结构形态有没有变"。
+  真正的 AST 级判据要接 `stage2_snapshot` 的真实分析输出（T-72），本版**未完成**。
+- 差分报告的"字段名集合"会把长 URL 编码串当字段名（噪声），已记为 P3。
+
+### 验证
+
+- Python **648 passed / 7 skipped**；覆盖率 **87.49%**；**21 模块**逐模块门禁达标。
+- Go 46 测试；openapi **13 操作**双向一致；文档数字 **9 处**一致；findings **54** 条 exit 0。
+- 仓库卫生 exit 0（219 跟踪文件）；`/console` 真浏览器 E2E PASS；真进程 E2E **32/32**；热更新演练 **17/17**。
+
 ## [5.0.3] - 2026-11-04
 
 主题：**真机多站端到端确认 + 工具契约固化**（无代码行为变更）。

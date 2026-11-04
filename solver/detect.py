@@ -25,6 +25,13 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+SIGNATURES_SOURCE = {
+    "repo": "scrapfly/Antibot-Detector",
+    "commit": "unknown",  # 由 gen_detect_signatures.py --commit <sha> 写入；未知必须如实写 unknown
+    "generated_at": "2025-01-01T00:00:00Z",  # 占位，由生成脚本刷新
+    "count": 33,
+}
+
 SIGNATURES = [
     {
         'id': 'detect-akamai', 'name': 'Akamai Bot Manager',

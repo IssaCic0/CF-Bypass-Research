@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sys
 import threading
@@ -533,15 +534,94 @@ def test_audit_log_drops_unknown_fields(tmp_path):
             svc_mod.Handler.audit_fp = None
 
 
-def test_audit_log_write_failure_does_not_break_request(live_audit):
-    """审计是旁路：写盘失败（磁盘满/文件被占）不许让请求失败。"""
+def test_audit_log_write_failure_does_not_break_request(live_audit, capfd):
+    """审计是旁路：写盘失败（磁盘满/文件被占）不许让请求失败。
+
+    T-82 stdout 卫生：失败留痕走 logging（stderr 通道），**绝不能 print 到 stdout**——
+    stdout 是 JSON lines 契约，混进一行非 JSON 文本会打挂消费方。
+
+    留痕断言用自建 logging.Handler（挂在 cfsolve.audit 上）：不依赖 pytest 的
+    捕获管道（caplog 在 --cov 下会被 pytest-cov 的 hook 顺序吞掉 record，实测可复现），
+    线程安全，也不碰 Logger.warning 的 patch 语义。
+    """
     base, _audit = live_audit
-    svc.Handler.audit_path = "/nonexistent-dir/cannot/open/audit.jsonl"
+    svc.Handler.audit_path = "Z:/definitely-not-a-dir-8f3c/cannot/open/audit.jsonl"
+
+    class _Catch(logging.Handler):
+        def __init__(self):
+            super().__init__()
+            self.messages: list[str] = []
+
+        def emit(self, record):
+            self.messages.append(record.getMessage())
+
+    catch = _Catch()
+    audit_logger = logging.getLogger("cfsolve.audit")
+    audit_logger.addHandler(catch)
     try:
         code, body = _post(base, {"url": HOST, "timeout": 10})
         assert code == 200 and body.get("ok") is True
+        # handler 线程在响应发出**之后**才执行 _audit_write（T-79 实测确认）：
+        # 这里必须等留痕落地再摘 handler，否则会把它未完成的写入判成"没留痕"。
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not catch.messages:
+            time.sleep(0.05)
     finally:
-        pass
+        audit_logger.removeHandler(catch)
+    captured = capfd.readouterr()
+    assert "audit-write-failed" not in captured.out, \
+        f"audit-write-failed 泄漏进了 stdout（JSON lines 契约被破坏）：{captured.out!r}"
+    assert catch.messages and "audit-write-failed" in catch.messages[0], \
+        f"写失败必须经 cfsolve.audit logger 留痕（logging.warning），实际 {catch.messages}"
+    assert "FileNotFoundError" in catch.messages[0]
+
+
+def test_stdout_is_clean_during_full_flow(live_audit, capfd):
+    """T-82 验收用例：完整请求流程跑完，stdout 只含合法 JSON lines。
+
+    口径：把 sys.stdout 换成内存缓冲，按 `json.JSONDecoder.raw_decode` **顺序扫**——
+    每个字符都必须属于某个可解析的 JSON 对象，扫完不剩任何非空白垃圾。
+    这样既抓得住"裸 print 一行日志"（`[cfsolve] ...` 扫不过），
+    又不会被 fd 级捕获的截断/交错伪影误伤（那是 capfd 的粒度问题，不是契约问题）。
+    """
+    import io
+
+    base, _audit = live_audit
+    svc.Handler.audit_path = "Z:/definitely-not-a-dir-8f3c/cannot/open/audit.jsonl"  # 触发写失败路径
+    buf = io.StringIO()
+    real_stdout = sys.stdout
+    sys.stdout = buf
+    try:
+        code, body = _post(base, {"url": HOST, "timeout": 10})
+        assert code == 200 and body.get("ok") is True
+        # `_log` 在响应之后才写：等它落地再恢复 stdout
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and '"event": "solve"' not in buf.getvalue():
+            time.sleep(0.05)
+    finally:
+        sys.stdout = real_stdout
+    out = buf.getvalue()
+    capfd.readouterr()                      # 清掉 fd 级残留，避免污染后续用例
+
+    decoder = json.JSONDecoder()
+    pos, parsed = 0, []
+    while pos < len(out):
+        while pos < len(out) and out[pos] in " \t\r\n":
+            pos += 1
+        if pos >= len(out):
+            break
+        try:
+            obj, end = decoder.raw_decode(out, pos)
+        except json.JSONDecodeError as e:
+            pytest.fail(f"stdout 混入了非 JSON 内容（契约破坏）：{out[pos:pos + 120]!r} —— {e}")
+        parsed.append(obj)
+        pos = end
+    assert parsed, "完整流程应至少产生一条 stdout JSON 行（_log 契约）"
+    assert any(o.get("event") == "solve" for o in parsed if isinstance(o, dict)), \
+        f"没抓到 solve 事件行：{parsed}"
+    # 更强的负向断言：任何形状的日志文本都不许出现在 stdout
+    for bad in ("[cfsolve]", "audit-write-failed", "WARNING", "Traceback"):
+        assert bad not in out, f"stdout 出现非契约文本 {bad!r}：{out[:200]!r}"
 
 
 # ── prefer 现在真的影响选路（此前只是提示字段）──────────────

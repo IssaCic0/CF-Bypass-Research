@@ -9,6 +9,7 @@
 | Python 全量测试 | **0 failed，0 error** | `python -m pytest tests/ -q` |
 | Python 覆盖率（整体） | **≥ 80%**（`solver/` 整体） | `python -m pytest tests/ -q --cov=solver --cov-fail-under=80` |
 | Python 覆盖率（**逐模块**） | 每个 `solver/` 模块 ≥ `docs/coverage-policy.json` 里登记的值；**未登记 = 直接红** | `node scripts/check-coverage.mjs --coverage-json=coverage.json` |
+| Python 覆盖率（**拆分产物专项**） | `bootstrap.py` **≥ 85%** · `auth.py` **≥ 85%** · `probe.py` **≥ 85%**（三者都是 v4.4 从 `service.py` 拆出来的，拆分当年留下过空洞：bootstrap 38% / auth 73% / probe 72%） | 同上（三项已登记进 `docs/coverage-policy.json`，实测 2026-11-04：bootstrap 87.3% / auth 95.8% / probe 93.4%） |
 | Go 测试 | **0 failed**，且 `-race` 通过 | `cd gocfsolve && go test -race ./...` |
 | Go 静态检查 | `go vet` **无输出** | `cd gocfsolve && go vet ./...` |
 | Python 语法 | `compileall` 退出码 **0** | `python -m compileall -q solver scripts tests` |

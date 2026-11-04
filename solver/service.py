@@ -48,12 +48,14 @@ import re
 import secrets
 import signal
 import socket
+import logging
 import sys
 import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urljoin, urlsplit
+from uuid import uuid4
 
 try:  # 作为包导入（tests / 未来 solver 包）
     from .probe import (  # 探测能力已拆到独立模块（v4.4，只搬不改）
@@ -85,6 +87,8 @@ try:  # 作为包导入（tests / 未来 solver 包）
     from .eventlog import EventLog  # P2-1：最近 N 条事件环形缓冲（GET /logs 的数据源）
     # UI：只读状态页（单文件 HTML，零依赖零构建）
     from .statuspage import STATUS_PAGE_HTML_BYTES
+    # T-78：只读控制台（单文件 HTML，带 token 鉴权，零写入零依赖）
+    from .console_html import CONSOLE_PAGE_HTML_BYTES
     # E1：YesCaptcha 兼容层（createTask/getTaskResult）的注册表与错误类型
     from .compat import DEFAULT_MAX_PENDING as COMPAT_DEFAULT_MAX_PENDING, ERR_KEY as COMPAT_ERR_KEY, CompatError, TaskRegistry
     # D1：请求解析/校验已下沉（常量与解析函数都从这里来）
@@ -153,6 +157,7 @@ except ImportError:  # 直接以脚本运行：python solver/service.py
     from metrics import render_metrics_text  # type: ignore[no-redef]
     from eventlog import EventLog  # type: ignore[no-redef]
     from statuspage import STATUS_PAGE_HTML_BYTES  # type: ignore[no-redef]
+    from console_html import CONSOLE_PAGE_HTML_BYTES  # type: ignore[no-redef]
     from compat import (  # type: ignore[no-redef]
         DEFAULT_MAX_PENDING as COMPAT_DEFAULT_MAX_PENDING,
         ERR_KEY as COMPAT_ERR_KEY,
@@ -259,7 +264,21 @@ DETECT_CACHE_MAX = 256
 AUDIT_FIELDS = (
     "event", "req_id", "host", "ok", "cached", "elapsed", "clearance_len", "ms",
     "error_code", "stage", "backend", "route", "reason", "peer", "path", "ts",
+    # T-79：贯穿标识。request_id 是对外契约（响应头/envelope/审计同值），
+    # req_id 是既有内部键 —— 两者同值，审计同时记是为了兼容旧日志消费方。
+    "request_id",
 )
+
+#: T-79：调用方可携带的 `X-Request-Id` 合法字符集（白名单校验，非法即丢弃并新生成）。
+#: 刻意不含引号/尖括号/控制字符 —— 头注入与日志注入的第一道防线。
+REQUEST_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+def _sanitize_request_id(raw: str | None) -> str:
+    """校验调用方的 X-Request-Id：合法（≤64 位白名单字符）则原样沿用，否则返回空串。"""
+    if not raw:
+        return ""
+    return raw if REQUEST_ID_RE.fullmatch(raw) else ""
 
 #: `/metrics` 里按域指标只保留前 N 个域。
 #: 域名是**调用方可控输入**，直接当标签用会让 Prometheus 的基数失控（几万个 series），
@@ -438,6 +457,10 @@ class Solver:
         # 允许 0 = 关闭（运维有时要每次都看实时探测结论）
         self.detect_cache_ttl = max(0.0, float(detect_cache_ttl))
         self.detect_cache_hits = 0
+
+        # T-76：研究资产目录（corpus/INDEX.json + 断言矩阵）。由 main/测试注入；默认仓库根 corpus/。
+        # 防御性读取：目录/文件缺失 → research_status() 全 0/None + note，绝不抛异常。
+        self.corpus_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "corpus")
 
         # 可观测性：最近事件环形缓冲（`GET /logs`）+ 在途请求注册表（`GET /status`）。
         # 为什么放在 Solver 而不是 Handler：Handler 每连接一个实例，活不过一个请求；
@@ -1510,6 +1533,70 @@ class Solver:
         return derive_ttl(cookie_list, cookie_name, default=self.ttl, max_ttl=self.ttl)
 
     # -- 健康与指标 -----------------------------------
+    def research_status(self) -> dict:
+        """T-76：研究资产状况（/health 的 research 段与 /metrics 研究序列共用数据源）。
+
+        **防御性读取**：corpus/INDEX.json 与断言矩阵（corpus/assertions.json）都可能是
+        早期产物（scripts/research.py 的断言函数尚未交付）——文件缺失即全 0/None + note，
+        绝不抛异常、绝不填假值（无快照就是 None/NaN，不许 0）。
+        """
+        index_path = os.path.join(self.corpus_dir, "INDEX.json")
+        assertions_path = os.path.join(self.corpus_dir, "assertions.json")
+        variants = 0
+        assertions_total = 0
+        assertions_pass = 0
+        assertions_fail = 0
+        assertions_skipped = 0
+        last_snapshot_at = None
+        last_diff_at = None
+        notes: list[str] = []
+        try:
+            with open(index_path, encoding="utf-8") as f:
+                index = json.load(f)
+            # 生产者（scripts/corpus.py::_write_index）写的键是 `entries`；
+            # 只认 `variants` 会让真实语料恒报 0 —— 那就是"指标在说谎"。
+            rows = index.get("entries")
+            if rows is None:
+                rows = index.get("variants")
+            if isinstance(rows, list):
+                variants = len(rows)
+                if not rows:
+                    # 文件在但没样本：必须说清，不许静默报 0（这是"不可能被忘记"的承诺）
+                    notes.append(
+                        "corpus/INDEX.json 存在但 entries 为空：尚未归档任何会话快照"
+                    )
+        except FileNotFoundError:
+            notes.append("corpus empty: 需一次性抓取授权，见 plans/下一步改进指南.md §6")
+        except Exception as e:  # noqa: BLE001 —— 损坏的 INDEX 也只降级
+            notes.append(f"INDEX.json unreadable: {type(e).__name__}")
+        try:
+            with open(assertions_path, encoding="utf-8") as f:
+                am = json.load(f)
+            # 摘要 schema（scripts/research.py::assertions_matrix 写）：
+            # assertions_total / pass / fail / skip / last_snapshot_at
+            assertions_total = int(am.get("assertions_total") or 0)
+            assertions_pass = int(am.get("pass") or 0)
+            assertions_fail = int(am.get("fail") or 0)
+            assertions_skipped = int(am.get("skip") or 0)
+            last_snapshot_at = am.get("last_snapshot_at")
+            last_diff_at = am.get("last_diff_at")
+            if am.get("skip_reason"):
+                notes.append(str(am["skip_reason"]))
+        except FileNotFoundError:
+            notes.append("assertions matrix absent: 先跑 python scripts/research.py assertions")
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"assertions.json unreadable: {type(e).__name__}")
+        return {
+            "corpus_variants": variants,
+            "assertions_total": assertions_total,
+            "assertions_pass": assertions_pass,
+            "assertions_fail": assertions_fail,
+            "assertions_skipped": assertions_skipped,
+            "last_snapshot_at": last_snapshot_at,
+            "last_diff_at": last_diff_at,
+            "note": "; ".join(notes),
+        }
+
     def health(self, *, include_internal: bool = True) -> tuple[int, dict]:
         """健康视图。`include_internal=False` 时只返回"服务是否在服务"的最小集。
 
@@ -1559,6 +1646,9 @@ class Solver:
                 "last_success_at": self._last_success_at,
                 "last_error": self._last_error,
                 "last_error_at": self._last_error_at,
+                # T-78：布尔标记（只读控制台用）。原文 last_error 可能带主机名/代理地址，
+                # 控制台只给"有没有错 + 何时"，不给原文。
+                "has_last_error": bool(self._last_error),
                 "uptime_sec": round(_now() - self._started_at, 1),
             }
             avg = round(self._elapsed_sum / self._solves, 2) if self._solves else 0.0
@@ -1567,6 +1657,15 @@ class Solver:
                 body["proxies"] = self._pool.snapshot()   # 已脱敏，不含凭据
             if self.prewarmer is not None:
                 body["prewarm"] = self.prewarmer.stats.as_dict()
+        # T-76：research 段**仅带 token 的完整视图**出现 —— 免鉴权最小集不许扩。
+        # 必须放在锁外：它要读两个磁盘文件，持锁读盘会在慢盘/网络盘上连带阻塞
+        # `_account()` 计数与 worker 记账（复审 N5）。
+        try:
+            body["research"] = self.research_status()
+        except Exception:  # noqa: BLE001 —— 研究段绝不影响 /health 本身
+            body["research"] = {"corpus_variants": 0, "assertions_total": 0,
+                                "assertions_skipped": 0, "last_snapshot_at": None,
+                                "last_diff_at": None, "note": "research status unavailable"}
         return (200 if alive else 503), body
 
     def stats(self) -> dict:
@@ -1667,7 +1766,7 @@ class Solver:
     def metrics_text(self) -> str:
         """Prometheus 文本格式（渲染逻辑在 metrics.py，原样再导出）。"""
         with self._lock:
-            return render_metrics_text(
+            kwargs = dict(
                 solves=self._solves,
                 hits=self._hits,
                 failures=self._failures,
@@ -1682,6 +1781,9 @@ class Solver:
                 backend_err=dict(self._backend_err),
                 host_stats_fn=getattr(self._store, "host_stats", None),
             )
+        # research_status 要读盘：放到锁外再渲染，避免持锁做 I/O（复审 N5）。
+        kwargs["research_fn"] = self.research_status
+        return render_metrics_text(**kwargs)
 
     # -- 退出 -----------------------------------------
     def close(self) -> None:
@@ -1749,6 +1851,11 @@ class Handler(BaseHTTPRequestHandler):
         pass    # 统一走 _log()
 
     def _log(self, **fields) -> None:
+        # T-79：每个事件行统一注入 request_id（与响应头/envelope 同值）——
+        # 在这里做而不是改每个调用点，杜绝"新加一个 _log 忘了带 rid"。
+        rid = getattr(self, "_request_id", "") or ""
+        if rid:
+            fields.setdefault("request_id", rid)
         fields.setdefault("ts", round(_now(), 3))
         print(json.dumps(fields, ensure_ascii=False), flush=True)
         self._audit_write(fields)
@@ -1811,8 +1918,12 @@ class Handler(BaseHTTPRequestHandler):
                 Handler.audit_fp.write(line + "\n")
                 Handler.audit_fp.flush()
         except Exception as e:  # noqa: BLE001 —— 审计写失败只降级，不打断请求
-            print(json.dumps({"event": "audit-write-failed", "error": f"{type(e).__name__}: {str(e)[:100]}"},
-                             ensure_ascii=False), flush=True)
+            # T-82：**禁止裸 print 到 stdout** —— stdout 是 JSON lines 契约，
+            # 消费方按行 json.loads，混进一行 "[cfsolve] ..." 会打挂整个管道。
+            # 走 logging（默认 stderr），既留痕又不污染契约。
+            logging.getLogger("cfsolve.audit").warning(
+                "audit-write-failed: %s: %s", type(e).__name__, str(e)[:100]
+            )
 
     def _send_status_page(self) -> None:
         """回只读状态页。不带任何服务端数据（token 由用户在页面上填）。"""
@@ -1839,11 +1950,40 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_console_page(self) -> None:
+        """T-78：回只读控制台。**带 token 鉴权**（与其它数据端点同门，与 `/` 不同）。
+
+        页面本身不含任何数据也不含 token —— token 由前端 prompt() 现问、只存 sessionStorage。
+        CSP / no-store / nosniff 与状态页同一套防线（这个端点同样公网可达就必须自己带防线）。
+        """
+        body = CONSOLE_PAGE_HTML_BYTES
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+            "connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; "
+            "frame-ancestors 'none'",
+        )
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _send(self, code: int, payload: dict) -> None:
+        # T-79：每个 JSON 出口都带 request_id —— 响应头与 envelope 同值。
+        # 既有调用方不感知（只加不删，向后兼容）。
+        request_id = getattr(self, "_request_id", "") or ""
+        if request_id and isinstance(payload, dict):
+            payload = {**payload, "request_id": request_id}   # 不可变：不就地改调用方的 dict
         body = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+        if request_id:
+            self.send_header("X-Request-Id", request_id)
         self.end_headers()
         self.wfile.write(body)
         # 响应已经落地，这时再读残余才有意义（顺序反了会拖慢响应且照样 RST）。
@@ -1913,6 +2053,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if not self._authorized():
             self._deny()
+            return
+        if path == "/console":
+            # T-78：只读控制台 —— 带鉴权（在上方 _authorized 门之后），零写入。
+            self._send_console_page()
             return
         if path == "/detect":
             self._handle_detect_from_query()
@@ -2045,6 +2189,13 @@ class Handler(BaseHTTPRequestHandler):
             if routed_by is not None:
                 result = dict(result)
                 result["routed_by"] = routed_by
+            # T-79：attempts 每跳附 rid（成功结果与错误 extra 两条路径都覆盖）
+            rid_out = getattr(self, "_request_id", "") or req_id
+            if isinstance(result.get("attempts"), list):
+                result["attempts"] = [
+                    {**a, "rid": rid_out} if isinstance(a, dict) else a
+                    for a in result["attempts"]
+                ]
             self._send(200, result)
             self._log(event="solve", req_id=req_id, host=_host_of(url), path="/solve", ok=True,
                       cached=result.get("cached"), elapsed=result.get("elapsed"),
@@ -2053,10 +2204,16 @@ class Handler(BaseHTTPRequestHandler):
                       clearance_len=len(result.get("cf_clearance", "")),
                       ms=round((time.monotonic() - started) * 1000))
         except SolveError as e:
+            rid_out = getattr(self, "_request_id", "") or req_id
             if routed_by is not None:
                 # 失败也必须回传"我是怎么路由的"：否则线上只看到 unsolved，
                 # 却不知道它探测到了什么、选了哪条路。
                 e.extra = {**(getattr(e, "extra", None) or {}), "routed_by": routed_by}
+            if isinstance(getattr(e, "extra", None), dict) and isinstance(e.extra.get("attempts"), list):
+                # T-79：失败路径的 attempts 轨迹每跳也附 rid
+                e.extra["attempts"] = [
+                    {**a, "rid": rid_out} if isinstance(a, dict) else a for a in e.extra["attempts"]
+                ]
             self._send(e.http_status, e.payload())
             self._log(event="solve", req_id=req_id, host=_host_of(url), path="/solve", ok=False,
                       error_code=e.code.value, stage=e.stage,
@@ -2431,7 +2588,11 @@ def _track_inflight(method):
         Handler.enter_request()
         # 每个 HTTP 请求一个 req_id：它同时是 solve 日志行、internal 异常行、/logs 缓冲、
         # 审计文件、/status 在途明细的共同键。分散在各处各生成一个 ID 就"对不上号"了。
-        self._req_id = secrets.token_hex(4)
+        # T-79：对外契约用 request_id —— 调用方带合法 X-Request-Id 则沿用，否则新生成
+        # （uuid4().hex[:12]）。两者同值：req_id 保留为既有内部键（日志/在途表）。
+        caller_rid = _sanitize_request_id(self.headers.get("X-Request-Id"))
+        self._req_id = caller_rid or uuid4().hex[:12]
+        self._request_id = self._req_id
         solver = getattr(Handler, "solver", None)
         rid = 0
         if solver is not None:

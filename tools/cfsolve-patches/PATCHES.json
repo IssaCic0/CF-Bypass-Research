@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "upstream": "https://github.com/chris124567/cfsolve",
+  "upstream_ref": "master@2026-10-29",
+  "patches": [
+    {
+      "id": "windows-and-capture-fixes",
+      "file": "cfsolve-windows-and-capture-fixes.patch",
+      "upstream_commit": "b5a9eb3d037b",
+      "files": [
+        "Cargo.toml",
+        "src/performance_clock.rs",
+        "src/capture/proxy.rs",
+        "src/bin/capture-proxy/cli.rs"
+      ],
+      "hunks": 17,
+      "purpose": "Windows 可编译/运行（QPC 单调时钟 + Ctrl+C 关闭分支）+ capture-proxy 支持运行时构造的 base64 码表（--alphabet）与 modulus 运行时提取",
+      "assertion_ids": [
+        "R-compiler-windows-build",
+        "R-capture-runtime-alphabet"
+      ],
+      "status": "applied"
+    },
+    {
+      "id": "newcf-computed-key-20261103",
+      "file": "cfsolve-newcf-computed-key-20261103.patch",
+      "upstream_commit": "5ed0e65",
+      "files": [
+        "src/challenge/expression.rs",
+        "src/deobfuscate/analysis/properties.rs"
+      ],
+      "hunks": 4,
+      "purpose": "新版 CF 计算属性别名（obj[helper.key]）支持：Member 求值分支支持静态可求值的 computed key；is_static_member_key 放宽。打通 payload 构建 + POST 200",
+      "assertion_ids": [
+        "R-computed-key-static-eval",
+        "R-stage2-counter-candidates"
+      ],
+      "status": "applied"
+    },
+    {
+      "id": "alias-rules-20261104",
+      "file": "cfsolve-alias-rules-20261104.patch",
+      "upstream_commit": "b5a9eb3",
+      "local_commits": [
+        "073fe49",
+        "aeacaa5"
+      ],
+      "files": [
+        "src/alias_rules.rs",
+        "src/alias_rules.json",
+        "src/lib.rs",
+        "src/challenge/expression.rs",
+        "src/challenge/program.rs",
+        "src/deobfuscate/analysis/properties.rs",
+        "src/bin/dumpstage2/main.rs"
+      ],
+      "hunks": 12,
+      "purpose": "T-71：把 11-03 手工放宽的两处计算属性别名判定（properties::is_static_member_key / expression::evaluate 的 Member 分支）改成读同一份数据 src/alias_rules.json（include_str! 嵌入，零运行时文件依赖）。数据由 tools/cfsolve-patches/analyze/alias_shapes.py 从规则语料 analyze/fixtures/alias-rules.js 生成，「是否可静态求值」由简化求值器实测。表里没有的形态一律判动态（默认拒绝），这是「没放宽过头」的机制保证",
+      "prerequisite": "补丁内含 11-03 补丁组的后续工作（alias 表预取：expression.rs 的 prime_aliases/Collector、program.rs 的预取调用、dumpstage2 离线模式）。这部分在本轮开始前已 staged 在本地索引里，因 T-71 的求值路径依赖 ALIASES 表而无法拆开，已原样落为独立 commit 073fe49，未做任何修改。T-71 本体是 aeacaa5",
+      "data_source": {
+        "generator": "tools/cfsolve-patches/analyze/alias_shapes.py",
+        "corpus": "tools/cfsolve-patches/analyze/fixtures/alias-rules.js",
+        "regenerate": "python tools/cfsolve-patches/analyze/alias_shapes.py tools/cfsolve-patches/analyze/fixtures/alias-rules.js --out <repo>/src/alias_rules.json",
+        "drift_check": "python tools/cfsolve-patches/analyze/alias_shapes.py tools/cfsolve-patches/analyze/fixtures/alias-rules.js --check <repo>/src/alias_rules.json",
+        "corpus_kind": "synthetic rule corpus — 本轮无真实 deobf 样本（E-2 预算 0 / R-20），static_evaluable 由求值器实测，但语料本身是手写的"
+      },
+      "rollback": "CFSOLVE_ALIAS_RULES=off 逐字恢复 11-03 的手写判定；或单独 revert aeacaa5",
+      "assertion_ids": [
+        "R-alias-shape-normalization-stable",
+        "R-alias-rule-set-matches-rust-side",
+        "R-alias-rule-regression-on-synthetic",
+        "R-alias-rules-switch-restores-legacy"
+      ],
+      "status": "applied"
+    },
+    {
+      "id": "stage2-counter-diag-20261104",
+      "file": "cfsolve-stage2-counter-diag-20261104.patch",
+      "upstream_commit": "aeacaa5",
+      "local_commits": [
+        "640516a"
+      ],
+      "files": [
+        "src/stage2/analysis/envelope.rs"
+      ],
+      "hunks": 6,
+      "purpose": "T-72：stage2 record-envelope 的 6 个字段断言不再互相掩盖（全部跑完再失败）；counter 拆成「候选集生成 → 逐个校验」，失败时给出候选、拒绝理由、pc 与「已恢复但从未被当作 key 写过」的名字；token/input/status/message/clock marks 同样带候选。原错误串逐字保留为 detail 字段（向后兼容）",
+      "prerequisite": "需先应用 cfsolve-alias-rules-20261104.patch（本补丁 diff 自 aeacaa5）",
+      "boundary": "不承诺让 stage2 对最新变体收敛（要上游跟进 + 真机）；只承诺失败时给出候选、位置、形态。行号不可得：listing 只有程序计数器，没有 iframe.deobfuscated.js 行信息，错误里显式写明并用 pc 定位",
+      "assertion_ids": [
+        "R-stage2-counter-candidates-reported",
+        "R-stage2-detail-preserved",
+        "R-stage2-assertions-no-masking",
+        "R-stage2-counter-first-named-write-stable"
+      ],
+      "status": "applied"
+    }
+  ]
+}

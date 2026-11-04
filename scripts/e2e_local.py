@@ -111,6 +111,15 @@ def request(
         return e.code, dict(e.headers or {}), e.read()
 
 
+def hget(headers: dict, name: str) -> str:
+    """大小写不敏感地取响应头（`dict(r.headers)` 的 key 大小写取决于服务端）。"""
+    target = name.lower()
+    for k, v in (headers or {}).items():
+        if str(k).lower() == target:
+            return str(v)
+    return ""
+
+
 def json_or_empty(body: bytes) -> dict:
     try:
         v = json.loads(body or b"{}")
@@ -413,6 +422,34 @@ def phase_a(workdir: Path) -> None:
         record("A13b_solve_oversized_body_413",
                status == 413 and json_or_empty(body).get("error_code") == "payload-too-large",
                f"status={status} error_code={json_or_empty(body).get('error_code')}")
+
+        # v6.0 T-78：只读控制台。无 token 必须 401；带 token 必须是 HTML + CSP，
+        # 且页面里不许出现写面（form / innerHTML / onclick）—— 这是它的灵魂约束。
+        status, _h, _b = request(f"{svc.base}/console")
+        record("A17_console_requires_token", status == 401, f"status={status}")
+
+        status, chdr, cbody = request(f"{svc.base}/console", token=svc.token)
+        ctype = hget(chdr, "content-type")
+        csp = hget(chdr, "content-security-policy")
+        page = cbody.decode("utf-8", "replace")
+        record(
+            "A18_console_readonly_surface",
+            status == 200 and "text/html" in ctype.lower()
+            and "default-src 'none'" in csp
+            and "<form" not in page.lower()
+            and "innerhtml" not in page.lower()
+            and "onclick=" not in page.lower(),
+            f"status={status} ctype={ctype!r} csp={'yes' if csp else 'no'}",
+        )
+
+        # v6.0 T-79：request_id 贯穿 —— 响应头必须回显，且与 envelope 里的同一个值。
+        _status, rhdr, rbody = request(f"{svc.base}/solve", token=svc.token, method="POST",
+                                       payload={"url": "https://example.com/", "route": "nonsense"})
+        rid = hget(rhdr, "x-request-id")
+        env_rid = json_or_empty(rbody).get("request_id")
+        record("A19_request_id_in_header", bool(rid) and len(rid) >= 8, f"x-request-id={rid!r}")
+        record("A20_request_id_in_envelope", bool(rid) and env_rid == rid,
+               f"envelope={env_rid!r} header={rid!r}")
 
         # /shutdown：202 + 真退出 + 退出码 0（这是"滚动重启不掉请求"的地基）。
         code, http_status = svc.shutdown()

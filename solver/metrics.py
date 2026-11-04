@@ -10,8 +10,29 @@
 
 from __future__ import annotations
 
+import time
+from datetime import datetime
+
 #: `/metrics` 里按域指标只保留前 N 个域（域名是不可控输入，防止标签基数爆炸）。
 HOST_METRICS_TOP_N = 20
+
+
+def _now_fn() -> float:
+    return time.time()
+
+
+def _age_seconds(stamp, now: float) -> float | None:
+    """把 ISO-8601 时间戳换成"距今多少秒"；无法解析返回 None（→ NaN，不填假值）。"""
+    if not stamp:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    try:
+        return max(0.0, now - dt.timestamp())
+    except (OverflowError, OSError, ValueError):
+        return None
 
 #: 延迟直方图分桶（秒），用于 /metrics（原 service.py 同值）
 LATENCY_BUCKETS = (1.0, 3.0, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0)
@@ -32,10 +53,12 @@ def render_metrics_text(
     backend_ok: dict[str, int],
     backend_err: dict[str, int],
     host_stats_fn=None,
+    research_fn=None,
 ) -> str:
     """渲染 Prometheus 文本。只暴露计数与桶，不含任何域名/凭证。
 
     `host_stats_fn` 是 `Solver._store.host_stats`（可能不存在，None 时跳过按域段）。
+    `research_fn` 是 `Solver.research_status`（T-76，可能不存在，None 时跳过研究段）。
     """
     ok_map = dict(backend_ok)
     err_map = dict(backend_err)
@@ -112,4 +135,38 @@ def render_metrics_text(
                 if host:
                     lines.append(f'cfsolve_host_failures_total{{host="{host}"}} {int(row.get("failures") or 0)}')
     lines.append(f"cfsolve_solve_seconds_count {solves}")
+
+    # T-76：研究资产三条序列。让"没有样本/断言全在 skip"这件事**不可能被忘记**。
+    # 关键语义：无快照时 snapshot_age 是 **NaN**，不是 0 —— 0 会假装"刚拍过快照"。
+    if callable(research_fn):
+        try:
+            research = research_fn() or {}
+            variants = int(research.get("corpus_variants") or 0)
+            # 真实三态计数，各自独立取数、互不推算。
+            # 曾经写成 "pass = total − skip，fail 恒 0"，把真实的 fail 记进 pass —— 指标说谎。
+            counts = {
+                "pass": max(0, int(research.get("assertions_pass") or 0)),
+                "fail": max(0, int(research.get("assertions_fail") or 0)),
+                "skip": max(0, int(research.get("assertions_skipped") or 0)),
+            }
+            snapshot_at = research.get("last_snapshot_at")
+            age = _age_seconds(snapshot_at, _now_fn())
+            age_text = "NaN" if age is None else f"{age:.0f}"
+        except Exception:  # noqa: BLE001 —— 研究段损坏只降级，绝不 500
+            variants = 0
+            counts = {"pass": 0, "fail": 0, "skip": 0}
+            age_text = "NaN"
+        lines += [
+            "# HELP cfsolve_research_corpus_variants 研究语料变体数（corpus/INDEX.json）",
+            "# TYPE cfsolve_research_corpus_variants gauge",
+            f"cfsolve_research_corpus_variants {variants}",
+            "# HELP cfsolve_research_assertions 断言矩阵按状态计数",
+            "# TYPE cfsolve_research_assertions gauge",
+            f'cfsolve_research_assertions{{state="pass"}} {counts["pass"]}',
+            f'cfsolve_research_assertions{{state="fail"}} {counts["fail"]}',
+            f'cfsolve_research_assertions{{state="skip"}} {counts["skip"]}',
+            "# HELP cfsolve_research_snapshot_age_seconds 距上次研究快照的秒数（无快照为 NaN）",
+            "# TYPE cfsolve_research_snapshot_age_seconds gauge",
+            f"cfsolve_research_snapshot_age_seconds {age_text}",
+        ]
     return "\n".join(lines) + "\n"

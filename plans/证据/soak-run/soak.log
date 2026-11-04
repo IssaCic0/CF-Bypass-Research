@@ -1,6 +1,0 @@
-[soak] token 从 plans/证据/soak-run/.env 装载（指纹 5a038c98d7ed）
-[soak] 开始 2026-11-03T03:22:41+08:00：86400s，间隔 300s，pid=25888
-  t=     0s rss=701.1MB handles=2771 state=ready probes=200
-  t=  1800s rss=696.4MB handles=2710 state=ready probes=200
-  t=  3600s rss=699.1MB handles=2736 state=ready probes=200
-  t=  5400s rss=382.8MB handles=2720 state=ready probes=200

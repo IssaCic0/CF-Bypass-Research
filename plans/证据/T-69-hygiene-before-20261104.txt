@@ -1,0 +1,15 @@
+FAIL：7 个被跟踪的运行产物（应为可再生/运行态文件，不该入库）：
+
+  plans/证据/soak-run/cache/cache.sqlite3
+  plans/证据/soak-run/cache/cache.sqlite3-shm
+  plans/证据/soak-run/cache/cache.sqlite3-wal
+  plans/证据/soak-run/cache/salt.bin
+  plans/证据/soak-run/pid.txt
+  plans/证据/soak-run/service.log
+  plans/证据/soak-run/soak.log
+
+修复（--cached 只解除跟踪、保留工作区文件）：
+  git rm --cached "plans/证据/soak-run/cache/cache.sqlite3" "plans/证据/soak-run/cache/cache.sqlite3-shm" "plans/证据/soak-run/cache/cache.sqlite3-wal" "plans/证据/soak-run/cache/salt.bin" "plans/证据/soak-run/pid.txt" "plans/证据/soak-run/service.log" "plans/证据/soak-run/soak.log"
+
+并在提交信息里注明出库原因（参见 plans/证据/README.md 三条硬规则）。
+EXIT=1

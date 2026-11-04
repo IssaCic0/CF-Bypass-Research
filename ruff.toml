@@ -1,0 +1,10 @@
+# ruff 配置（T-81：dev 依赖引入「只引一个」纪律的落点之一）。
+# 只开 E（pycodestyle errors）+ F（pyflakes），不碰格式化规则集（I/D/W 等），
+# 避免一次性把历史文件全部标红。line-length 放宽到 120（仓库既有风格）。
+# 范围由**调用方控制**：只检查本轮新文件，不做全仓强推。
+
+line-length = 120
+target-version = "py311"
+
+[lint]
+select = ["E", "F"]
