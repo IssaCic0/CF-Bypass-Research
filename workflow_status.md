@@ -1116,3 +1116,35 @@ commit `b62bb44` · tag `v5.0.2` · **CI 绿**（run 41757326587，4 job 全过�
 Release: https://github.com/lza6/CF-Bypass-Research/releases/tag/v5.0.2
 门禁：Python **542** / Go **46** / 覆盖率 86% / 20 模块 / 12 操作 / 文档 9 处 / findings **52**（45/5/2）
 
+---
+
+## R-E2E-3 与发版 v5.0.3（2026-11-04）
+
+### glassdoor.co.uk 端到端：**成功**（2 次目标请求）
+
+| 步 | 结果 |
+|---|---|
+| 求解 | `POST /solve` **16.5s**，`cf_clearance` + **12 条 cookie**（含 `__cf_bm` 与 glassdoor 业务 cookie） |
+| 回放（30s 后） | **200 / 735,957B** / 标题 `Glassdoor | Job Search and Career Community` / 前 2048 字节 **0 挑战 marker** |
+
+**cookie 处置**：全程只在内存，未落盘（吸取 `_cookie_dump.json` 的教训）；服务缓存目录 `/tmp/realB` 用后即删。
+
+### 结论（多站端到端）
+
+| 站点 | challenge 形态 | 求解 | 回放 |
+|---|---|---|---|
+| udemy.com | CF managed | 18.32s / 462B | ✅ 200 / 306,752B 真实页面 |
+| glassdoor.co.uk | CF managed | 16.5s / 12 cookie | ✅ 200 / 735,957B 真实页面 |
+
+『求解 → 缓存 → 回放真实内容』在**两个不同站点**上成立（`F-053`）。
+新增 `F-054`（工具契约：判挑战必须复用生产实现；验证脚本凭证只存内存）。
+
+### 发版 v5.0.3
+commit `c7cd76c` · tag `v5.0.3` · **CI 绿**（run 41759121251，4 job 全过，`gh api check-runs` 逐条核对）·
+Release（Latest）: https://github.com/lza6/CF-Bypass-Research/releases/tag/v5.0.3
+提交前按新纪律核对暂存区：无凭证文件 / 无临时文件 / 无 plans/。
+门禁：Python 542 / Go 46 / 覆盖率 86% / 20 模块 / 12 操作 / 文档 9 处 / findings **54**（47/5/2）。
+
+### 预算台账（最终）
+R-E2E-1 4 次 → R-E2E-2 6 次 → R-E2E-3 2 次 = 本轮共 **12 次**；累计 ≈**58 / 80**；**累计失败 1/5**（远低于停止线）。
+
