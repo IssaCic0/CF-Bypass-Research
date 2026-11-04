@@ -235,8 +235,10 @@ def cmd_stop(a):
         print(f"优雅退出不可用（{e}），回退为强制终止")
 
     for pid in listening_pids():
-        print(f"强制终止 PID {pid}（{'优雅退出未在 15s 内完成' if graceful
-              else '无 token 或端点不可用'}）")
+        # 不要写成跨行 f-string：PEP 701（f-string 内换行）是 Python 3.12+，
+        # CI 跑 3.11 会直接 SyntaxError（本轮 CI 抓到）。
+        reason = "优雅退出未在 15s 内完成" if graceful else "无 token 或端点不可用"
+        print(f"强制终止 PID {pid}（{reason}）")
         if os.name == "nt":
             subprocess.call(["taskkill", "/F", "/PID", pid])
         else:

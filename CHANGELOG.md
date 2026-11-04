@@ -2,6 +2,24 @@
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [6.0.1] - 2026-11-04
+
+主题：**修 CI 红（Python 3.11 语法兼容）**。无行为变更。
+
+### 修复
+
+- `run.py` 的 `cmd_stop` 里有一处 **跨行 f-string**（`f"...{... if x
+ else ...}..."`）。
+  PEP 701（f-string 内换行）是 **Python 3.12+**，CI 的 `python (3.11)` job 直接
+  `SyntaxError: unterminated string literal` → 测试与覆盖率门槛失败。
+  本机 3.14 能跑，所以本地全绿掩盖了它 —— 这正是 CI 存在的价值。
+- 已改为先算 `reason` 再插值，并对**全仓 `.py` 用 `ast.parse(feature_version=(3,11))`
+  扫了一遍**：0 个 3.11 不兼容文件。
+
+### 验证
+
+Python 652 passed / 7 skipped；覆盖率 87.5%；21 模块达标；openapi 13 操作；文档 9 处一致。
+
 ## [6.0.0] - 2026-11-04
 
 主题：**研究工程化 —— 把「CF 改版就要重新赌一把」变成「样本驱动、离线可复现的回归工程」**。
