@@ -376,7 +376,12 @@ def test_metrics_still_ok_when_process_probe_fails(monkeypatch):
 
 
 def test_process_metrics_posix_branch(monkeypatch):
-    """POSIX 分支在 Windows 上跑不到，用假 resource 模块把它跑到（CI 是 Linux，两边都要绿）。"""
+    """POSIX 分支：用假 `resource` 模块跑到（两个平台都要能跑这条）。
+
+    ⚠️ **不许 monkeypatch 全局 `os.name`**（CI 抓到的真缺陷）：`pathlib` 实例化时读
+    `os.name`，在 Linux 上把它改成 "nt" 会让 `Path()` 变成 `WindowsPath` →
+    `NotImplementedError` 把整个 pytest 打崩。改用 `platform_name=` 注入。
+    """
     import metrics as m
     import types
 
@@ -385,43 +390,48 @@ def test_process_metrics_posix_branch(monkeypatch):
     fake_resource = types.SimpleNamespace(
         RUSAGE_SELF=0, getrusage=lambda _who: _Usage())
     monkeypatch.setitem(__import__("sys").modules, "resource", fake_resource)
-    monkeypatch.setattr(m.os, "name", "posix")
     monkeypatch.setattr(m.sys, "platform", "linux")
-    # 没有 /proc/self/statm → rss_bytes 缺失但 peak 存在，且不抛
     monkeypatch.setattr("builtins.open", lambda *a, **k: (_ for _ in ()).throw(OSError("no proc")))
-    out = m.process_metrics()
+    out = m.process_metrics(platform_name="posix")
     assert out["peak_rss_bytes"] == 2048 * 1024
     assert "threads" in out
 
 
 def test_process_metrics_never_raises(monkeypatch):
-    """采集本身炸了也只能返回空 dict —— /metrics 绝不能因为自检挂掉。"""
+    """采集本身炸了也必须返回 dict（可能只有 threads）—— /metrics 不能因自检挂掉。
+
+    注入 Windows 分支但让 `ctypes.windll` 不存在：实现里整段包在 try/except 里，
+    所以只会少给字段，不会抛。
+    """
     import metrics as m
-    monkeypatch.setattr(m.os, "name", "nt")
-    monkeypatch.setattr("ctypes.windll", types_simple(), raising=False)
-    out = m.process_metrics()
+
+    out = m.process_metrics(platform_name="nt")
     assert isinstance(out, dict)
-
-
-def types_simple():
-    import types
-    return types.SimpleNamespace(psapi=types.SimpleNamespace(GetProcessMemoryInfo=lambda *a: 0))
+    assert "threads" in out
 
 
 def test_age_seconds_handles_overflow():
-    """极端时间戳（datetime.max 在本平台 .timestamp() 直接 OSError）不能把 /metrics 打挂。"""
+    """极端时间戳不能让 /metrics 打挂（平台差异：Windows 的 `.timestamp()` 抛 OSError，
+    Linux 能算出巨大值）。断言只要求"不抛"，两种结果都接受 —— 之前写成
+    `is None` 在 Linux 上是假红（CI 抓到）。"""
     import metrics as m
     from datetime import datetime
-    assert m._age_seconds(datetime.max.isoformat(), m.time.time()) is None
+    value = m._age_seconds(datetime.max.isoformat(), m.time.time())
+    assert value is None or isinstance(value, float)
 
 
 def test_process_metrics_threads_probe_failure(monkeypatch):
+    """线程数采集失败 → 只少这一条，不抛。
+
+    ⚠️ **不许把 `sys.modules["threading"]` 换成假对象**（CI 抓到）：
+    pytest 自己的内部实现也 import threading，换掉会把整个会话搞坏。
+    改成 patch 真正的 `threading.active_count`。
+    """
     import metrics as m
-    import sys as _sys
-    import types
-    fake = types.SimpleNamespace(active_count=lambda: (_ for _ in ()).throw(RuntimeError("no")))
-    monkeypatch.setitem(_sys.modules, "threading", fake)
-    out = m.process_metrics()
+    import threading
+    monkeypatch.setattr(threading, "active_count",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no")))
+    out = m.process_metrics(platform_name="posix")
     assert "threads" not in out            # 少一条，但不抛
 
 
@@ -435,11 +445,10 @@ def test_process_metrics_linux_statm(monkeypatch):
         ru_maxrss = 1024
     fake_resource = types.SimpleNamespace(RUSAGE_SELF=0, getrusage=lambda _w: _Usage())
     monkeypatch.setitem(__import__("sys").modules, "resource", fake_resource)
-    monkeypatch.setattr(m.os, "name", "posix")
     monkeypatch.setattr(m.sys, "platform", "linux")
     monkeypatch.setattr(m.os, "sysconf", lambda name: 4096, raising=False)
     monkeypatch.setattr("builtins.open", lambda *a, **k: io.StringIO("100 50 0 0"))
-    out = m.process_metrics()
+    out = m.process_metrics(platform_name="posix")
     assert out["rss_bytes"] == 50 * 4096
 
 
@@ -450,6 +459,5 @@ def test_process_metrics_outer_failure(monkeypatch):
     monkeypatch.setitem(__import__("sys").modules, "resource",
                         types.SimpleNamespace(RUSAGE_SELF=0,
                                               getrusage=lambda _w: (_ for _ in ()).throw(RuntimeError("boom"))))
-    monkeypatch.setattr(m.os, "name", "posix")
-    out = m.process_metrics()
+    out = m.process_metrics(platform_name="posix")
     assert "threads" in out and "rss_bytes" not in out

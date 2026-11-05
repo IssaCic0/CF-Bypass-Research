@@ -41,12 +41,17 @@ def _age_seconds(stamp, now: float) -> float | None:
 LATENCY_BUCKETS = (1.0, 3.0, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0)
 
 
-def process_metrics() -> dict:
+def process_metrics(*, platform_name: str | None = None) -> dict:
     """采集本进程的 RSS / 峰值 / 线程数（跨平台，失败就少给字段而不是抛）。
 
     为什么不用 psutil：本项目刻意把依赖压到最少（psutil 是 C 扩展，装不上就没有指标）。
     Windows 用 GetProcessMemoryInfo，POSIX 用 resource.getrusage + /proc 可选。
     拿不到就是 `{}` —— /metrics 少几条序列，好过整个端点 500。
+
+    `platform_name` 只为**测试可注入**：CI 抓到一个真缺陷 —— 测试里用
+    `monkeypatch.setattr(os, "name", "nt")` 模拟 Windows，那改的是**全局 os 模块**，
+    而 `pathlib` 实例化时会读 `os.name` → Linux 上 `Path()` 变成 `WindowsPath` →
+    `NotImplementedError` 把整个 pytest 打崩。所以平台判定必须可注入，测试不许动全局。
     """
     out: dict[str, int] = {}
     try:
@@ -55,7 +60,7 @@ def process_metrics() -> dict:
     except Exception:  # noqa: BLE001
         pass
     try:
-        if os.name == "nt":
+        if (platform_name or os.name) == "nt":
             import ctypes
             from ctypes import wintypes
 
