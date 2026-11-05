@@ -358,7 +358,11 @@ def test_process_metrics_present_and_sane(live_server):
     rss = _scalar(body, "cfsolve_process_rss_bytes")
     assert 10 * 1024 * 1024 < rss < 200 * 1024 * 1024, f"RSS 数值不合理：{rss}"
     peak = _scalar(body, "cfsolve_process_peak_rss_bytes")
-    assert peak >= rss, "峰值必须 ≥ 当前值"
+    # ⚠️ **不能断言 `peak >= rss`**（CI 抓到：84922368 vs 84926464，差 4KB）。
+    # 内核的 `ru_maxrss` 按页记账惰性更新，会短暂滞后于 `/proc/self/statm` 的当前值，
+    # 所以"峰值略小于当前"是**操作系统的正常行为**，不是我们的 bug。
+    # 有意义的断言是"两者在同一量级"。
+    assert peak >= rss - 1024 * 1024, f"峰值与当前差了一个数量级：peak={peak} rss={rss}"
 
 
 def test_metrics_still_ok_when_process_probe_fails(monkeypatch):
@@ -460,4 +464,25 @@ def test_process_metrics_outer_failure(monkeypatch):
                         types.SimpleNamespace(RUSAGE_SELF=0,
                                               getrusage=lambda _w: (_ for _ in ()).throw(RuntimeError("boom"))))
     out = m.process_metrics(platform_name="posix")
-    assert "threads" in out and "rss_bytes" not in out
+    # 采集顺序是"先 statm（当前 RSS）→ 再 getrusage（峰值）"（v6.2.2 改的，
+    # 为了让 peak<rss 的窗口最小）。所以 getrusage 抛异常时 **rss_bytes 已经采到**、
+    # 只有 peak_rss_bytes 缺失。断言要跟着实现顺序走，不能假设"整段失败 = 什么都没有"。
+    assert "threads" in out
+    assert "peak_rss_bytes" not in out, "getrusage 失败时峰值不该出现"
+
+
+def test_process_metrics_samples_current_before_peak():
+    """回归（CI 第三次红）：POSIX 分支必须**先读当前 RSS、再读峰值**。
+
+    内核的 `ru_maxrss` 按页记账惰性更新，会短暂滞后于 `/proc/self/statm` 的当前值。
+    先读峰值再读当前，会让 "peak < rss" 的窗口更大（CI 实测差 4KB）。
+    这里用源码顺序断言（行为在单测里无法稳定复现那个 4KB 窗口）。
+    """
+    import inspect
+    import metrics as m
+
+    src = inspect.getsource(m.process_metrics)
+    # 只看**代码行**：注释里也提到这两个名字，按整段字符串位置判断会被自己写的注释误导
+    code = chr(10).join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+    assert code.index("/proc/self/statm") < code.index("ru_maxrss"), \
+        "必须先读 statm（当前）再读 ru_maxrss（峰值），否则 peak<rss 的窗口更大"

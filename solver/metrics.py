@@ -88,15 +88,18 @@ def process_metrics(*, platform_name: str | None = None) -> dict:
                 out["peak_rss_bytes"] = int(counters.PeakWorkingSetSize)
         else:
             import resource
-            # Linux 上 ru_maxrss 单位是 KB，macOS 是字节 —— 用 sys.platform 判，别猜
-            maxrss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-            out["peak_rss_bytes"] = maxrss if sys.platform == "darwin" else maxrss * 1024
+            # 先读**当前** RSS，再读**峰值**：`ru_maxrss` 在内核里是惰性更新（按页记账
+            # 粒度滞后），所以"先读峰值再读当前"会让 `peak < rss` 的窗口更大。
+            # CI 实测过这个窗口确实存在（84922368 vs 84926464，差 4KB）。
             try:
                 with open("/proc/self/statm", encoding="ascii") as fh:
                     pages = int(fh.read().split()[1])
                 out["rss_bytes"] = pages * os.sysconf("SC_PAGE_SIZE")
             except Exception:  # noqa: BLE001 —— 非 Linux（如 macOS）没有 statm
                 pass
+            # Linux 上 ru_maxrss 单位是 KB，macOS 是字节 —— 用 sys.platform 判，别猜
+            maxrss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+            out["peak_rss_bytes"] = maxrss if sys.platform == "darwin" else maxrss * 1024
     except Exception:  # noqa: BLE001 —— 采集失败 = 少指标，不是故障
         pass
     return out
