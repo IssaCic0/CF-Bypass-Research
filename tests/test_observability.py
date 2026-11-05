@@ -331,3 +331,125 @@ def test_allowed_fields_has_no_credential_like_names():
         if f not in SAFE and any(b in f.lower() for b in banned)
     )
     assert not offenders, f"这些字段名像凭证，不该进对外可读的 /logs：{offenders}"
+
+
+# ── v6.2：进程自检指标（RSS / 峰值 / 线程数）──────────────
+
+
+def _scalar(text: str, name: str) -> int:
+    """从 Prometheus 文本里取一条无标签标量的值。"""
+    for line in text.splitlines():
+        if line.startswith(name + " "):
+            return int(float(line.split()[1]))
+    raise AssertionError(f"指标 {name} 不存在")
+
+
+def test_process_metrics_present_and_sane(live_server):
+    """卡死/内存爆炸的第一现场信号：进程自己胖了没有。
+
+    本项目有过 21GB/31GB 两次真实内存爆炸，而此前 /metrics 只有业务计数。
+    """
+    base = live_server
+    status, body = _get(base, "/metrics", "test-token")
+    assert status == 200
+    assert "cfsolve_process_rss_bytes" in body
+    assert "cfsolve_process_peak_rss_bytes" in body
+    assert "cfsolve_process_threads" in body
+    rss = _scalar(body, "cfsolve_process_rss_bytes")
+    assert 10 * 1024 * 1024 < rss < 200 * 1024 * 1024, f"RSS 数值不合理：{rss}"
+    peak = _scalar(body, "cfsolve_process_peak_rss_bytes")
+    assert peak >= rss, "峰值必须 ≥ 当前值"
+
+
+def test_metrics_still_ok_when_process_probe_fails(monkeypatch):
+    """/metrics 不能因为"采集进程信息失败"就 500 —— 少几条序列好过整页挂掉。"""
+    import metrics as m
+    monkeypatch.setattr(m, "process_metrics", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    text = m.render_metrics_text(
+        solves=0, hits=0, failures=0, timeouts=0, rejected_busy=0, restarts=0,
+        browser_alive=False, queue_depth=0, elapsed_sum=0.0, hist=[0],
+        backend_ok={}, backend_err={},
+        process_fn=m.process_metrics,
+    )
+    assert "cfsolve_solves_total" in text
+    assert "cfsolve_process_rss_bytes" not in text
+
+
+def test_process_metrics_posix_branch(monkeypatch):
+    """POSIX 分支在 Windows 上跑不到，用假 resource 模块把它跑到（CI 是 Linux，两边都要绿）。"""
+    import metrics as m
+    import types
+
+    class _Usage:
+        ru_maxrss = 2048          # KB
+    fake_resource = types.SimpleNamespace(
+        RUSAGE_SELF=0, getrusage=lambda _who: _Usage())
+    monkeypatch.setitem(__import__("sys").modules, "resource", fake_resource)
+    monkeypatch.setattr(m.os, "name", "posix")
+    monkeypatch.setattr(m.sys, "platform", "linux")
+    # 没有 /proc/self/statm → rss_bytes 缺失但 peak 存在，且不抛
+    monkeypatch.setattr("builtins.open", lambda *a, **k: (_ for _ in ()).throw(OSError("no proc")))
+    out = m.process_metrics()
+    assert out["peak_rss_bytes"] == 2048 * 1024
+    assert "threads" in out
+
+
+def test_process_metrics_never_raises(monkeypatch):
+    """采集本身炸了也只能返回空 dict —— /metrics 绝不能因为自检挂掉。"""
+    import metrics as m
+    monkeypatch.setattr(m.os, "name", "nt")
+    monkeypatch.setattr("ctypes.windll", types_simple(), raising=False)
+    out = m.process_metrics()
+    assert isinstance(out, dict)
+
+
+def types_simple():
+    import types
+    return types.SimpleNamespace(psapi=types.SimpleNamespace(GetProcessMemoryInfo=lambda *a: 0))
+
+
+def test_age_seconds_handles_overflow():
+    """极端时间戳（datetime.max 在本平台 .timestamp() 直接 OSError）不能把 /metrics 打挂。"""
+    import metrics as m
+    from datetime import datetime
+    assert m._age_seconds(datetime.max.isoformat(), m.time.time()) is None
+
+
+def test_process_metrics_threads_probe_failure(monkeypatch):
+    import metrics as m
+    import sys as _sys
+    import types
+    fake = types.SimpleNamespace(active_count=lambda: (_ for _ in ()).throw(RuntimeError("no")))
+    monkeypatch.setitem(_sys.modules, "threading", fake)
+    out = m.process_metrics()
+    assert "threads" not in out            # 少一条，但不抛
+
+
+def test_process_metrics_linux_statm(monkeypatch):
+    """Linux 上有 /proc/self/statm 时 rss_bytes 走 pages × page_size。"""
+    import metrics as m
+    import io
+    import types
+
+    class _Usage:
+        ru_maxrss = 1024
+    fake_resource = types.SimpleNamespace(RUSAGE_SELF=0, getrusage=lambda _w: _Usage())
+    monkeypatch.setitem(__import__("sys").modules, "resource", fake_resource)
+    monkeypatch.setattr(m.os, "name", "posix")
+    monkeypatch.setattr(m.sys, "platform", "linux")
+    monkeypatch.setattr(m.os, "sysconf", lambda name: 4096, raising=False)
+    monkeypatch.setattr("builtins.open", lambda *a, **k: io.StringIO("100 50 0 0"))
+    out = m.process_metrics()
+    assert out["rss_bytes"] == 50 * 4096
+
+
+def test_process_metrics_outer_failure(monkeypatch):
+    """整段采集抛异常 → 只保留已采集到的字段，绝不向上冒泡。"""
+    import metrics as m
+    import types
+    monkeypatch.setitem(__import__("sys").modules, "resource",
+                        types.SimpleNamespace(RUSAGE_SELF=0,
+                                              getrusage=lambda _w: (_ for _ in ()).throw(RuntimeError("boom"))))
+    monkeypatch.setattr(m.os, "name", "posix")
+    out = m.process_metrics()
+    assert "threads" in out and "rss_bytes" not in out

@@ -1238,3 +1238,67 @@ R-E2E-1 4 次 → R-E2E-2 6 次 → R-E2E-3 2 次 = 本轮共 **12 次**；累�
 | CI | run `41801357561`（bc1ccb3）与 `41802654863`（e413bbd）**4 job 全绿** |
 | Release | https://github.com/lza6/CF-Bypass-Research/releases/tag/v6.0.1 |
 | 门禁 | Python **652 passed / 7 skipped** · 覆盖率 **87.50%** · 21 模块达标 · openapi 13 操作 · 文档 9 处一致 · findings 54 |
+
+---
+
+## v6.2.0 施工记录（2026-11-05，四类验收全脚本化 + 两轮独立复审）
+
+### 任务契约
+
+| 项 | 内容 |
+|---|---|
+| 用户目标 | ① 细拆需求、先搞清楚规则/规范/记忆与代码真实状态 ② 整合四个参考项目（pinchtab / cipherwire-disarm / FlareSolverr / web-crawler） ③ 四类验收：UI 截图 / 真实调用 / 真实 E2E / 真实代码复审，且**验收后还要深度审查**（按钮真的能按成功吗、组件位置人性化吗、闭环了吗、容错/稳定性/bug） |
+| 用户拍板 | 全部四批按序执行；做完后发版 v6.2.0 |
+| 完成标准 | 四类验收各有可复跑脚本 + 证据；两轮独立复审的问题全部关闭；全门禁绿 |
+
+### 交付（按批次）
+
+| 批 | 内容 | 结果 |
+|---|---|---|
+| **B1** | UI 修 wedged + 新数据面进 UI | 真 Chrome 看截图揪出 **6 条**静态断言看不见的缺陷（U1–U6），全修 |
+| **B2** | 文档漂移（`captcha_types` 未记载、`/status` 新字段无文档、openapi `/status` 无 schema） | 已补 |
+| **B3** | 四个参考项目整合 | engines 覆盖率 57%→**100%**、撤销 waiver；FlareSolverr 会话生命周期；`service_report.py` golden；`test_differential_oracle.py` 差分 Oracle（并据此重构出 `vendors.py` 单一事实源） |
+| **B4** | 四类验收脚本化 | `verify_ui_e2e.py` / `verify_real_calls.py` / 扩 `e2e_local.py` / `service_report.py` + `run.py` 新子命令 |
+
+### 门禁实测（全部真实执行）
+
+| 门禁 | 结果 |
+|---|---|
+| Python | **891 passed / 7 skipped** |
+| 覆盖率 | `solver/` 整体 **89.4%**；`check-coverage.mjs` **23 模块**全达标 |
+| openapi | 13 个操作双向一致 |
+| 文档数字 | 9 处一致 |
+| 服务报告 golden | 13 端点形状一致（**故意注入字段能立刻抓到**，已验） |
+| findings | 54 条，exit 0 |
+| 仓库卫生 | exit 0 |
+| Go | `go vet` 无输出；`go test -race` ok |
+| `run.py verify` | **8 步全绿**（含新增 service-report） |
+
+### 四类验收（全部可复跑）
+
+| 类型 | 脚本 | 实测 |
+|---|---|---|
+| UI 截图 | `python run.py ui` | **23/23** + 逐张看片 |
+| 真实调用 | `python run.py realcalls` | **37/37** |
+| 真实 E2E | `python run.py e2e` | **40/40**（含真浏览器段） |
+| 真实代码复审 | `claude -p` 独立进程，**两轮** | 见 `plans/证据/independent-review-v6.2-r{1,2}.md` |
+
+### 独立复审（两轮，问题全部关闭）
+
+| 轮 | 抓到 | 关闭 |
+|---|---|---|
+| r1 | 2 × P2 + 1 备注（ctype 拼写永不命中 / recommend 用未过滤 top / 包导入） | 全部 |
+| r2 | 复验 r1 三条**均成立**；新抓 2 × P2 + 1 × P3（`protected` 未过滤 / 指纹命中语义倒挂 / 死代码） | 全部 |
+
+**元结论**：R2/R4/R5 是同一类错误的三次复发（把"命中特征"当"有盾"），
+最终收敛成一个谓词 `vendors.is_shield()`，三处判断口径全部走它。
+
+### 剩余风险（如实）
+
+- **嫁接层 11 个求解器仍未真机验证**（缺 cloakbrowser 二进制）。本轮验证的是"受理/分发/归一/错误码"这条链路。
+- `detect.CTYPE_ROUTE` 与 `route._CHALLENGE_PREFERS` 对 `managed` / `non-interactive`
+  的建议不同（前者 `browser`、后者 `pure`）。**判断为不是缺陷**（回答的问题不同），
+  但**要统一必须实测各 ctype 的纯协议通过率**，本轮未做、不改值。
+- 真机预算仍为 **58/80**，本轮**未消耗**（全部离线）。
+- `service_report.py` 只比对**字段形状**，不比对语义（类型不变、含义变的情况抓不到）——
+  这是"确定性"的代价，已在脚本注释里写明。

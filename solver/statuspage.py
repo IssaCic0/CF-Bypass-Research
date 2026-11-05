@@ -46,6 +46,9 @@ STATUS_PAGE_HTML = """<!doctype html>
   .badge.ready { color:var(--ok); border-color:var(--ok); }
   .badge.degraded { color:var(--warn); border-color:var(--warn); }
   .badge.starting, .badge.down { color:var(--bad); border-color:var(--bad); }
+  /* wedged（v6.2）：worker 卡死、不会自愈 —— 用**实心反色**，比 down 更刺眼。
+     这是刻意的：degraded 会自愈（黄=等等看），wedged 只能重启（红底白字=必须动手）。 */
+  .badge.wedged { background:var(--bad); border-color:var(--bad); color:#fff; }
   input[type=password], input[type=text] {
     padding:6px 9px; border-radius:6px; border:1px solid var(--line);
     background:var(--panel); color:var(--ink); font-size:13px; min-width:220px; }
@@ -66,6 +69,12 @@ STATUS_PAGE_HTML = """<!doctype html>
   th { color:var(--muted); font-weight:600; }
   td.num { text-align:right; font-variant-numeric:tabular-nums; }
   .ok { color:var(--ok); } .bad { color:var(--bad); } .warn { color:var(--warn); }
+  .sub { color:var(--muted); font-size:12px; font-weight:600; margin:10px 0 4px; }
+  .card.wide { grid-column:1 / -1; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { padding:2px 8px; border:1px solid var(--line); border-radius:999px;
+          font-size:12px; color:var(--muted); }
+  .chip.x { color:var(--accent); border-color:var(--accent); }
   .empty, .error { color:var(--muted); font-size:13px; padding:8px 0; }
   .error { color:var(--bad); }
   /* 连不上服务时：保留上次数据（排障有用）但**必须视觉降级**，不许继续用绿色说"一切正常" */
@@ -105,6 +114,10 @@ STATUS_PAGE_HTML = """<!doctype html>
     <h2>最近事件</h2>
     <div id="logs" class="empty">未加载</div>
   </section>
+  <section class="card wide">
+    <h2>万盾扩展类型（captchas/ 受理清单）</h2>
+    <div id="captcha-types" class="chips empty">未加载</div>
+  </section>
 </div>
 
 <div class="foot">
@@ -122,6 +135,7 @@ STATUS_PAGE_HTML = """<!doctype html>
   var inflightSummaryEl = document.getElementById("inflight-summary");
   var inflightTableEl = document.getElementById("inflight-table");
   var logsEl = document.getElementById("logs");
+  var chipsEl = document.getElementById("captcha-types");
   var tokenInput = document.getElementById("token");
   var saveBtn = document.getElementById("save");
   var refreshBtn = document.getElementById("refresh");
@@ -168,6 +182,7 @@ STATUS_PAGE_HTML = """<!doctype html>
 
   function setKV(el, pairs) {
     el.innerHTML = "";
+    el.className = "kv";      // 与 console 同源纪律：setKV 必须自己保证 class 正确
     pairs.forEach(function (p) {
       var dt = document.createElement("dt"); dt.textContent = p[0];
       var dd = document.createElement("dd"); dd.textContent = p[1] == null ? "—" : String(p[1]);
@@ -199,6 +214,16 @@ STATUS_PAGE_HTML = """<!doctype html>
       ["worker", b.worker_alive ? "alive" : "dead", b.worker_alive ? "ok" : "bad"],
       ["browser", b.browser_alive ? "alive" : "dead", b.browser_alive ? "ok" : "bad"]
     ];
+    // wedged 是**唯一需要人工/自动重启**的状态：必须把原因和"该做什么"直接写在面板里，
+    // 否则运维看到的是一个陌生的英文词，唯一能做的只有猜。
+    if (state === "wedged") {
+      rows.push(["卡死原因", b.wedged_reason || "worker 未返回（原因未记录）", "bad"]);
+      rows.push(["处置",
+        b.wedge_restart
+          ? "进程会以退出码 75 自行退出，由 supervisor（docker restart / run-pool）拉起"
+          : "wedge_restart 未开启：请手动重启该 worker；否则服务会一直停在这里",
+        b.wedge_restart ? "warn" : "bad"]);
+    }
     // 未鉴权时 /health 只回最小集（服务端刻意防泄露）。这时**不要**把内部字段铺成一片"—"，
     // 那会让人以为"服务坏了/没数据"，而实际上只是没给 token。
     if (b.backends !== undefined) {
@@ -209,10 +234,33 @@ STATUS_PAGE_HTML = """<!doctype html>
         (b.solves || 0) + " / " + (b.cache_hits || 0) + " / " + (b.failures || 0) +
         "（只计真实发起的求解；参数错/准入拒绝不计）"]);
       rows.push(["最近错误", b.last_error || "—", b.last_error ? "bad" : ""]);
+      // v6.1 嫁接层：这里只留计数，清单本身放全宽卡（挤在这张卡里会把布局撑歪）
+      if (Array.isArray(b.captcha_types) && b.captcha_types.length) {
+        rows.push(["扩展类型", b.captcha_types.length + " 种（清单见下方卡片）"]);
+      }
     } else {
       rows.push(["内部字段", "需要 token 才能看（下面两栏同理）", "warn"]);
     }
     setKV(healthEl, rows);
+  }
+
+  function renderCaptchaTypes(b) {
+    var list = Array.isArray(b.captcha_types) ? b.captcha_types : [];
+    if (!list.length) { setEmptyEl(chipsEl, "服务端未上报扩展类型（需要 token 查看）"); return; }
+    chipsEl.className = "chips";
+    chipsEl.innerHTML = "";
+    list.forEach(function (t) {
+      var span = document.createElement("span");
+      // 带 _x 后缀的是"避让主链路命名"的变体，用不同配色区分，避免误以为是另一套能力
+      span.className = "chip" + (t.slice(-2) === "_x" ? " x" : "");
+      span.textContent = t;
+      chipsEl.appendChild(span);
+    });
+  }
+
+  function setEmptyEl(el, msg) {
+    el.className = "chips empty";
+    el.textContent = msg;
   }
 
   function renderStatus(r) {
@@ -230,16 +278,34 @@ STATUS_PAGE_HTML = """<!doctype html>
       ["pid", b.pid == null ? "—" : b.pid]
     ]);
     var rows = b.inflight || [];
-    if (!rows.length) {
-      inflightTableEl.innerHTML = '<div class="empty">当前没有在途请求</div>';
-      return;
+    var mc = b.multicaptcha_inflight || [];
+    // 嫁接层的在途任务与主链路**分开列**：两者的超时/产物语义不同，混在一张表里
+    // 排障时看不出是谁卡住了（服务端也是分开给的）。
+    if (mc.length) {
+      var mcHtml = "<div class='sub'>万盾嫁接层在途（captchas/）</div>" +
+        "<table><thead><tr><th>类型</th><th>目标</th><th class='num'>已耗时</th></tr></thead><tbody>";
+      mc.forEach(function (row) {
+        var age = row.started ? Math.max(0, Math.round(Date.now() / 1000 - row.started)) : null;
+        mcHtml += "<tr><td>" + esc(row.type) + "</td><td>" + esc(row.url || "—") +
+                  "</td><td class='num'>" + (age == null ? "—" : age + " s") + "</td></tr>";
+      });
+      inflightTableEl.innerHTML = mcHtml + "</tbody></table>";
+      if (!rows.length) { return; }
+      // 主链路表格追加在后面
+    } else {
+      inflightTableEl.innerHTML = "";      // 必须先清空，否则上一轮的表格会残留在页面上
+      if (!rows.length) {
+        inflightTableEl.innerHTML = '<div class="empty">当前没有在途请求</div>';
+        return;
+      }
     }
-    var html = "<table><thead><tr><th>方法</th><th>路径</th><th class='num'>已耗时</th></tr></thead><tbody>";
+    var html = (mc.length ? "<div class='sub'>主链路在途</div>" : "") +
+      "<table><thead><tr><th>方法</th><th>路径</th><th class='num'>已耗时</th></tr></thead><tbody>";
     rows.forEach(function (row) {
       html += "<tr><td>" + esc(row.method) + "</td><td>" + esc(row.path) +
               "</td><td class='num'>" + esc(row.elapsed_sec) + " s</td></tr>";
     });
-    inflightTableEl.innerHTML = html + "</tbody></table>";
+    inflightTableEl.insertAdjacentHTML("beforeend", html + "</tbody></table>");
   }
 
   function renderLogs(r) {
@@ -288,6 +354,7 @@ STATUS_PAGE_HTML = """<!doctype html>
         lastOkAt = Date.now();
         markStale(false);
         renderHealth(rs[0]);
+        renderCaptchaTypes(rs[0].body || {});
         renderStatus(rs[1]);
         renderLogs(rs[2]);
         // /health 是公开的（所以"服务活着"这件事不需要 token 就能看到）；

@@ -451,6 +451,54 @@ def phase_a(workdir: Path) -> None:
         record("A20_request_id_in_envelope", bool(rid) and env_rid == rid,
                f"envelope={env_rid!r} header={rid!r}")
 
+        # v6.2：状态页（GET /）—— 公开可读、零数据、CSP 三件套齐。
+        # 为什么必须进 e2e（而不是只靠单测）：单测里它只是**一个字符串常量**，
+        # 覆盖率 100% 是假象；这里验的是"真进程吐出来的响应 + 头 + 页面能被执行"。
+        status, shdr, sbody = request(f"{svc.base}/")
+        sctype = hget(shdr, "content-type")
+        scsp = hget(shdr, "content-security-policy")
+        spage = sbody.decode("utf-8", "replace")
+        record(
+            "A21_statuspage_public_html",
+            status == 200 and "text/html" in sctype.lower()
+            and "<!doctype html>" in spage.lower()
+            and "default-src 'none'" in scsp
+            and hget(shdr, "cache-control") == "no-store",
+            f"status={status} ctype={sctype!r} csp={'yes' if scsp else 'no'}",
+        )
+        record("A22_statuspage_has_no_server_data",
+               svc.token not in spage and "cf_clearance=" not in spage)
+
+        # v6.2：兼容层真的是"适配层"—— 错误码是生态词表，不是内部码。
+        _st, _h, ckb = request(f"{svc.base}/createTask", method="POST",
+                               payload={"clientKey": "wrong",
+                                        "task": {"type": "AntiCloudflareTask",
+                                                 "websiteURL": "https://e.com/"}})
+        j = json_or_empty(ckb)
+        record("A23_compat_key_error_is_ecosystem_code",
+               j.get("errorId") == 1 and j.get("errorCode") == "ERROR_KEY_DOES_NOT_EXIST",
+               f"errorId={j.get('errorId')} code={j.get('errorCode')}")
+
+        _st, _h, ckb = request(f"{svc.base}/createTask", method="POST",
+                               payload={"clientKey": svc.token,
+                                        "task": {"type": "AntiCloudflareTask"}})
+        j = json_or_empty(ckb)
+        record("A24_compat_property_empty_code",
+               j.get("errorCode") == "ERROR_TASK_PROPERTY_EMPTY", str(j.get("errorCode")))
+
+        # v6.1 嫁接层：11 种扩展 want 必须在 /health 的受理清单里，
+        # 且**依赖缺失时给 not-configured 而不是内部错误**（本机没 cloakbrowser 就是这条）。
+        _st, _h, hb = request(f"{svc.base}/health", token=svc.token)
+        types = json_or_empty(hb).get("captcha_types") or []
+        record("A25_graft_types_advertised", len(types) == 11, f"n={len(types)}")
+
+        st, _h, gb = request(f"{svc.base}/solve", token=svc.token, method="POST",
+                             payload={"url": "https://example.com/", "want": "datadome"})
+        gj = json_or_empty(gb)
+        record("A26_graft_missing_dependency_is_not_configured",
+               st == 503 and gj.get("error_code") == "not-configured",
+               f"status={st} code={gj.get('error_code')}")
+
         # /shutdown：202 + 真退出 + 退出码 0（这是"滚动重启不掉请求"的地基）。
         code, http_status = svc.shutdown()
         record("A14_shutdown_202", http_status == "202", f"http={http_status}")

@@ -97,6 +97,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="探测结果（/detect 与 route=auto）按域缓存的 TTL（秒）；0=关闭")
     ap.add_argument("--max-detect", type=int, default=DEFAULT_MAX_DETECT,
                     help="并发探测（/detect）上限，满即 429；与求解额度分开计")
+    ap.add_argument("--no-wedge-restart", dest="wedge_restart", action="store_false",
+                    help="worker 卡死时**不**自重启进程（默认会以退出码 75 退出，由 supervisor 拉起）")
+    ap.add_argument("--wedge-grace", type=float, default=30.0,
+                    help="任务超出预算后再等多久判定卡死（秒，默认 30）")
     ap.add_argument("--compat-max-pending", type=int, default=COMPAT_DEFAULT_MAX_PENDING,
                     help="YesCaptcha 兼容层（/createTask）待处理任务上限，满即 ERROR_NO_SLOT_AVAILABLE")
     ap.add_argument("--egress-id", default=os.environ.get("CF_EGRESS_ID", "default"),
@@ -144,6 +148,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--pydoll-headless", action="store_true",
                     help="pydoll 用 headless（注意：headless 下 UA 会带 HeadlessChrome，成功率通常更低）")
     ap.add_argument("--pydoll-wait", type=float, default=45.0, help="pydoll 单次等待上限（秒）")
+    ap.add_argument("--flaresolverr-session", default=os.environ.get("FLARESOLVERR_SESSION", ""),
+                    help="FlareSolverr 会话名：非空时启用会话粘性（首次使用自动 sessions.create，"
+                         "退出时 destroy）。留空=每次请求新建 webdriver（更慢，但不泄漏）")
     ap.add_argument("--flaresolverr", default=os.environ.get("FLARESOLVERR_URL", ""),
                     help="可选兜底后端：自托管 FlareSolverr 兼容服务的地址（例如 http://127.0.0.1:8191）")
     args = ap.parse_args(argv)
@@ -200,6 +207,10 @@ def main(argv: list[str] | None = None) -> int:
         browser_os=args.browser_os,
         detect_cache_ttl=args.detect_cache_ttl,
         compat_max_pending=args.compat_max_pending,
+        # 服务入口默认开自重启：worker 卡死时进程退出码 75，由 docker restart / run-pool 拉起。
+        # 库/测试构造 Solver 时不传，保持默认 False —— 不能因为构造一个 Solver 就杀掉宿主。
+        wedge_restart=bool(args.wedge_restart),
+        wedge_grace=float(args.wedge_grace),
         browser_factory=None if engine_enum is Engine.CAMOUFOX else build_engine_factory(
             engine_enum, os_persona=args.browser_os
         ),
@@ -235,7 +246,9 @@ def main(argv: list[str] | None = None) -> int:
         backends.append(pyd)
     backends.append(CamoufoxBackend(solver))
     if args.flaresolverr:
-        backends.append(FlareSolverrBackend(args.flaresolverr))
+        backends.append(FlareSolverrBackend(
+            args.flaresolverr, session=(args.flaresolverr_session or "").strip()
+        ))
     # 把 solver 作为治理对象交给 router：缓存/准入/计数/按域统计对**所有后端**生效，
     # 而不是只对"恰好走了 Solver.solve 的那一棒"生效。
     Handler.router = BackendRouter(backends, governance=solver) if len(backends) > 1 else None
@@ -309,6 +322,8 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print("[cfsolve] 优雅退出：在途请求已全部完成", flush=True)
         srv.server_close()
+        if Handler.router is not None:
+            Handler.router.close()      # 释放远端 session（否则会在 FlareSolverr 侧积累）
         solver.close()
     print("[cfsolve] 已退出", flush=True)
     return 0

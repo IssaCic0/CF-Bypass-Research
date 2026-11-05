@@ -4,12 +4,20 @@
 
 与 run.ps1 的子命令一一对应；run.ps1 内部转发到这里，两套逻辑不再漂移。
 仅用 stdlib；verify 按 run.ps1 的既有顺序 fail-fast：pytest → compileall →
-go → findings → e2e →（T-80 新增）repo hygiene → research doctor。
+go → findings → e2e → repo hygiene → research doctor → service-report(v6.2 golden)。
+
+四类验收（v6.2 起全部可复跑，不再是人工一次性快照）：
+    python run.py ui          # UI 截图验收：真 Chrome 跑 5 种状态 + 按钮交互，截图落 plans/证据/
+    python run.py realcalls   # 真实调用验收：真进程 + 真 token，全端点 × 鉴权两态
+    python run.py e2e         # 真实 E2E 验收：真进程 + 真浏览器（--skip-browser 可跳过浏览器段）
+    python run.py report      # 服务报告 golden（响应字段形状）；--write 重新生成
 
 用法：
     python run.py doctor [--port N]
-    python run.py test | quick | go | findings | verify | loadtest | e2e | serve
+    python run.py test | quick | go | findings | verify | e2e | bench | start | stop
     python run.py smoke [--port N] [--no-auth]
+    python run.py ui [--only ready|wedged|degraded|no-token|unreachable]
+    python run.py realcalls | report [--write]
 """
 import argparse
 import os
@@ -44,6 +52,9 @@ COMMANDS = {
     'stop': None,
     'bench': None,
     'verify': None,
+    'ui': None,
+    'realcalls': None,
+    'report': None,
     'help': None,
 }
 
@@ -292,6 +303,19 @@ def cmd_verify(a):
             return 1
         return run([sys.executable, "scripts/check_repo_hygiene.py"])
 
+    def service_report():
+        """确定性服务报告 vs golden（v6.2，借鉴 pinchtab 的 docs/audit.md）。
+
+        为什么放进 verify：`validate-openapi.mjs` 只校验**路由集合**，
+        新加/删掉一个响应字段它完全看不见 —— v6.1 的 `captcha_types` 与
+        v6.2 的 `wedge` 就是在"门禁全绿"的情况下漏进文档的。
+        """
+        p = ROOT / "scripts" / "service_report.py"
+        if not p.exists():
+            print("FAIL: scripts/service_report.py 不存在（v6.2 服务报告门禁未落地）。", file=sys.stderr)
+            return 1
+        return run([sys.executable, str(p)])
+
     def research_doctor():
         p = ROOT / "scripts" / "research.py"
         if not p.exists():
@@ -308,10 +332,32 @@ def cmd_verify(a):
         ("e2e", e2e),
         ("repo-hygiene(T-69)", hygiene),
         ("research-doctor(T-67)", research_doctor),
+        ("service-report(golden)", service_report),
     ])
     if rc == 0:
         print("\n全部通过 ✅")
     return rc
+
+
+def cmd_ui(a):
+    """UI 验收：真 Chrome 跑 5 种状态 + 按钮交互 + 截图（v6.2）。
+
+    为什么单独一个命令而不是塞进 verify：它需要 Playwright 的 Chromium，
+    而 CI 按规定不下载浏览器（policy §2：全程离线）。本地跑，把截图落 plans/证据/。
+    """
+    return run([sys.executable, str(ROOT / "scripts" / "verify_ui_e2e.py")]
+               + (["--only", a.value] if getattr(a, "value", "") else []))
+
+
+def cmd_realcalls(a):
+    """真实调用验收：真进程 + 真 token，全端点 × 鉴权两态（v6.2 脚本化）。"""
+    return run([sys.executable, str(ROOT / "scripts" / "verify_real_calls.py")])
+
+
+def cmd_report(a):
+    """确定性服务报告 vs golden（响应字段形状门禁）。"""
+    p = ROOT / "scripts" / "service_report.py"
+    return run([sys.executable, str(p)] + (["--write"] if getattr(a, "write", False) else []))
 
 
 def cmd_help(a):
@@ -335,7 +381,12 @@ def build_parser():
     common.add_argument("--fast", action="store_true",
                         help="verify 只跑定向测试不做覆盖率（T-80 验证用）")
     for name in COMMANDS:
-        sub.add_parser(name, parents=[common])
+        sp = sub.add_parser(name, parents=[common])
+        if name == "ui":
+            sp.add_argument("--only", dest="value", default="",
+                            help="只跑某个状态：ready/wedged/degraded/no-token/unreachable")
+        if name == "report":
+            sp.add_argument("--write", action="store_true", help="重新生成 golden")
     return p
 
 

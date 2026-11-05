@@ -18,3 +18,12 @@ cryptography==50.0.1
 
 # —— 测试（README 的"跑测试"一节需要）——
 pytest==9.1.1
+
+# —— 万盾嫁接层（captchas/ 子包，可选；不装不影响 CF 主链路）——
+# 装了就可用 /solve 的 11 个扩展 want（datadome/perimeterx/akamai/arkose/...）。
+# 未装时这些类型会明确报 not-configured + 安装提示，主链路照常工作。
+# cloakbrowser==0.1.0        # 自托管反检测 Chromium；二进制按需下载，版本随上游
+# onnxruntime==1.20.1        # 源见 aliyun 滑块 gap 检测 / arkose 视觉分类
+# opencv-python-headless==4.10.0.84   # 服务端无 libGL，必须用 headless 版
+# numpy==1.26.4
+# pillow==10.4.0

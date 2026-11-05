@@ -53,6 +53,8 @@ CONSOLE_PAGE_HTML = """<!doctype html>
   .badge.ready { color:var(--ok); border-color:var(--ok); }
   .badge.degraded { color:var(--warn); border-color:var(--warn); }
   .badge.starting, .badge.down, .badge.unauthorized { color:var(--bad); border-color:var(--bad); }
+  /* wedged（v6.2）：worker 卡死、不会自愈 —— 实心反色，必须比 down 更刺眼 */
+  .badge.wedged { background:var(--bad); border-color:var(--bad); color:#fff; }
   button { padding:6px 12px; border-radius:6px; border:1px solid var(--line);
            background:var(--panel); color:var(--ink); font-size:13px; cursor:pointer; }
   button:hover { border-color:var(--accent); color:var(--accent); }
@@ -137,12 +139,23 @@ CONSOLE_PAGE_HTML = """<!doctype html>
   // 只用 textContent / createElement —— DOM 写入面收敛在这两个 API 上（约束 4）。
   function setKV(el, pairs) {
     while (el.firstChild) { el.removeChild(el.firstChild); }
+    // 必须把 class 还原成 kv：setEmpty() 会把它改成 "empty"，不还原就丢掉
+    // `display:grid` → 键值从两列退化成上下堆叠（真 Chrome 实测过）。
+    el.className = "kv";
     pairs.forEach(function (p) {
       var dt = document.createElement("dt"); dt.textContent = p[0];
       var dd = document.createElement("dd"); dd.textContent = p[1] == null ? "—" : String(p[1]);
       if (p[2]) dd.className = p[2];
       el.appendChild(dt); el.appendChild(dd);
     });
+  }
+
+  // 时间格式化：服务端可能给 ISO 字符串（assertions 矩阵）或 epoch 秒（其它路径）。
+  // 统一在这里收口 —— 原来只按 *1000 处理，ISO 字符串会渲染成 "Invalid Date"。
+  function _fmtTime(v) {
+    if (v == null || v === "") { return "从未"; }
+    var d = (typeof v === "number") ? new Date(v * 1000) : new Date(String(v));
+    return isNaN(d.getTime()) ? String(v) : d.toLocaleString();
   }
 
   function setEmpty(el, msg) {
@@ -172,14 +185,26 @@ CONSOLE_PAGE_HTML = """<!doctype html>
     // 「最近错误」区块只显示"有没有错 / 何时"，不显示错误内容本身。
     var st = b.state || "unknown";
     setState(st, st);
-    setKV(svcEl, [
+    var svcRows = [
       ["state", st, st === "ready" ? "ok" : (st === "degraded" ? "warn" : "bad")],
       ["浏览器", b.browser_alive ? "alive" : "dead", b.browser_alive ? "ok" : "bad"],
       ["worker", b.worker_alive ? "alive" : "dead", b.worker_alive ? "ok" : "bad"],
       ["队列深度", b.queue_depth == null ? "—" : b.queue_depth,
         (b.queue_depth || 0) > 0 ? "warn" : ""],
       ["运行时长", b.uptime_sec == null ? "—" : b.uptime_sec + " s"]
-    ]);
+    ];
+    // wedged 必须把原因与处置写在面板里：这是唯一"等不会好"的状态。
+    if (st === "wedged") {
+      svcRows.push(["卡死原因", b.wedged_reason || "worker 未返回（原因未记录）", "bad"]);
+      svcRows.push(["处置", b.wedge_restart ? "进程会以 75 退出，由 supervisor 拉起"
+                                            : "请手动重启该 worker", b.wedge_restart ? "warn" : "bad"]);
+    }
+    if (Array.isArray(b.captcha_types) && b.captcha_types.length) {
+      // 只给计数：11 项全铺在这张窄卡里会换 4 行，把四列布局撑歪（看截图才发现）。
+      // 完整清单在状态页 `/` 的「万盾扩展类型」全宽卡上。
+      svcRows.push(["扩展类型", b.captcha_types.length + " 种（清单见状态页）"]);
+    }
+    setKV(svcEl, svcRows);
     var solves = b.solves || 0;
     setKV(cacheEl, [
       ["求解", solves],
@@ -197,14 +222,14 @@ CONSOLE_PAGE_HTML = """<!doctype html>
         ["语料变体", r.corpus_variants || 0, (r.corpus_variants || 0) === 0 ? "warn" : "ok"],
         ["断言总数", total],
         ["断言 skip", skipped, skipped > 0 ? "warn" : "ok"],
-        ["上次快照", r.last_snapshot_at == null ? "从未" : new Date(r.last_snapshot_at * 1000).toLocaleString()],
+        ["上次快照", _fmtTime(r.last_snapshot_at)],
         ["note", r.note || "—"]
       ]);
     }
     if (b.has_last_error) {
       // 刻意只给"有过错 + 时间"，不给错误原文（原文可能带主机名/代理地址）
       errEl.className = "error";
-      var when = b.last_error_at ? new Date(b.last_error_at * 1000).toLocaleString() : "未知时间";
+      var when = b.last_error_at ? _fmtTime(b.last_error_at) : "未知时间";
       errEl.textContent = "最近一次错误发生于 " + when +
         "（详情见服务端日志，本页刻意不显示原文）";
     } else {
@@ -233,13 +258,32 @@ CONSOLE_PAGE_HTML = """<!doctype html>
         renderEmptyStates();
         return;
       }
-      if (r.status !== 200 || !r.body || !r.body.state) {
+      // 503 既可能是 starting/degraded（会自愈），也可能是 wedged（不会自愈）。
+      // 只要响应体里带了 state 就必须按 state 渲染 —— 否则运维看到的是"异常"，
+      // 而真正该采取的动作（重启）完全看不出来。
+      var st = (r.body && r.body.state) || "";
+      if (r.status !== 200 && !st) {
         setState("异常", "down");
         setBanner("/health 返回异常状态：" + r.status, true);
         renderEmptyStates();
         return;
       }
-      setBanner("");
+      if (!r.body || !st) {
+        setState("异常", "down");
+        setBanner("/health 返回异常状态：" + r.status, true);
+        renderEmptyStates();
+        return;
+      }
+      // 横幅只能设一次：先按状态决定，**最后不要无条件清空**（否则刚设的 wedged 提示被抹掉）
+      if (st === "wedged") {
+        setBanner("worker 卡死（wedged）：服务不会自愈。" + (r.body.wedged_reason || "") +
+                  (r.body.wedge_restart ? "；进程将以退出码 75 退出并由 supervisor 拉起。"
+                                        : "；wedge_restart 未开启，需手动重启。"), true);
+      } else if (r.status !== 200) {
+        setBanner("/health 返回 " + r.status + "（state=" + st + "），服务正在自愈或启动中。", false);
+      } else {
+        setBanner("");
+      }
       render(r.body);
     }).catch(function (e) {
       setState("连不上", "down");

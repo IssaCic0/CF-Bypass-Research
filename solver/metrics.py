@@ -10,6 +10,9 @@
 
 from __future__ import annotations
 
+import os
+import sys
+
 import time
 from datetime import datetime
 
@@ -38,6 +41,62 @@ def _age_seconds(stamp, now: float) -> float | None:
 LATENCY_BUCKETS = (1.0, 3.0, 5.0, 10.0, 15.0, 20.0, 30.0, 60.0)
 
 
+def process_metrics() -> dict:
+    """采集本进程的 RSS / 峰值 / 线程数（跨平台，失败就少给字段而不是抛）。
+
+    为什么不用 psutil：本项目刻意把依赖压到最少（psutil 是 C 扩展，装不上就没有指标）。
+    Windows 用 GetProcessMemoryInfo，POSIX 用 resource.getrusage + /proc 可选。
+    拿不到就是 `{}` —— /metrics 少几条序列，好过整个端点 500。
+    """
+    out: dict[str, int] = {}
+    try:
+        import threading as _threading
+        out["threads"] = _threading.active_count()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            class _PMC(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            counters = _PMC()
+            counters.cb = ctypes.sizeof(_PMC)
+            # 伪句柄 -1 = 当前进程；不 CloseHandle
+            if ctypes.windll.psapi.GetProcessMemoryInfo(
+                ctypes.c_void_p(-1), ctypes.byref(counters), counters.cb
+            ):
+                out["rss_bytes"] = int(counters.WorkingSetSize)
+                out["peak_rss_bytes"] = int(counters.PeakWorkingSetSize)
+        else:
+            import resource
+            # Linux 上 ru_maxrss 单位是 KB，macOS 是字节 —— 用 sys.platform 判，别猜
+            maxrss = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+            out["peak_rss_bytes"] = maxrss if sys.platform == "darwin" else maxrss * 1024
+            try:
+                with open("/proc/self/statm", encoding="ascii") as fh:
+                    pages = int(fh.read().split()[1])
+                out["rss_bytes"] = pages * os.sysconf("SC_PAGE_SIZE")
+            except Exception:  # noqa: BLE001 —— 非 Linux（如 macOS）没有 statm
+                pass
+    except Exception:  # noqa: BLE001 —— 采集失败 = 少指标，不是故障
+        pass
+    return out
+
+
 def render_metrics_text(
     *,
     solves: int,
@@ -54,11 +113,13 @@ def render_metrics_text(
     backend_err: dict[str, int],
     host_stats_fn=None,
     research_fn=None,
+    process_fn=None,
 ) -> str:
     """渲染 Prometheus 文本。只暴露计数与桶，不含任何域名/凭证。
 
     `host_stats_fn` 是 `Solver._store.host_stats`（可能不存在，None 时跳过按域段）。
     `research_fn` 是 `Solver.research_status`（T-76，可能不存在，None 时跳过研究段）。
+    `process_fn` 是 `Solver.process_metrics`（v6.2，返回 rss/peak/fd 等），None 时跳过。
     """
     ok_map = dict(backend_ok)
     err_map = dict(backend_err)
@@ -169,4 +230,33 @@ def render_metrics_text(
             "# TYPE cfsolve_research_snapshot_age_seconds gauge",
             f"cfsolve_research_snapshot_age_seconds {age_text}",
         ]
+    # v6.2：进程自检指标（参考 camofox-browser 的 camofox_memory_usage_bytes）。
+    # 为什么值得加：本项目有过两次真实内存爆炸（21GB / 31GB），而在此之前 /metrics
+    # 只有业务计数、没有任何『进程本身胖了』的信号 —— 爆炸只能靠事后发现。
+    if callable(process_fn):
+        try:
+            proc = process_fn() or {}
+        except Exception:  # noqa: BLE001 —— 采集失败只降级，绝不让 /metrics 500
+            proc = {}
+        rss = proc.get('rss_bytes')
+        if isinstance(rss, int) and rss >= 0:
+            lines += [
+                '# HELP cfsolve_process_rss_bytes 求解进程的常驻内存（RSS, 字节）',
+                '# TYPE cfsolve_process_rss_bytes gauge',
+                f'cfsolve_process_rss_bytes {rss}',
+            ]
+        peak = proc.get('peak_rss_bytes')
+        if isinstance(peak, int) and peak >= 0:
+            lines += [
+                '# HELP cfsolve_process_peak_rss_bytes 进程峰值常驻内存（RSS, 字节）',
+                '# TYPE cfsolve_process_peak_rss_bytes gauge',
+                f'cfsolve_process_peak_rss_bytes {peak}',
+            ]
+        threads = proc.get('threads')
+        if isinstance(threads, int) and threads >= 0:
+            lines += [
+                '# HELP cfsolve_process_threads 进程线程数（卡死时线程只增不减是信号）',
+                '# TYPE cfsolve_process_threads gauge',
+                f'cfsolve_process_threads {threads}',
+            ]
     return "\n".join(lines) + "\n"

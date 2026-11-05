@@ -1,7 +1,7 @@
 # 求解服务镜像（v4.0 T-41）
 #
 # ✅ 状态：**已在本机实测**（v4.7，Docker 29.9.2 / linux-amd64）。
-#    构建：`docker build --build-arg SLIM_FONTS=1 -t cf-bypass-solver:6.0.1 .` → 3.52 GB
+#    构建：`docker build --build-arg SLIM_FONTS=1 -t cf-bypass-solver:6.2.0 .` → 3.52 GB
 #    运行：容器 **5–6s** 就绪（/health → state=ready）；`/detect` / `/solve` / `/metrics`
 #          / `/shutdown`（202 + exit 0）六项全部实测通过。见 `evidence/v47-container.md`。
 #    唯一需要重新确认的点：**换 camoufox 版本时** Debian 依赖包名可能变（base 是 python:3.12-slim，
@@ -37,6 +37,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY solver/ ./solver/
 COPY scripts/ ./scripts/
+# 万盾嫁接层（v6.1）：11 厂商求解器副本。不含 ONNX 模型（.gitignore）——
+# 构建上下文里若本地存在 *.onnx 会一起打进去（aliyun/arkose 的视觉分类更强）；
+# 没有也能用：aliyun 回落 cv2 gap 检测、reCAPTCHA classifier=auto 回落 mistral。
+# cloakbrowser 未装时扩展 want 报 not-configured，CF 主链路完全不受影响。
+COPY captchas/ ./captchas/
 
 RUN useradd --create-home --uid 10001 solver \
     && mkdir -p /data/cache && chown -R solver:solver /data /app

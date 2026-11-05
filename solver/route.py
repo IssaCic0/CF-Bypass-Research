@@ -25,13 +25,36 @@ from dataclasses import dataclass, field
 #: 允许的 `route` 取值。缺省（不传）等价于 `fixed` = v3 的行为，保证向后兼容。
 ROUTE_MODES = frozenset({"auto", "direct", "pure", "browser", "fixed"})
 
-#: 本服务**能解**的厂商（其余一律明确拒绝，而不是白等 45s）。
-#: Cloudflare：cf_clearance / turnstile / jsd / managed 全部支持；
-#: AWS WAF：支持取 `aws-waf-token`（`want=awswaf`）。
-SOLVABLE_PROVIDER_IDS = frozenset({"detect-cloudflare", "detect-aws-waf"})
+#: 厂商能力表**只有一份**（v6.2 起在 `solver/vendors.py`）。
+#: 为什么从本文件搬走：原来 `recommend()` 与 `decide()` 各有一份，v6.1/v6.2 分别改过，
+#: 于是出现真实分叉（差分 Oracle 抓到：CF+kasada 被 recommend 说"能解"、被 decide 拒绝）。
+#: 这里 re-export 保持既有引用零改动。
+try:  # 包导入
+    from . import vendors as _vendors
+except ImportError:  # 直接以脚本运行
+    import vendors as _vendors  # type: ignore[no-redef]
 
-#: CF 挑战类型 → 偏好后端。
-#: 一次性 token 类的挑战必须浏览器内取（纯协议拿不到 widget 的 token）。
+# ⚠️ 全部从 `_vendors` 取，**不再写 `from vendors import ...`**（独立复审抓到）。
+# 那种绝对导入在"包方式导入"下会 ModuleNotFoundError（上面 try 分支成功后模块名是
+# `solver.vendors`，顶层 `vendors` 并不存在）。当前所有入口都是脚本式，所以没炸，
+# 但 `from solver.detect import ...` 这种写法一用在 route 上就会炸。
+_MAIN_CHAIN = _vendors.MAIN_CHAIN_PROVIDERS
+MULTICAPTCHA_PROVIDERS = _vendors.MULTICAPTCHA_PROVIDERS
+SOLVABLE_PROVIDER_IDS = _vendors.SOLVABLE_PROVIDERS
+_pick_multicaptcha = _vendors.pick_multicaptcha
+_unsolvable_from = _vendors.unsolvable_from
+
+#: CF 挑战类型 → **本次请求先试哪个后端**（顺序偏好，不是"能不能解"的判定）。
+#:
+#: ⚠️ 与 `detect.CTYPE_ROUTE` 的差异是**有意的**，两者回答的问题不同：
+#:   · `detect.CTYPE_ROUTE` 回答"这类挑战**要靠什么**才能过"（对外建议，保守）；
+#:   · 本表回答"后端链里**先试谁**"（纯顺序，`pure` 只是把 pydoll/flaresolverr 挪后，
+#:     cfsolve 与 camoufox 仍在链上，失败会继续回落）。
+#: 所以 `managed` 在这里是 `pure`（先试纯协议，实测同站比浏览器快 1.1s）而在
+#: `detect` 那边是 `browser`（对外建议走浏览器更稳）—— 两者可以同时为真。
+#: 真正的不变量是：**`pure` 不能把浏览器踢出链**（`skip_backends("pure")` 只跳
+#: pydoll/flaresolverr）。`tests/test_differential_oracle.py` 有一条用例守它。
+#: 要改这里的值，必须先有该 ctype 的实测通过率，不能凭直觉对齐。
 _CHALLENGE_PREFERS = {
     "turnstile": "browser",
     "recaptcha": "browser",
@@ -39,6 +62,8 @@ _CHALLENGE_PREFERS = {
     "embedded": "browser",
     "managed": "pure",
     "jsd": "pure",
+    "non-interactive": "pure",
+    # 兼容旧拼写：万一是从别处（人工/缓存）传进来的下划线形式，别静默降级
     "non_interactive": "pure",
 }
 
@@ -69,12 +94,23 @@ class RouteDecision:
 
 
 def _provider_ids(detect: dict | None) -> set[str]:
+    """从探测结论里取**盾类**厂商 id。
+
+    ⚠️ 必须按 `category` 过滤：`Fingerprint` 类命中（localStorage / clipboard /
+    Intl.DateTimeFormat …）是**技术特征**，任何现代站点都有。把它们当成"解不了的厂商"，
+    会让几乎所有站被 `reject`（v6.2 开发中实测踩到：一个普通 CF 站只因用了 localStorage
+    就被判 unsupported-provider）。没有 category 字段时按"是盾"处理（向后兼容旧 payload）。
+    """
     if not isinstance(detect, dict):
         return set()
     out = set()
     for p in detect.get("providers") or []:
-        if isinstance(p, dict) and p.get("id"):
-            out.add(str(p["id"]))
+        if not isinstance(p, dict) or not p.get("id"):
+            continue
+        category = p.get("category")
+        if category is not None and not _vendors.is_shield(str(category)):
+            continue
+        out.add(str(p["id"]))
     return out
 
 
@@ -116,7 +152,21 @@ def decide(detect: dict | None, mode: str = "auto") -> RouteDecision:
         )
 
     ids = _provider_ids(detect)
-    unsupported = sorted(ids - SOLVABLE_PROVIDER_IDS)
+    # 兼容**旧缓存**：`/detect` 的结论会在 TTL 内跨版本存活。升级瞬间可能拿到
+    # `protected=true`（旧口径 `bool(detections)`）但 providers 全是指纹的 payload ——
+    # 按 category 过滤后 ids 为空。此时"没有任何可识别的盾 + 没有 challenge 类型"
+    # 就该按无防护处理（skip），否则会对无盾站起浏览器。
+    if detect.get("protected") and not ids and not detect.get("cloudflare_challenge_type"):
+        return RouteDecision(
+            mode="auto", action=ACTION_SKIP, reason="no-protection",
+            hint="探测未命中任何**盾类**特征（可能只命中指纹类，或旧缓存口径），直接请求目标站即可",
+        )
+    # v6.1 万盾嫁接：captchas/ 能解的厂商不再算 unsupported
+    # ⚠️ 顺序很重要：**先判不可解，再判怎么解**。
+    # 反过来写过的版本有个真实缺陷（差分 Oracle 抓到）：一页同时命中 perimeterx（能解）
+    # 与 kasada（解不了）时，multicaptcha 分支先命中就返回了 "solve"，
+    # 等于对一个**确实过不去**的站假承诺 —— 调用方会白等一个完整超时。
+    unsupported = _unsolvable_from(ids)
     if unsupported:
         names = sorted({str(p.get("name") or p.get("id")) for p in (detect.get("providers") or [])
                         if isinstance(p, dict) and str(p.get("id")) in set(unsupported)})
@@ -125,6 +175,15 @@ def decide(detect: dict | None, mode: str = "auto") -> RouteDecision:
             hint=("该站使用本服务不支持的防护（" + "、".join(names) + "）。"
                   "换盾方案比换后端有效：这里既没有对应的求解器，硬试只会白等一个完整超时。"),
             detail={"unsupported": unsupported, "providers": names},
+        )
+
+    _mc_id, _mc_want = _pick_multicaptcha(ids)
+    if _mc_id and not ids & _MAIN_CHAIN:
+        # 非 CF/AWS 的主防护 → 直接交给 captchas/ 子包（自动分发对应 want）
+        return RouteDecision(
+            mode="auto", action=ACTION_SOLVE, reason="multicaptcha",
+            prefer="multicaptcha", detail={"multicaptcha_want": _mc_want, "provider": _mc_id},
+            hint=f"检测到 {_mc_id}：自动分发到 captchas/（want={_mc_want}）",
         )
 
     if "detect-aws-waf" in ids:

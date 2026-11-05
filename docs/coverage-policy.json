@@ -50,9 +50,8 @@
       "why": "防护识别；结论错=白烧 16-20s 浏览器（结论本身另由 tests/test_detect_golden.py 兜住）"
     },
     "solver/engines.py": {
-      "min": 56,
-      "why": "三引擎枚举与缺依赖检测",
-      "waiver": "cloakbrowser 是**专有二进制**（最新版需订阅），本机与 CI 都装不了；能测到的只有『缺依赖 → NOT_CONFIGURED + 安装提示』这条，已由 tests/test_service.py 覆盖。剩余分支在拿到该二进制前无法执行。"
+      "min": 95,
+      "why": "引擎工厂的分支逻辑（按名选实现 / 统一上下文管理器 / launch 失败要 stop / 关闭失败不盖住真错误）与专有二进制无关，用**注入假模块**即可全路径覆盖 —— v6.2 起 tests/test_engines_factories.py 实测 100%。残留未覆盖的只剩『真实二进制启动后的行为』，那属于集成验证，不在模块覆盖率口径内"
     },
     "solver/errors.py": {
       "min": 100,
@@ -65,6 +64,10 @@
     "solver/metrics.py": {
       "min": 94,
       "why": "Prometheus 文本渲染；指标说谎比没有指标更坏"
+    },
+    "solver/multicaptcha.py": {
+      "min": 88,
+      "why": "万盾嫁接层：类型分发/参数校验/成功谓词归一。求解器本体（captchas/）需 cloakbrowser 与真实挑战页，属真机验证范畴，不在本门槛口径内"
     },
     "solver/prewarm.py": {
       "min": 92,
@@ -101,6 +104,10 @@
     "solver/console_html.py": {
       "min": 100,
       "why": "T-78 只读控制台的 HTML/JS 常量：与 statuspage.py 同性质（常量非逻辑），契约由 tests/test_console.py 的 9 条用例守住（401/无写面/CSP/no-store/不含 token/白名单渲染/四区块空态/无外部资源）"
+    },
+    "solver/vendors.py": {
+      "min": 94,
+      "why": "厂商能力表的单一事实源（v6.2 从 detect/route 两处合并而来）。这表一旦与真实能力不一致，调用方会拿到假承诺或假拒绝 —— 由 tests/test_differential_oracle.py（81 例）+ test_multicaptcha 共同兜住"
     }
   }
 }

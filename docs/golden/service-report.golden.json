@@ -1,0 +1,337 @@
+{
+  "endpoints": {
+    "compat-create": {
+      "auth": false,
+      "body": {
+        "fields": {
+          "errorCode": "string",
+          "errorDescription": "string",
+          "errorId": "number",
+          "request_id": "<volatile>"
+        },
+        "type": "object"
+      },
+      "content_type": "application/json",
+      "request": "POST /createTask",
+      "status": 200
+    },
+    "compat-result": {
+      "auth": false,
+      "body": {
+        "fields": {
+          "errorCode": "string",
+          "errorDescription": "string",
+          "errorId": "number",
+          "request_id": "<volatile>"
+        },
+        "type": "object"
+      },
+      "content_type": "application/json",
+      "request": "POST /getTaskResult",
+      "status": 200
+    },
+    "console": {
+      "auth": true,
+      "body": {
+        "fields": {
+          "_html": "bool",
+          "doctype": "bool"
+        },
+        "type": "object"
+      },
+      "content_type": "text/html",
+      "request": "GET /console",
+      "status": 200
+    },
+    "detect-ssrf": {
+      "auth": true,
+      "body": {
+        "fields": {
+          "error": "string",
+          "error_code": "string",
+          "hint": "string",
+          "ok": "bool",
+          "request_id": "<volatile>",
+          "solved": "bool",
+          "stage": "string"
+        },
+        "type": "object"
+      },
+      "content_type": "application/json",
+      "request": "POST /detect",
+      "status": 400
+    },
+    "health-auth": {
+      "auth": true,
+      "body": {
+        "fields": {
+          "avg_elapsed_sec": "<volatile>",
+          "backends": {
+            "items": [
+              "string"
+            ],
+            "type": "array"
+          },
+          "browser": "string",
+          "browser_alive": "bool",
+          "browser_os": "string",
+          "browser_restarts": "number",
+          "cache_backend": "<volatile>",
+          "cache_hits": "number",
+          "cached_domains": "number",
+          "captcha_types": {
+            "items": [
+              "string"
+            ],
+            "type": "array"
+          },
+          "egress_id": "string",
+          "failures": "number",
+          "has_last_error": "bool",
+          "last_error": "string",
+          "last_error_at": "<volatile>",
+          "last_success_at": "<volatile>",
+          "ok": "bool",
+          "queue_depth": "number",
+          "rejected_busy": "number",
+          "request_id": "<volatile>",
+          "research": {
+            "fields": {
+              "assertions_fail": "number",
+              "assertions_pass": "number",
+              "assertions_skipped": "number",
+              "assertions_total": "number",
+              "corpus_variants": "number",
+              "last_diff_at": "null",
+              "last_snapshot_at": "string",
+              "note": "string"
+            },
+            "type": "object"
+          },
+          "solves": "number",
+          "state": "string",
+          "timeouts": "number",
+          "ua_fingerprint": "<volatile>",
+          "uptime_sec": "<volatile>",
+          "worker_alive": "bool"
+        },
+        "type": "object"
+      },
+      "content_type": "application/json",
+      "request": "GET /health",
+      "status": "<ready-or-starting>"
+    },
+    "health-public": {
+      "auth": false,
+      "body": {
+        "fields": {
+          "browser_alive": "bool",
+          "ok": "bool",
+          "request_id": "<volatile>",
+          "state": "string",
+          "worker_alive": "bool"
+        },
+        "type": "object"
+      },
+      "content_type": "application/json",
+      "request": "GET /health",
+      "status": "<ready-or-starting>"
+    },
+    "logs": {
+      "auth": true,
+      "body": {
+        "fields": {
+          "dropped_fields": "number",
+          "kept": "number",
+          "lines": {
+            "items": [],
+            "type": "array"
+          },
+          "ok": "bool",
+          "request_id": "<volatile>",
+          "total": "number"
+        },
+        "type": "object"
+      },
+      "content_type": "application/json",
+      "request": "GET /logs?lines=5",
+      "status": 200
+    },
+    "metrics": {
+      "auth": true,
+      "body": {
+        "fields": {
+          "_html": "bool",
+          "doctype": "bool"
+        },
+        "type": "object"
+      },
+      "content_type": "text/plain",
+      "request": "GET /metrics",
+      "status": 200
+    },
+    "solve-bad-scheme": {
+      "auth": true,
+      "body": {
+        "fields": {
+          "error": "string",
+          "error_code": "string",
+          "hint": "string",
+          "ok": "bool",
+          "request_id": "<volatile>",
+          "solved": "bool",
+          "stage": "string"
+        },
+        "type": "object"
+      },
+      "content_type": "application/json",
+      "request": "POST /solve",
+      "status": 400
+    },
+    "solve-ssrf": {
+      "auth": true,
+      "body": {
+        "fields": {
+          "error": "string",
+          "error_code": "string",
+          "hint": "string",
+          "ok": "bool",
+          "request_id": "<volatile>",
+          "solved": "bool",
+          "stage": "string"
+        },
+        "type": "object"
+      },
+      "content_type": "application/json",
+      "request": "POST /solve",
+      "status": 400
+    },
+    "stats": {
+      "auth": true,
+      "body": {
+        "fields": {
+          "avg_elapsed_sec": "<volatile>",
+          "backends": {
+            "items": [
+              "string"
+            ],
+            "type": "array"
+          },
+          "browser": "string",
+          "browser_alive": "bool",
+          "browser_os": "string",
+          "browser_restarts": "number",
+          "cache_backend": "<volatile>",
+          "cache_hits": "number",
+          "cached_domains": "number",
+          "captcha_types": {
+            "items": [
+              "string"
+            ],
+            "type": "array"
+          },
+          "egress_id": "string",
+          "failures": "number",
+          "has_last_error": "bool",
+          "last_error": "string",
+          "last_error_at": "<volatile>",
+          "last_success_at": "<volatile>",
+          "ok": "bool",
+          "queue_depth": "number",
+          "rejected_busy": "number",
+          "request_id": "<volatile>",
+          "research": {
+            "fields": {
+              "assertions_fail": "number",
+              "assertions_pass": "number",
+              "assertions_skipped": "number",
+              "assertions_total": "number",
+              "corpus_variants": "number",
+              "last_diff_at": "null",
+              "last_snapshot_at": "string",
+              "note": "string"
+            },
+            "type": "object"
+          },
+          "solves": "number",
+          "state": "string",
+          "timeouts": "number",
+          "ua_fingerprint": "<volatile>",
+          "uptime_sec": "<volatile>",
+          "worker_alive": "bool"
+        },
+        "type": "object"
+      },
+      "content_type": "application/json",
+      "request": "GET /stats",
+      "status": 200
+    },
+    "status": {
+      "auth": true,
+      "body": {
+        "fields": {
+          "backends": {
+            "items": [
+              "string"
+            ],
+            "type": "array"
+          },
+          "cache_backend": "<volatile>",
+          "code": "number",
+          "compat": {
+            "fields": {
+              "created_total": "number",
+              "max_pending": "number",
+              "pending": "number",
+              "retained": "number",
+              "ttl_sec": "number"
+            },
+            "type": "object"
+          },
+          "events_total": "number",
+          "inflight": {
+            "items": [],
+            "type": "array"
+          },
+          "inflight_count": "number",
+          "multicaptcha_inflight": {
+            "items": [],
+            "type": "array"
+          },
+          "ok": "bool",
+          "pid": "<volatile>",
+          "queue_depth": "number",
+          "request_id": "<volatile>",
+          "state": "string",
+          "uptime_sec": "<volatile>",
+          "wedge": {
+            "fields": {
+              "reason": "string",
+              "wedge_restart": "bool",
+              "wedged": "bool"
+            },
+            "type": "object"
+          }
+        },
+        "type": "object"
+      },
+      "content_type": "application/json",
+      "request": "GET /status",
+      "status": 200
+    },
+    "statuspage": {
+      "auth": false,
+      "body": {
+        "fields": {
+          "_html": "bool",
+          "doctype": "bool"
+        },
+        "type": "object"
+      },
+      "content_type": "text/html",
+      "request": "GET /",
+      "status": 200
+    }
+  },
+  "schema": 2
+}

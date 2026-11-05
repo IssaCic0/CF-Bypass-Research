@@ -25,6 +25,11 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+try:  # 包导入
+    from . import vendors as _vendors
+except ImportError:  # 直接以脚本运行
+    import vendors as _vendors  # type: ignore[no-redef]
+
 SIGNATURES_SOURCE = {
     "repo": "scrapfly/Antibot-Detector",
     "commit": "unknown",  # 由 gen_detect_signatures.py --commit <sha> 写入；未知必须如实写 unknown
@@ -356,6 +361,24 @@ def recommend(detections: list[Detection], ctype: str = "") -> dict:
     names = {d.id for d in detections}
     top = detections[0] if detections else None
 
+    # ⚠️ **先判不可解，再判怎么解**（v6.2，差分 Oracle 抓到的分叉）。
+    # 原来只看 `top`（命中榜首），于是一页同时有 hcaptcha（能解）与 kasada（解不了）时，
+    # 它会说"走 multicaptcha 能解"，而 `route.decide()` 说"拒绝" —— 对同一批输入两个
+    # 公共决策函数给出相反答案，调用方无从判断谁对。真实语义应当是：
+    # **只要有一家解不了，这页整体就是过不去的**（拿得到 A 家的凭证也进不去 B 家）。
+    # 只把**盾类**命中纳入判断：Fingerprint 类（localStorage / clipboard / Intl …）是技术特征，
+    # 任何现代站点都会命中，把它们算进来会让几乎所有站被判"解不了"（开发中实测踩到）。
+    shields = [d for d in detections if _vendors.is_shield(d.category)]
+    unsolvable = [d for d in shields if not _vendors.solvable(d.id)]
+    if unsolvable:
+        names_txt = "、".join(sorted({d.name for d in unsolvable}))
+        return {
+            "route": "unsupported_or_browser",
+            "reason": "命中本服务解不了的防护：" + names_txt,
+            "hint": "这家没有对应求解器，硬试只会白等一个完整超时；"
+                    "换入口或人工处理，或按 captchas/ 的模式新增求解器",
+        }
+
     if "detect-cloudflare" in names or ctype:
         if ctype == "turnstile":
             return {"route": "browser_token", "want": "turnstile",
@@ -378,10 +401,33 @@ def recommend(detections: list[Detection], ctype: str = "") -> dict:
         return {"route": "browser_cookie", "want": "awswaf", "reason": "检测到 AWS WAF",
                 "hint": "POST /solve 加 want=awswaf"}
     assert top is not None      # 走到这里说明有命中
+    # 走到这里 = 全部**盾类**命中都是能解的（不可解的已在函数开头拦掉）。
+    #
+    # ⚠️ 取 want 必须用 `shields` 而不是 `top`（独立复审抓到的真缺陷）：
+    #   `top` 是**全部**命中的第一名，可能是一条 Fingerprint（CSS / Web Storage /
+    #   Battery 这些 50 分的条目按名字排序常常排在 hCaptcha 前面）。用它查表查不到，
+    #   就会掉进下面的 unsupported 分支 —— 而同一份输入给 `route.decide()` 却是
+    #   "能解、走 hcaptcha"，两个公共决策函数再次分叉（正是 vendors.py 要根治的那类）。
+    #   `pick_multicaptcha` 是 vendors 提供的唯一入口，route.decide 用的也是它。
+    _mc_id, want = _vendors.pick_multicaptcha({d.id for d in shields})
+    if want:
+        name = next((d.name for d in shields if d.id == _mc_id), _mc_id)
+        return {"route": "multicaptcha", "want": want, "reason": "检测到 " + name,
+                "hint": "POST /solve 加 want=" + want + "（captchas/ 引擎）"}
+    if not shields:
+        # 只有指纹类命中 = **没有盾**。必须和"什么都没命中"给同一个建议（direct），
+        # 否则会出现语义倒挂："有指纹"比"干净"判得更糟（v6.2 复审抓到的真缺陷）。
+        return {
+            "route": "direct",
+            "reason": "只命中指纹类特征、没有防护盾——直接抓",
+            "hint": "指纹类（localStorage / clipboard / Intl …）不是盾；"
+                    "若实际拿到 403/挑战页，说明该厂商未被特征表覆盖，请补规则",
+        }
+    shield_top = shields[0]
     return {
         "route": "unsupported_or_browser",
-        "reason": "检测到非 CF 防护：" + top.name + "（难度 " + top.difficulty + "）",
-        "hint": "本仓库求解只覆盖 Cloudflare / AWS WAF；这类站建议换入口或人工处理",
+        "reason": "检测到非 CF 防护：" + shield_top.name + "（难度 " + shield_top.difficulty + "）",
+        "hint": "该厂商暂无可解路径；可先人工处理，或按 captchas/ 模式新增求解器",
     }
 
 
@@ -399,10 +445,15 @@ def summarize(
         "cf-mitigated" in {k.lower() for k in headers}
     )
     ctype = cf_challenge_type(body, headers, url) if looks_cf else ""
+    # ⚠️ `protected` 必须是"有**盾**"，不是"命中任何特征"（v6.2 复审抓到的真缺陷）。
+    # 指纹类命中（localStorage / clipboard / Intl …）任何现代站点都有；用它当 `protected`
+    # 会让 `route=auto` 对一个**没有盾**的站照常起浏览器 —— 正是 route.py 开头声明的
+    # "无盾站白付 16–20s 与 1.2GB 内存"。口径与 `vendors.is_shield()` 保持一致。
+    protected = any(_vendors.is_shield(d.category) for d in detections)
     return {
         "url": url,
         "status": status,
-        "protected": bool(detections),
+        "protected": protected,
         "providers": [d.as_dict() for d in detections],
         "cloudflare_challenge_type": ctype or None,
         "recommendation": recommend(detections, ctype),

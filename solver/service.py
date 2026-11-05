@@ -38,6 +38,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import functools
 import hashlib
 import ipaddress
@@ -83,7 +84,7 @@ try:  # 作为包导入（tests / 未来 solver 包）
         derive_ttl,
     )
     from .prewarm import Prewarmer, parse_targets
-    from .metrics import render_metrics_text  # v5.0 T-56：Prometheus 渲染已下沉（只搬不改）
+    from .metrics import process_metrics, render_metrics_text  # v5.0 T-56 下沉；v6.2 加进程自检
     from .eventlog import EventLog  # P2-1：最近 N 条事件环形缓冲（GET /logs 的数据源）
     # UI：只读状态页（单文件 HTML，零依赖零构建）
     from .statuspage import STATUS_PAGE_HTML_BYTES
@@ -128,6 +129,16 @@ try:  # 作为包导入（tests / 未来 solver 包）
         Want,
         build_turnstile_stub,
     )
+    # ── 万盾嫁接层（v6.1）：扩展 want 类型走 captchas/ 子包，CF 主线零感知 ──
+    from .multicaptcha import (
+        CAPTCHA_TYPES,
+        SELF_URL_TYPES as MC_SELF_URL_TYPES,
+        inflight_tasks as mc_inflight_tasks,
+        is_multicaptcha_type,
+        mark_start as mc_mark_start,
+        solve_async as mc_solve_async,
+        validate_request as mc_validate_request,
+    )
 except ImportError:  # 直接以脚本运行：python solver/service.py
     from probe import (  # type: ignore[no-redef]
         DEFAULT_PROBE_UA,
@@ -154,7 +165,7 @@ except ImportError:  # 直接以脚本运行：python solver/service.py
         derive_ttl,
     )
     from prewarm import Prewarmer, parse_targets  # type: ignore[no-redef]
-    from metrics import render_metrics_text  # type: ignore[no-redef]
+    from metrics import process_metrics, render_metrics_text  # type: ignore[no-redef]
     from eventlog import EventLog  # type: ignore[no-redef]
     from statuspage import STATUS_PAGE_HTML_BYTES  # type: ignore[no-redef]
     from console_html import CONSOLE_PAGE_HTML_BYTES  # type: ignore[no-redef]
@@ -200,6 +211,18 @@ except ImportError:  # 直接以脚本运行：python solver/service.py
         Want,
         build_turnstile_stub,
     )
+    from multicaptcha import (  # type: ignore[no-redef]
+        CAPTCHA_TYPES,
+        SELF_URL_TYPES as MC_SELF_URL_TYPES,
+        inflight_tasks as mc_inflight_tasks,
+        is_multicaptcha_type,
+        mark_start as mc_mark_start,
+        solve_async as mc_solve_async,
+        validate_request as mc_validate_request,
+    )
+
+#: 服务端日志（看门狗/致命路径用；HTTP 层用的是 self._log 的事件环形缓冲）
+log = logging.getLogger("cfsolve")
 
 # ── 常量 ───────────────────────────────────────────
 DEFAULT_TTL = 1500          # cf_clearance 通常 30 分钟量级；cookie 带 expires 时以 cookie 为准
@@ -241,6 +264,24 @@ EVENT_LOG_MAXLEN = 200
 DEFAULT_LOG_LINES = 50
 MAX_LOG_LINES = 200
 SHUTDOWN_GRACE = 10.0
+
+# ── worker 卡死看门狗（v6.2，参考 camofox-browser 的 new-page-recovery 思路）──
+#
+# 要解决的实测缺陷：浏览器"半死"时（`is_connected()` 仍为真，但 `ctx.new_page()`
+# 或某个 Playwright 调用永不返回），worker 线程会永久阻塞在 `fn(browser)` 里。
+# `_submit` 的超时只让**调用方**拿到 504，worker 不会醒 —— 实测两次请求各等 10s
+# 后 /health 停在 starting、queue 深度 2，服务事实上已死，只能重启进程。
+#
+# 策略（用户拍板：进程自重启）：任务超出"预算 + SUBMIT_SLACK + 宽限"仍未返回 →
+# 标记 wedged（/health 如实显示）→ 以退出码 75 退出，交由 supervisor（docker
+# restart / run-pool.ps1 的重启循环）拉起一个干净进程。
+# 为什么不尝试"杀浏览器进程救回来"：拿不到可靠的浏览器 PID（Camoufox 会再 fork），
+# 杀错代价比重启整个 worker 更大；而 worker 本来就是单线程串行，重启成本 ≈ 一次冷启动。
+WEDGE_GRACE = 30.0          # 任务超预算后再等多久才判定卡死（给慢站的余量）
+WEDGE_EXIT_CODE = 75        # EX_TEMPFAIL：告诉 supervisor "这不是业务失败，重启我"
+WEDGE_LAUNCH_GRACE = 300.0  # 浏览器启动阶段卡死（从未 alive）的判定阈值
+_WATCH_INTERVAL = 2.0       # 看门狗检查间隔（秒）
+_WEDGE_CONFIRM = 2          # 连续命中几次才判定（防单次误判/时间跳变）
 
 
 #: DNS 正缓存条目上限（60s 短命缓存，超了直接清空——比引入 LRU 便宜且够用）
@@ -395,6 +436,8 @@ class Solver:
         browser_os: str = "",
         detect_cache_ttl: float = DETECT_CACHE_TTL,
         compat_max_pending: int = COMPAT_DEFAULT_MAX_PENDING,
+        wedge_restart: bool = False,
+        wedge_grace: float = WEDGE_GRACE,
     ) -> None:
         self.ttl = max(MIN_TTL, int(ttl))
         self.egress_id = egress_id or "default"
@@ -427,6 +470,19 @@ class Solver:
         # 与求解共用同一个信号量会让"探测"吃掉"求解"的额度（反之亦然）。
         self.detect_inflight = threading.BoundedSemaphore(max(1, max_detect))
         self._stopping = threading.Event()
+
+        # ── 卡死看门狗状态 ──
+        #: 进程自重启。默认 **False**：库/测试里构造 Solver 不该把自己的宿主进程杀掉；
+        #: bootstrap（真正的服务入口）默认开启，见 `--no-wedge-restart`。
+        self.wedge_restart = bool(wedge_restart)
+        self.wedge_grace = max(0.0, float(wedge_grace))
+        self._wedged = False
+        self._wedged_reason = ""
+        self._task_deadline: float = 0.0     # monotonic；0 = 当前没有在跑的任务
+        self._task_desc: str = ""
+        self._launch_started_at: float = 0.0  # monotonic；0 = 不在启动阶段
+        # 注意：看门狗线程**在 __init__ 末尾**才 start —— 它要用 self.events（EventLog）
+        # 与 self._browser_alive 等状态；提前 start 会有一小段"属性还没建好"的竞态窗口。
 
         # 生命周期 / 健康
         self._browser_alive = False
@@ -475,6 +531,9 @@ class Solver:
         self.pid = os.getpid()
         self.started_at = self._started_at
 
+        # 看门狗放在最后 start：此时 events / 计数 / 队列都已就绪（见上面 _launch_started_at 处的说明）
+        self._watchdog = threading.Thread(target=self._watch_worker, name="cfsolve-watchdog", daemon=True)
+        self._watchdog.start()
         self._thread = threading.Thread(target=self._worker, name="cfsolve-worker", daemon=True)
         self._thread.start()
 
@@ -482,6 +541,7 @@ class Solver:
     def _worker(self) -> None:
         backoff = 1.0
         while not self._stopping.is_set():
+            self._launch_started_at = time.monotonic()
             try:
                 cm = self._browser_factory(headless=self._headless)
                 browser = cm.__enter__()
@@ -515,6 +575,7 @@ class Solver:
             ua = self._read_browser_ua(browser)
             if not ua:
                 self._note_error("ua_unreadable", "读不到 navigator.userAgent（不影响求解，但缓存共享无从判断）")
+            self._launch_started_at = 0.0      # 启动阶段结束，进入可服务状态
             with self._lock:
                 self._browser_alive = True
                 self._ever_alive = True
@@ -571,16 +632,98 @@ class Solver:
                 box["done"].set()
                 continue
 
+            self._begin_task(float(box.get("budget") or 0.0))
             try:
                 box["result"] = fn(browser)
             except Exception as e:  # noqa: BLE001
                 box["error"] = e
             finally:
+                self._end_task()
                 box["done"].set()
 
             if not _is_connected(browser):
                 self._mark_browser_dead("disconnected", None)
                 return
+
+    # -- 卡死看门狗 -----------------------------------
+    def _begin_task(self, budget: float) -> None:
+        """worker 开始执行一个任务时登记它的合法上限（monotonic deadline）。"""
+        grace = self.wedge_grace
+        # 任务本身有预算；给它 budget + 宽限的绝对 deadline。
+        # budget=0 表示调用方没给（理论上不会），退回用一个保守值。
+        limit = (budget or 60.0) + grace
+        self._task_deadline = time.monotonic() + limit
+        self._task_desc = f"budget={budget:.0f}s"
+
+    def _end_task(self) -> None:
+        self._task_deadline = 0.0
+        self._task_desc = ""
+
+    def _watch_worker(self) -> None:
+        """看门狗线程：发现 worker 卡死就如实标记，并按配置自重启进程。
+
+        判定口径（刻意保守，宁可晚判也不能误杀）：
+          · 任务阶段：now > 该任务的 deadline（= budget + wedge_grace）持续 `_WEDGE_CONFIRM`
+            秒仍在跑 → 判定卡死；
+          · 启动阶段：从未 alive 且启动已超过 WEDGE_LAUNCH_GRACE → 判定卡死
+            （Camoufox 首启要下载/解压，宽限给得很大）。
+        为什么要"持续 N 秒"而不是一次命中：系统时间跳变/GC 长停顿都可能让单次检查
+        看到超期。连续两次都超期才动手，能把误杀概率压到可忽略。
+        """
+        confirm = 0
+        while not self._stopping.wait(_WATCH_INTERVAL):
+            if self._wedged:
+                continue
+            now = time.monotonic()
+            overdue = False
+            reason = ""
+            with self._lock:
+                deadline = self._task_deadline
+                desc = self._task_desc
+                launch_at = self._launch_started_at
+                ever_alive = self._ever_alive
+            if deadline and now > deadline:
+                overdue = True
+                reason = f"任务超期未返回（{desc}），worker 疑似卡死"
+            elif launch_at and not ever_alive and now - launch_at > WEDGE_LAUNCH_GRACE:
+                overdue = True
+                reason = f"浏览器启动阶段超过 {WEDGE_LAUNCH_GRACE:.0f}s 仍未就绪"
+            confirm = confirm + 1 if overdue else 0
+            if confirm < _WEDGE_CONFIRM:
+                continue
+            self._on_wedged(reason)
+
+    def _on_wedged(self, reason: str) -> None:
+        """标记卡死；配置了 wedge_restart 就以退出码 75 让 supervisor 拉起新进程。"""
+        with self._lock:
+            if self._wedged:
+                return
+            self._wedged = True
+            self._wedged_reason = reason
+            self._browser_alive = False
+            self._last_error = f"worker_wedged: {reason}"
+            self._last_error_at = _now()
+        try:
+            self.events.record(event="wedged", ok=False, reason=reason[:120])
+        except Exception:  # noqa: BLE001 —— 记录失败不能挡住重启
+            pass
+        log.error("worker 卡死：%s%s", reason,
+                  "；进程将以 %d 退出交由 supervisor 重启" % WEDGE_EXIT_CODE
+                  if self.wedge_restart else "；wedge_restart 未开启，服务将保持 degraded 直到人工重启")
+        self._stopping.set()
+        try:
+            self._tasks.put_nowait(None)     # 唤醒 worker（它卡着也没用，只是尽力）
+        except queue.Full:
+            pass
+        self._fail_all_queued(
+            SolveError(ErrorCode.BROWSER_UNAVAILABLE, "worker 卡死，服务正在重启", stage="admit")
+        )
+        if self.wedge_restart:
+            # os._exit 而不是 sys.exit：worker 线程卡在 Playwright 调用里，正常退出路径
+            # （join/atexit）会永远等它。supervisor 负责拉起干净进程 —— 在途请求本来
+            # 就已经拿到 503/504，不会因为这次退出"多丢"什么。
+            time.sleep(0.05)
+            os._exit(WEDGE_EXIT_CODE)
 
     def _note_error(self, reason: str, detail: str) -> None:
         """记录一条不致命但需要被看见的问题（会出现在 /health.last_error 里）。"""
@@ -619,6 +762,9 @@ class Solver:
             "cancelled": threading.Event(),
             "result": None,
             "error": None,
+            # 看门狗用：这次任务合法的执行上限（预算）。用它算 deadline，
+            # 而不是用"worker 多久没动"——后者会把正常的长任务误判成卡死。
+            "budget": float(budget or 0.0),
         }
         try:
             self._tasks.put_nowait((fn, box))
@@ -1605,8 +1751,13 @@ class Solver:
         """
         with self._lock:
             alive = self._browser_alive and self._thread.is_alive()
+            wedged = self._wedged
             if alive:
                 state = "ready"
+            elif wedged:
+                # 卡死是一个独立状态，不能混进 degraded（degraded 会自愈，卡死不会）：
+                # 运维看到 wedged 才知道"等它自己好"是等不到的，必须重启。
+                state = "wedged"
             elif not self._ever_alive:
                 state = "starting"
             else:
@@ -1617,6 +1768,9 @@ class Solver:
                 "browser_alive": self._browser_alive,
                 "worker_alive": self._thread.is_alive(),
             }
+            if wedged:
+                minimal["wedged_reason"] = self._wedged_reason
+                minimal["wedge_restart"] = self.wedge_restart
             if not include_internal:
                 return (200 if alive else 503), minimal
             body = {
@@ -1625,6 +1779,10 @@ class Solver:
                 # 真正会被调用的后端链。注意：上面的三态只反映**本地 Camoufox worker**，
                 # 不反映链上其它后端（cfsolve 二进制缺失、pydoll 的 Chrome 被挪走）的可用性。
                 "backends": list(self.backend_chain),
+                # v6.1 万盾嫁接层：受理哪些扩展 want（不含主链路四类）。
+                # 只是"受理清单"，不代表求解器依赖已就绪；缺 cloakbrowser 时请求会
+                # 明确报 not-configured + 安装提示（见 solver/multicaptcha.py）。
+                "captcha_types": sorted(CAPTCHA_TYPES),
                 "egress_id": self.egress_id,
                 "cache_backend": self.cache_backend,
                 # UA 指纹（不是 UA 本体）：它是缓存键的第三维。
@@ -1743,7 +1901,12 @@ class Solver:
             "queue_depth": self._tasks.qsize(),
             "inflight_count": len(inflight),
             "inflight": inflight,
+            # v6.1：万盾嫁接层的在途求解（captchas/ 子包），与主链路分开列 ——
+            # 两者的超时/产物语义不同，混在一张表里排障时反而看不出是谁卡住了。
+            "multicaptcha_inflight": mc_inflight_tasks(),
             "events_total": self.events.snapshot(0)["total"],
+            # 卡死状态单独暴露：/status 是排障第一站，运维不该为了确认"是不是卡死了"再跳去 /health
+            "wedge": self._wedged_snapshot(),
             "compat": self.compat.stats(),
         }
 
@@ -1783,7 +1946,19 @@ class Solver:
             )
         # research_status 要读盘：放到锁外再渲染，避免持锁做 I/O（复审 N5）。
         kwargs["research_fn"] = self.research_status
+        # v6.2：进程自检（RSS/峰值/线程数）。读的是操作系统计数，本身很快，
+        # 但也放在锁外——它不是求解状态的一部分。
+        kwargs["process_fn"] = process_metrics
         return render_metrics_text(**kwargs)
+
+    def _wedged_snapshot(self) -> dict:
+        """卡死状态（供 /health 与 /status 复用，避免两处口径漂移）。"""
+        with self._lock:
+            return {
+                "wedged": self._wedged,
+                "reason": self._wedged_reason,
+                "wedge_restart": self.wedge_restart,
+            }
 
     # -- 退出 -----------------------------------------
     def close(self) -> None:
@@ -2117,6 +2292,56 @@ class Handler(BaseHTTPRequestHandler):
         # 畸形输入恰恰是最需要审计的那一类，所以这里不是"兜个 None"而是修根。
         url = ""
         try:
+            # ── 万盾嫁接层旁路（v6.1）─────────────────────────────
+            # 放在 parse_solve_request **之前**：Want.parse 不认识扩展类型，
+            # 会先把它 400 掉。旁路逻辑：want 命中扩展类型（*_x / hcaptcha /
+            # datadome / ...）→ 不进主链路（backends/缓存/Solver 都不碰），
+            # 直接分发到 captchas/ 子包并归一响应。SSRF/目标检查同主链路。
+            _early = parse_json_body(raw) if not body_error else {}
+            # body_error 不在这里处理：交给 parse_solve_request 按原契约报
+            # （超大 body → 413，区别于 400），保持主链路行为逐字不变。
+            _mc_want = (_early.get("want") or "").strip().lower()
+            if is_multicaptcha_type(_mc_want):
+                mc_body = dict(_early)
+                mc_body["type"] = _mc_want
+                mc_url = mc_body.get("url") or ""
+                # 自带规范 URL 的类型（botguard/perimeterx/aliyun/arkose）允许省略 url
+                if mc_url or _mc_want not in MC_SELF_URL_TYPES:
+                    if not isinstance(mc_url, str) or not mc_url.startswith(("http://", "https://")):
+                        raise SolveError(ErrorCode.INVALID_REQUEST,
+                                         "url 必须是 http(s) 绝对地址", stage="validate")
+                    self.solver._check_target(_host_of(mc_url))     # 同主链路的 SSRF 守卫
+                mc_validate_request(mc_body)
+                # 出口粘性：cookie 类产物（DataDome/PerimeterX/Akamai/CF）**绑出口 IP**，
+                # 同一个域必须用同一个出口采集与回放。主链路由代理池保证这一点；
+                # 嫁接层若默认裸连，拿到的 cookie 在客户端换 IP 回放就是静默 403 ——
+                # 所以这里在调用方没显式给 proxy 时，沿用主链路为该域粘住的出口。
+                _mc_entry = None
+                if not mc_body.get("proxy") and mc_url:
+                    _mc_entry = self.solver._entry_for(_host_of(mc_url))
+                    if _mc_entry is not None:
+                        mc_body["proxy"] = _mc_entry.raw_url   # 含凭据，仅内存传递，不进日志
+                # 超时：主链路的 `timeout`（[5,120]）与扩展层的 `timeout_s` 都认，
+                # `timeout` 优先做夹取 —— 调用方不该为两套字段名记两份约定。
+                mc_timeout = 0
+                if mc_body.get("timeout") is not None:
+                    mc_timeout = _clamp_timeout(mc_body.get("timeout"))
+                elif mc_body.get("timeout_s"):
+                    mc_timeout = mc_body.get("timeout_s")
+                mc_mark_start(mc_body)
+                result = asyncio.run(mc_solve_async(mc_body, timeout_s=mc_timeout))
+                result["routed_by"] = {"mode": "multicaptcha", "backend": "captchas",
+                                       "type": result.get("type")}
+                if _mc_entry is not None:
+                    # 与主链路同一约定：出口标识回传，客户端回放必须用同一出口
+                    result["egress_id"] = _mc_entry.egress_id
+                self._send(200, result)
+                self._log(event="solve", req_id=req_id, host=_host_of(mc_url), path="/solve",
+                          ok=bool(result.get("solved")), elapsed=result.get("elapsed"),
+                          backend="captchas", type=result.get("type"),
+                          ms=round((time.monotonic() - started) * 1000))
+                return
+
             # 解析 + 逐字段校验全部在 request.parse_solve_request 里（v5.0.1 D1 下沉）。
             # 它是纯函数，边界用例不再需要起真实服务；错误码/stage/hint 与拆分前逐字一致。
             req_obj = parse_solve_request(raw, body_error)
@@ -2172,6 +2397,31 @@ class Handler(BaseHTTPRequestHandler):
                         "该站使用的防护本服务不支持（" + decision.reason + "）",
                         stage="detect", hint=decision.hint, extra={"routed_by": routed_by},
                     )
+                if decision.prefer == "multicaptcha" and route_mode == "auto":
+                    # v6.1：探测命中万盾厂商 → 自动分发到 captchas/（不经主链路后端）
+                    _mc_type = (decision.detail or {}).get("multicaptcha_want") or ""
+                    if _mc_type:
+                        mc_body = dict(_early)
+                        mc_body["type"] = _mc_type
+                        mc_body.setdefault("url", url)
+                        mc_validate_request(mc_body)
+                        # 出口粘性同旁路（cookie 绑 IP）：复用主链路为该域粘住的出口
+                        _mc_entry = self.solver._entry_for(_host_of(url))
+                        if _mc_entry is not None and not mc_body.get("proxy"):
+                            mc_body["proxy"] = _mc_entry.raw_url
+                        mc_mark_start(mc_body)
+                        mc_result = asyncio.run(
+                            mc_solve_async(mc_body, timeout_s=_clamp_timeout(timeout)))
+                        mc_result["routed_by"] = {**routed_by, "mode": "auto",
+                                                  "backend": "captchas", "type": _mc_type}
+                        if _mc_entry is not None:
+                            mc_result["egress_id"] = _mc_entry.egress_id
+                        self._send(200, mc_result)
+                        self._log(event="solve", req_id=req_id, host=_host_of(url),
+                                  path="/solve", ok=bool(mc_result.get("solved")),
+                                  backend="captchas", type=_mc_type,
+                                  route="auto", ms=round((time.monotonic() - started) * 1000))
+                        return
 
             if self.router is not None:
                 # 配了兜底后端：按优先级路由（未配置的后端会被 skip 并记录 attempts）

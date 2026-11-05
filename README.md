@@ -12,7 +12,10 @@
 | 要 Turnstile 一次性 token | `want=turnstile`，**纯协议直解**（无浏览器进程） | 官方测试 sitekey 6–8s |
 | 要 `cf_clearance` cookie 供任意 HTTP 客户端用 | `want=clearance` + Go 客户端自动回放 | 回放 200、1.3–1.7s |
 | 服务高可用 | 多进程池 + 失败摘除 2s / 回归 28s + 403 自愈 | 摘除/回归真机演练通过 |
+| 浏览器"半死"（进程活着但调用永不返回） | **v6.2 看门狗**：任务超期判定 `wedged` → 进程以 75 退出，supervisor 拉起干净进程 | 实测复现原缺陷（worker 永久卡死）；修复后 subprocess 断言退出码 75 |
+| 存量 YesCaptcha 客户端 | **v6.2 兼容层 19 种 task type** + 生态错误码词表 | 主链路 7 种 + 嫁接层 12 种 + 明确拒绝 8 种（图片识别类，含原因） |
 | 内存敏感环境 | `--pure-only`：**72MB 无浏览器进程**的纯协议模式 | 同站 A/B 18.43s 最快 |
+| 非 CF 的验证码/反爬（DataDome / PerimeterX / Akamai / Arkose / hCaptcha / reCAPTCHA / 阿里滑块…） | **v6.1 万盾嫁接层**：`want=datadome` 等 11 个扩展类型；`route=auto` 探测到即自动分发 | 求解器本体未做真机实测（需 cloakbrowser + 真实挑战页）；嫁接层契约已测 |
 
 **架构一句话**：纯协议 cfsolve（Rust，JS VM + 环境快照回放）打头 → pydoll → Camoufox 浏览器兜底
 → FlareSolverr，按域缓存 + `prewarm` 保活把 18–43s 的求解挪出请求路径。
@@ -35,6 +38,7 @@ Go 网关(gocfsolve.Client/Pool) ──POST /solve──► solver/service.py (:
 
 | 组件 | 路径 | 状态 |
 |---|---|---|
+| **万盾嫁接层（v6.1）**：11 厂商求解器副本 + 分发/校验/归一 | `captchas/` + `solver/multicaptcha.py` | ✅ 代码与契约测试落地；求解器本体待真机验证（缺 cloakbrowser 二进制） |
 | 求解服务（多后端回落链，按域缓存，`/` 状态页 `/solve` `/detect` `/health` `/stats` `/status` `/logs` `/metrics` `/shutdown`；机器可读规格见 `docs/openapi.json`） | `solver/service.py` | ✅ 已实现并运行 |
 | **纯协议后端（cfsolve，Rust，无浏览器进程）** | `solver/cfsolve_backend.py` + `tools/cfsolve-patches/` | ✅ 同站 A/B 18.43s 最快（快于 Camoufox 19.56s） |
 | pydoll 后端（零 WebDriver CDP 直连 Chrome） | `solver/pydoll_backend.py` | ✅ steamdb/udemy 通过 |
@@ -266,7 +270,7 @@ gocfsolve/
 tools/cfsolve-patches/  # cfsolve 的 Windows 构建补丁 + 新版 CF 适配补丁 + profile 录制工具
 docs/cfsolve源码侦察-token提取与profile复用-20261103.md  # ★ token 现场提取原理 + profile 复用机制
 scripts/
-  run-pool.ps1          # 多 worker 启动（共享缓存目录 + 可选 prewarm）
+  run-pool.ps1          # 多 worker 启动（共享缓存目录 + 可选 prewarm + 卡死自重启监督循环）
   run_limited.py        # ★ Windows Job Object 内存上限运行器（--max-mb N，超限杀进程树）
   e2e_local.py          # 真进程 E2E（30 断言，离线）
   hot_update_drill.py   # 热更新演练（17 断言）
@@ -280,7 +284,8 @@ scripts/
   probe_browser.py      # Playwright headless / headed 过盾对照实验
   probe_camoufox.py     # Camoufox 过盾实验
   diag_challenge.py     # 挑战页 DOM 诊断：iframe / checkbox / 按钮 / 截图
-tests/                  # 659 项 Python 测试（注入假浏览器/假后端，离线）
+captchas/               # 万盾求解器副本（11 厂商；自包含，不追上游，见 captchas/README.md）
+tests/                  # 898 项 Python 测试（注入假浏览器/假后端，离线）
 docs/
   项目规格.md            # ★ 单一事实源：是什么/边界/承诺什么/不承诺什么
   API.md                # ★ 接口契约（参数/响应/错误码表）

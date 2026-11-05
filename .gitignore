@@ -67,3 +67,7 @@ plans/证据/**/*.log
 plans/证据/**/.env
 # 会话快照语料（体积大，只入库 corpus/INDEX.json 元数据；T-66）
 corpus/
+
+# 万盾嫁接层的视觉模型：体积大（31MB），按需从上游获取，不入库
+# 缺失时 aliyun 回落 cv2 gap 检测、reCAPTCHA classifier=auto 回落 mistral
+*.onnx

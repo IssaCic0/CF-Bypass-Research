@@ -68,7 +68,7 @@
     },
     {
       "name": "akamai-abck",
-      "why": "非 CF/AWS 的盾必须被判成 unsupported，避免把浏览器时间烧在解不了的目标上",
+      "why": "Akamai 由 captchas/ 承接（v6.1）：route=multicaptcha，不再说 unsupported（BR-1）",
       "input": {
         "status": 200,
         "headers": {},
@@ -76,7 +76,7 @@
         "url": "https://x.test/",
         "cookies": { "_abck": "ABC~-1~YAAQ" }
       },
-      "expect": { "detections": [["detect-akamai", 100]], "ctype": "", "route": "unsupported_or_browser" }
+      "expect": { "detections": [["detect-akamai", 100]], "ctype": "", "route": "multicaptcha" }
     },
     {
       "name": "aws-waf-token",
@@ -92,7 +92,7 @@
     },
     {
       "name": "datadome-cookie",
-      "why": "DataDome 是明确不支持的一类，必须给出 unsupported 而不是静默直连",
+      "why": "DataDome 由 captchas/ 承接（v6.1）：route=multicaptcha，不再说 unsupported（BR-1）",
       "input": {
         "status": 403,
         "headers": {},
@@ -100,7 +100,7 @@
         "url": "https://x.test/",
         "cookies": { "datadome": "AbC~dEf" }
       },
-      "expect": { "detections": [["detect-datadome", 100]], "ctype": "", "route": "unsupported_or_browser" }
+      "expect": { "detections": [["detect-datadome", 100]], "ctype": "", "route": "multicaptcha" }
     },
     {
       "name": "clean-site",

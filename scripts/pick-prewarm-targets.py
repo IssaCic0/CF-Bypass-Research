@@ -53,6 +53,8 @@ ROUTE_VERDICT: dict[str, tuple[bool, str]] = {
     "direct": (False, "无防护：prewarm 无意义"),
     "direct_unless_blocked": (False, "CF 在场但无挑战标记：先直接抓即可，无需保温"),
     "unsupported_or_browser": (False, "非 CF 防护：本仓库求解不覆盖"),
+    # v6.1 万盾嫁接：captchas/ 可解，但产物是 cookie（非缓存链），prewarm 暂不接管
+    "multicaptcha": (False, "万盾厂商（captchas/ 可解）：不纳入 prewarm，按需直接 /solve"),
 }
 
 #: 归类后的状态标签

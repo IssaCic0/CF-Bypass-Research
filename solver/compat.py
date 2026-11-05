@@ -33,6 +33,15 @@ except ImportError:  # 直接以脚本运行：python solver/service.py
     from errors import ErrorCode, SolveError  # type: ignore[no-redef]
     from request import MAX_TOKEN_FIELD_LEN  # type: ignore[no-redef]
 
+def _host_of(url: str) -> str:
+    """取主机名（不依赖 service.py，避免循环导入）。"""
+    from urllib.parse import urlsplit
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 #: 结果保留时长（秒）。超过就当"没这个任务"——比返回一个永远 processing 的僵尸任务诚实。
 COMPAT_TASK_TTL = 600.0
 #: 待处理任务上限。满了立刻拒绝（对应 `ERROR_NO_SLOT_AVAILABLE`），不做无界排队。
@@ -40,11 +49,52 @@ DEFAULT_MAX_PENDING = 64
 #: 单个兼容任务的求解预算（秒）。与 `/solve` 的默认值一致。
 COMPAT_SOLVE_TIMEOUT = 45.0
 
-#: `task.type` → 本服务的 `want`。**刻意只做 3 种**：映射无歧义、且本服务真解得了。
+#: `task.type` → 主链路 `want`。**只放主链路真解得了、且语义一对一的**。
 TASK_TYPE_MAP: dict[str, Want] = {
     "AntiCloudflareTask": Want.CLEARANCE,
     "TurnstileTaskProxyless": Want.TURNSTILE,
+    "TurnstileTaskProxylessM1": Want.TURNSTILE,          # M1 = 上游的模型变体，对我们等价
     "RecaptchaV3TaskProxyless": Want.RECAPTCHA_V3,
+    "RecaptchaV3TaskProxylessM1": Want.RECAPTCHA_V3,
+    "RecaptchaV3TaskProxylessM1S7": Want.RECAPTCHA_V3,
+    "RecaptchaV3TaskProxylessM1S9": Want.RECAPTCHA_V3,
+}
+
+#: `task.type` → 万盾嫁接层类型（captchas/ 子包，v6.1 起）。值是 `CAPTCHA_TYPES` 的键。
+#: 与 `TASK_TYPE_MAP` 分立的原因：这两条路的产物形状、缓存语义与依赖完全不同
+#: （主链路 = Camoufox/pydoll/cfsolve；嫁接层 = CloakBrowser），混在一张表里
+#: 迟早有人把 `want` 传进嫁接层。
+MC_TASK_TYPE_MAP: dict[str, str] = {
+    # —— reCAPTCHA v2（主链路没有 v2，只有 v3）——
+    "NoCaptchaTaskProxyless": "recaptcha_x",
+    "RecaptchaV2TaskProxyless": "recaptcha_x",
+    "RecaptchaV2EnterpriseTaskProxyless": "recaptcha_x",
+    # —— Enterprise v3：主链路 Want 没有 enterprise 开关，走嫁接层 ——
+    "RecaptchaV3EnterpriseTask": "recaptcha_x",
+    "RecaptchaV3EnterpriseTaskM1": "recaptcha_x",
+    # —— 其它厂商 ——
+    "HCaptchaTaskProxyless": "hcaptcha",
+    "FunCaptchaTaskProxyless": "arkose",
+    # 这些是本仓库的**扩展名**（YesCaptcha 官方没有对应 task type，但我们真解得了）：
+    # 命名沿用生态的 `xxxTaskProxyless` 风格，文档里明确标注为扩展。
+    "DataDomeTaskProxyless": "datadome",
+    "PerimeterXTaskProxyless": "perimeterx",
+    "AkamaiTaskProxyless": "akamai",
+    "AwsWafTaskProxyless": "awswaf_x",
+    "CloudflareTurnstileTaskProxyless": "turnstile_x",
+}
+
+#: 生态里存在、但我们**确实解不了**的类型 → 明确拒绝 + 原因。
+#: 不做成"静默 unsupported"：客户端要能区分"我们不做"与"这次没解出来"。
+UNSUPPORTED_TASK_TYPES: dict[str, str] = {
+    "ImageToTextTask": "图片文字识别需要视觉模型后端（本服务不内置）",
+    "ImageToTextTaskMuggle": "图片文字识别需要视觉模型后端（本服务不内置）",
+    "ImageToTextTaskM1": "图片文字识别需要视觉模型后端（本服务不内置）",
+    "FunCaptchaClassification": "纯图片分类需要视觉模型后端（本服务不内置）",
+    "HCaptchaClassification": "纯图片分类需要视觉模型后端（本服务不内置）",
+    "ReCaptchaV2Classification": "纯图片分类需要视觉模型后端（本服务不内置）",
+    "AwsClassification": "纯图片分类需要视觉模型后端（本服务不内置）",
+    "AntiTurnstileTaskProxyLess": "Turnstile 请用 TurnstileTaskProxyless",
 }
 
 #: 任务级代理字段：一律拒绝（见模块 docstring 的拒绝 1）。
@@ -65,11 +115,27 @@ COMPAT_ERROR_BY_CODE: dict[ErrorCode, str] = {
     ErrorCode.UNSOLVED: "ERROR_CAPTCHA_UNSOLVABLE",
 }
 
+# ── 错误码（v6.2：对齐 YesCaptcha 生态的真实词表）──
+#
+# 为什么要改：v5.0.1 用的是我们自造的词（ERROR_TASK_TYPE_NOT_SUPPORTED /
+# ERROR_TASK_PARAM_INVALID / ERROR_TASK_ID_INVALID）。按 YesCaptcha 协议写死的客户端
+# 是**按 errorCode 分支**的，改 base_url 过来后这三类错误全部落进 default 分支 ——
+# 兼容层"能连上但错误处理全错"，比连不上更坏。
+# 现在的词表取自生态实际用法（对照 ohmycaptcha 的实现与 YesCaptcha 文档）：
+#   ERROR_TASK_NOT_SUPPORTED / ERROR_TASK_PROPERTY_EMPTY /
+#   ERROR_NO_SUCH_CAPCHA_ID（生态里就是这个拼写，不要"修正"成 CAPTCHA）
 ERR_KEY = "ERROR_KEY_DOES_NOT_EXIST"
-ERR_TYPE = "ERROR_TASK_TYPE_NOT_SUPPORTED"
+#: 未知 task.type
+ERR_TYPE = "ERROR_TASK_NOT_SUPPORTED"
+#: 必填字段缺失/为空（生态名）
+ERR_PROPERTY_EMPTY = "ERROR_TASK_PROPERTY_EMPTY"
+#: 字段存在但值非法（超长/类型错/不是 http）——生态里没有专用码，沿用语义最接近的
+#: PROPERTY_EMPTY 会误导（客户端以为"再传一次就好"），所以保留一个通明确的码，
+#: 并在 docs/API.md 注明是扩展。
 ERR_PARAM = "ERROR_TASK_PARAM_INVALID"
 ERR_PROXY = "ERROR_PROXY_NOT_SUPPORTED"
-ERR_TASK_ID = "ERROR_TASK_ID_INVALID"
+#: taskId 不存在/已过期（生态的拼写确实是 CAPCHA）
+ERR_TASK_ID = "ERROR_NO_SUCH_CAPCHA_ID"
 ERR_NO_SLOT = "ERROR_NO_SLOT_AVAILABLE"
 ERR_UNSOLVABLE = "ERROR_CAPTCHA_UNSOLVABLE"
 
@@ -88,17 +154,28 @@ class CompatError(Exception):
 
 @dataclass(frozen=True)
 class CompatSpec:
-    """一个兼容任务被规范化后的求解意图。"""
+    """一个兼容任务被规范化后的求解意图。
 
-    want: Want
+    两条执行路径（v6.2 起）：
+      · `mc_type == ""` → 主链路，`want` 有值，调 `Solver.solve()`
+      · `mc_type != ""` → 万盾嫁接层，`want` 为 None，调 `multicaptcha.solve_async()`
+    为什么要分开：两层的产物形状、依赖（Camoufox vs CloakBrowser）与缓存语义都不同；
+    用一个 `want` 字段硬塞两种语义，会在 `_run_inner` 里写出"看起来能跑"的分支。
+    """
+
+    want: Want | None
     url: str
     sitekey: str = ""
     action: str = ""
     cdata: str = ""
+    #: 万盾嫁接层类型（`multicaptcha.CAPTCHA_TYPES` 的键）；空 = 走主链路
+    mc_type: str = ""
+    #: 嫁接层的额外参数（version/enterprise/public_key/referer/render_flow/...）
+    mc_extra: dict = field(default_factory=dict)
 
     @property
     def want_value(self) -> str:
-        return self.want.value
+        return self.want.value if self.want is not None else self.mc_type
 
 
 def spec_from_task(task: object) -> CompatSpec:
@@ -107,11 +184,11 @@ def spec_from_task(task: object) -> CompatSpec:
     任何不合法都抛 `CompatError`；错误码与描述按 `docs/API.md` 的契约表。
     """
     if not isinstance(task, dict):
-        raise CompatError(ERR_PARAM, "task 必须是对象")
+        raise CompatError(ERR_PROPERTY_EMPTY, "task 必须是对象")
 
     task_type = task.get("type")
     if not isinstance(task_type, str) or not task_type:
-        raise CompatError(ERR_PARAM, "task.type 必须是非空字符串")
+        raise CompatError(ERR_PROPERTY_EMPTY, "task.type 必须是非空字符串")
 
     for field_name in PROXY_FIELDS:
         if field_name in task:
@@ -122,16 +199,20 @@ def spec_from_task(task: object) -> CompatSpec:
             )
 
     want = TASK_TYPE_MAP.get(task_type)
-    if want is None:
+    mc_type = MC_TASK_TYPE_MAP.get(task_type)
+    if want is None and mc_type is None:
+        reason = UNSUPPORTED_TASK_TYPES.get(task_type)
+        supported = sorted(set(TASK_TYPE_MAP) | set(MC_TASK_TYPE_MAP))
         raise CompatError(
             ERR_TYPE,
-            f"不支持的 task.type={task_type!r}；本服务只支持 {sorted(TASK_TYPE_MAP)}。"
-            "图片/滑块类与 Akamai/DataDome/PerimeterX 本服务解不了，不做承诺",
+            (f"task.type={task_type!r} 本服务不做：{reason}。"
+             if reason else f"未知 task.type={task_type!r}。")
+            + f"支持的 {len(supported)} 种见 docs/API.md；此处列出：{supported}",
         )
 
     url = task.get("websiteURL")
     if not isinstance(url, str) or not url:
-        raise CompatError(ERR_PARAM, "task.websiteURL 必填")
+        raise CompatError(ERR_PROPERTY_EMPTY, "task.websiteURL 必填")
     if not url.startswith(("http://", "https://")):
         raise CompatError(ERR_PARAM, "task.websiteURL 必须是 http(s) 绝对地址")
 
@@ -141,7 +222,8 @@ def spec_from_task(task: object) -> CompatSpec:
     if want in (Want.TURNSTILE, Want.RECAPTCHA_V3):
         sitekey = task.get("websiteKey") or ""
         if not isinstance(sitekey, str) or not sitekey:
-            raise CompatError(ERR_PARAM, "task.websiteKey 必填（Turnstile / reCAPTCHA 都需要 sitekey）")
+            raise CompatError(ERR_PROPERTY_EMPTY,
+                              "task.websiteKey 必填（Turnstile / reCAPTCHA 都需要 sitekey）")
         if want is Want.TURNSTILE:
             action = task.get("action") or ""
             cdata = task.get("cdata") or ""
@@ -158,17 +240,46 @@ def spec_from_task(task: object) -> CompatSpec:
                     ERR_PARAM, f"{name} 必须是不超过 {MAX_TOKEN_FIELD_LEN} 字符的字符串"
                 )
 
+    if mc_type:
+        # 嫁接层分支：字段校验按该类型的最小集合（与 /solve 旁路同一套规则）
+        extra: dict = {}
+        _sitekey = task.get("websiteKey") or task.get("public_key") or ""
+        if mc_type in ("recaptcha_x", "hcaptcha", "turnstile_x") and not _sitekey:
+            raise CompatError(ERR_PROPERTY_EMPTY, "task.websiteKey 必填（该类型需要 sitekey）")
+        if mc_type == "recaptcha_x":
+            # 由 task.type 决定变体：Enterprise / v2 / 默认 v3
+            if "Enterprise" in task_type:
+                extra["enterprise"] = True
+            if "V2" in task_type or task_type == "NoCaptchaTaskProxyless":
+                extra["version"] = "v2"
+            else:
+                extra["version"] = "v3"
+            action = task.get("pageAction") or task.get("action") or ""
+        if mc_type == "arkose":
+            extra["public_key"] = _sitekey
+        if mc_type == "datadome":
+            extra["referer"] = task.get("referer") or ""
+        if mc_type == "perimeterx":
+            extra["render_flow"] = task.get("render_flow") or ""
+        return CompatSpec(want=None, url=url, sitekey=_sitekey, action=action,
+                          mc_type=mc_type, mc_extra=extra)
+
     return CompatSpec(want=want, url=url, sitekey=sitekey, action=action, cdata=cdata)
 
 
-def solution_from_result(want: Want, result: dict) -> dict:
-    """把 `/solve` 的结果翻译成 YesCaptcha 的 `solution` 结构（纯函数）。
+def solution_from_result(want: Want, result: dict, mc_type: str = "") -> dict:
+    """把结果翻译成 YesCaptcha 的 `solution` 结构（纯函数）。
 
-    三种产物的字段名各不相同，这不是我们发明的，是生态既定契约：
+    产物字段名各不相同，这不是我们发明的，是生态既定契约：
       · clearance      → `solution.cookies.cf_clearance` + `userAgent`
       · turnstile      → `solution.token` + `userAgent`
       · recaptcha_v3   → `solution.gRecaptchaResponse` + `userAgent`
+    v6.2 起还支持嫁接层（`mc_type != ""`）：hCaptcha / reCAPTCHA v2 在生态里都叫
+    `gRecaptchaResponse`；cookie 类（DataDome/PerimeterX/Akamai/AWS/Clearance）放
+    `cookies`；Arkose FunCaptcha 用 `token`。
     """
+    if mc_type:
+        return _solution_from_mc_result(mc_type, result)
     ua = str(result.get("user_agent") or "")
     token = str(result.get(RESULT_FIELD.get(want, "token")) or "")
     if want is Want.CLEARANCE:
@@ -179,6 +290,33 @@ def solution_from_result(want: Want, result: dict) -> dict:
     if want is Want.RECAPTCHA_V3:
         return {"gRecaptchaResponse": token, "userAgent": ua}
     return {"token": token, "userAgent": ua}
+
+
+#: 嫁接层各类型的产物字段 → YesCaptcha `solution` 的字段名。
+#: 依据：hCaptcha / reCAPTCHA 在生态里统一叫 `gRecaptchaResponse`（实测 ohmycaptcha
+#: 也是这么返回的），Arkose 用 `token`，cookie 类统一进 `cookies`。
+_MC_TOKEN_AS_GRECAPTCHA = frozenset({"recaptcha_x", "hcaptcha"})
+_MC_COOKIE_TYPES = frozenset({"cloudflare_x", "awswaf_x", "datadome", "perimeterx", "akamai"})
+
+
+def _solution_from_mc_result(mc_type: str, result: dict) -> dict:
+    ua = str(result.get("user_agent") or "")
+    token = result.get("token")
+    if isinstance(token, dict):        # aliyun 的 token 是 {certifyId, deviceToken, data}
+        return {"token": token, "userAgent": ua}
+    if mc_type in _MC_COOKIE_TYPES:
+        cookies = result.get("cookies")
+        if not isinstance(cookies, dict) or not cookies:
+            # 有的求解器只在顶层给单个 cookie（cf_clearance / _px3 / datadome …）
+            cookies = {}
+            for key, value in result.items():
+                if isinstance(value, str) and value and key in (
+                        "cf_clearance", "_px3", "_abck", "datadome", "aws-waf-token"):
+                    cookies[key] = value
+        return {"cookies": dict(cookies), "userAgent": ua}
+    if mc_type in _MC_TOKEN_AS_GRECAPTCHA:
+        return {"gRecaptchaResponse": str(token or ""), "userAgent": ua}
+    return {"token": str(token or ""), "userAgent": ua}
 
 
 @dataclass
@@ -256,7 +394,7 @@ class TaskRegistry:
     def result(self, task_id: str) -> CompatTask:
         """查任务。不存在/已过期 → `ERROR_TASK_ID_INVALID`。"""
         if not isinstance(task_id, str) or not task_id:
-            raise CompatError(ERR_PARAM, "taskId 必须是非空字符串")
+            raise CompatError(ERR_PROPERTY_EMPTY, "taskId 必须是非空字符串")
         with self._lock:
             self._purge_locked()
             record = self._tasks.get(task_id)
@@ -325,20 +463,25 @@ class TaskRegistry:
 
     def _run_inner(self, record: CompatTask) -> None:
         spec = record.spec
-        try:
-            result = self._solver.solve(
-                spec.url,
-                timeout=COMPAT_SOLVE_TIMEOUT,
-                force=False,
-                want=spec.want_value,
-                sitekey=spec.sitekey,
-                action=spec.action,
-                cdata=spec.cdata,
-            )
-        except SolveError as e:
-            code = COMPAT_ERROR_BY_CODE.get(e.code, "ERROR_INTERNAL")
-            self._finish(record, error_code=code, error_description=e.message)
-            return
+        if spec.mc_type:
+            result = self._run_mc(spec, record)
+            if result is None:      # 已在本方法内写成失败，直接返回
+                return
+        else:
+            try:
+                result = self._solver.solve(
+                    spec.url,
+                    timeout=COMPAT_SOLVE_TIMEOUT,
+                    force=False,
+                    want=spec.want_value,
+                    sitekey=spec.sitekey,
+                    action=spec.action,
+                    cdata=spec.cdata,
+                )
+            except SolveError as e:
+                code = COMPAT_ERROR_BY_CODE.get(e.code, "ERROR_INTERNAL")
+                self._finish(record, error_code=code, error_description=e.message)
+                return
 
         if not isinstance(result, dict):
             raise TypeError(f"solver.solve 返回了 {type(result).__name__}，不是 dict")
@@ -349,7 +492,44 @@ class TaskRegistry:
                 error_description=str(result.get("error") or result.get("error_code") or "求解失败"),
             )
             return
-        self._finish(record, solution=solution_from_result(spec.want, result))
+        self._finish(record, solution=solution_from_result(spec.want, result, spec.mc_type))
+
+    def _run_mc(self, spec: CompatSpec, record: CompatTask) -> dict | None:
+        """嫁接层求解（captchas/）。失败已写成结果时返回 None。
+
+        为什么要 `asyncio.run`：`multicaptcha.solve_async` 是 async 的，而兼容任务是
+        **每个任务一个线程**（见 `create`），在自己的线程里开新事件循环最省事，
+        也不会与主 worker 线程的任何循环冲突。`loop_lock` 已覆盖跨循环安全。
+        """
+        import asyncio as _asyncio
+
+        try:
+            from . import multicaptcha as mc
+        except ImportError:      # 直接以脚本运行
+            import multicaptcha as mc  # type: ignore[no-redef]
+        body = {
+            "type": spec.mc_type,
+            "url": spec.url,
+            "sitekey": spec.sitekey,
+            "action": spec.action,
+            **spec.mc_extra,
+        }
+        # 出口粘性：与 /solve 旁路同一规则（cookie 类产物绑 IP）
+        try:
+            entry = self._solver._entry_for(_host_of(spec.url)) if spec.url else None
+        except Exception:        # noqa: BLE001 —— 取不到出口不是失败，只是没有粘性
+            entry = None
+        if entry is not None and not body.get("proxy"):
+            body["proxy"] = entry.raw_url
+        try:
+            result = _asyncio.run(mc.solve_async(body, timeout_s=COMPAT_SOLVE_TIMEOUT))
+        except SolveError as e:
+            code = COMPAT_ERROR_BY_CODE.get(e.code, "ERROR_INTERNAL")
+            self._finish(record, error_code=code, error_description=e.message)
+            return None
+        if entry is not None and isinstance(result, dict):
+            result.setdefault("egress_id", entry.egress_id)
+        return result
 
     def _finish(self, record: CompatTask, *, solution: dict | None = None,
                 error_code: str = "", error_description: str = "") -> None:

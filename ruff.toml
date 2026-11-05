@@ -8,3 +8,7 @@ target-version = "py311"
 
 [lint]
 select = ["E", "F"]
+
+# 万盾嫁接层（captchas/）是上游副本，不做本仓库风格统一：
+# 改它只为修 bug / 适配，不为"行宽好看"制造与上游的无意义 diff（同步成本）。
+exclude = ["captchas"]

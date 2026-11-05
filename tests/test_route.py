@@ -43,6 +43,7 @@ def detect_payload(providers=(), ctype=None, protected=True, status=403):
 CF = {"id": "detect-cloudflare", "name": "Cloudflare Bot Management"}
 DATADOME = {"id": "detect-datadome", "name": "DataDome"}
 AWSWAF = {"id": "detect-aws-waf", "name": "AWS WAF"}
+KASADA = {"id": "detect-kasada", "name": "Kasada"}
 
 
 # ── 1. 纯函数：决策表 ───────────────────────────────
@@ -69,11 +70,20 @@ def test_auto_prefers_browser_for_jsd_variant():
 
 
 def test_auto_rejects_unsupported_provider():
-    d = rt.decide(detect_payload([DATADOME]), "auto")
+    """Kasada 没有对应求解器（captchas/ 也不覆盖）→ 必须明确拒绝，不白等。"""
+    d = rt.decide(detect_payload([KASADA]), "auto")
     assert d.action == rt.ACTION_REJECT
     assert d.reason == "unsupported-provider"
-    assert "DataDome" in d.hint, "拒绝时必须说清是哪个厂商，否则运维没法判断要不要加支持"
-    assert d.detail["unsupported"] == ["detect-datadome"]
+    assert "Kasada" in d.hint, "拒绝时必须说清是哪个厂商，否则运维没法判断要不要加支持"
+    assert d.detail["unsupported"] == ["detect-kasada"]
+
+
+def test_auto_dispatches_datadome_to_multicaptcha():
+    """v6.1：DataDome 已由 captchas/ 承接 → 求解并自动选 want=datadome。"""
+    d = rt.decide(detect_payload([DATADOME]), "auto")
+    assert d.action == rt.ACTION_SOLVE
+    assert d.prefer == "multicaptcha"
+    assert d.detail["multicaptcha_want"] == "datadome"
 
 
 def test_auto_solves_aws_waf_with_browser():
@@ -83,9 +93,16 @@ def test_auto_solves_aws_waf_with_browser():
 
 
 def test_auto_mixed_providers_rejects_when_any_is_unsupported():
-    """一页同时命中 CF 与 DataDome：只要有一个我们不会，就不要硬试（会白等一整个超时）。"""
-    d = rt.decide(detect_payload([CF, DATADOME], "managed"), "auto")
+    """一页同时命中 CF 与 Kasada：只要有一个我们不会，就不要硬试（会白等一整个超时）。"""
+    d = rt.decide(detect_payload([CF, KASADA], "managed"), "auto")
     assert d.action == rt.ACTION_REJECT
+
+
+def test_auto_cf_and_solvable_multicaptcha_prefers_cf():
+    """CF 与万盾同时在场且都**能解**：走 CF 主链路（主线优先，绝不被动摇）。"""
+    d = rt.decide(detect_payload([CF, DATADOME], "managed"), "auto")
+    assert d.action == rt.ACTION_SOLVE
+    assert d.reason.startswith("cloudflare-")
 
 
 def test_auto_without_detect_degrades_to_solve():
@@ -195,7 +212,7 @@ def test_http_auto_skips_browser_for_unprotected_site(live_service, monkeypatch)
 def test_http_auto_rejects_unsupported_provider_without_waiting(live_service, monkeypatch):
     base, solver = live_service
     monkeypatch.setattr(svc, "probe_protection",
-                        lambda url, timeout=15.0, guard=None: detect_payload([DATADOME]))
+                        lambda url, timeout=15.0, guard=None: detect_payload([KASADA]))
     status, body = _post(base, {"url": HOST, "route": "auto"})
     assert status == 200 and body["ok"] is False
     assert body["error_code"] == "unsolved" and body["stage"] == "detect"

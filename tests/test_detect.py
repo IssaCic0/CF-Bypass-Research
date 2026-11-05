@@ -109,9 +109,11 @@ def test_recommend_awswaf_want():
     assert rec["route"] == "browser_cookie" and rec["want"] == "awswaf"
 
 
-def test_recommend_unsupported_for_third_party():
+def test_recommend_multicaptcha_for_third_party():
+    """v6.1：Akamai 等万盾厂商由 captchas/ 承接 → 必须给出可执行的 want，而不是 unsupported。"""
     rec = detect.recommend(_hits(status=200, cookies={"_abck": "x"}))
-    assert rec["route"] == "unsupported_or_browser"
+    assert rec["route"] == "multicaptcha"
+    assert rec["want"] == "akamai"
     assert "Akamai" in rec["reason"]
 
 

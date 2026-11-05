@@ -22,10 +22,12 @@ from solver.compat import (
     ERR_KEY,
     ERR_NO_SLOT,
     ERR_PARAM,
+    ERR_PROPERTY_EMPTY,
     ERR_PROXY,
     ERR_TASK_ID,
     ERR_TYPE,
     ERR_UNSOLVABLE,
+    MC_TASK_TYPE_MAP,
     TASK_TYPE_MAP,
     CompatError,
     CompatTask,
@@ -33,6 +35,7 @@ from solver.compat import (
     solution_from_result,
     spec_from_task,
 )
+from solver import multicaptcha
 from solver.challenges import Want
 from solver.errors import ErrorCode, SolveError
 from test_service import _post, live_server, wait_until  # noqa: F401 —— fixture 需被收集
@@ -41,16 +44,33 @@ from test_service import _post, live_server, wait_until  # noqa: F401 —— fix
 # ─────────────────────────────────────────── 1. 纯函数：type → want
 
 
-def test_supported_task_types_are_exactly_three():
-    """刻意只做 3 种。这条用例是"契约边界"的守门人：加类型必须同步改文档与用例。"""
-    assert set(TASK_TYPE_MAP) == {
-        "AntiCloudflareTask",
-        "TurnstileTaskProxyless",
-        "RecaptchaV3TaskProxyless",
-    }
+def test_main_chain_task_type_map_is_exact():
+    """主链路表是"契约边界"的守门人：加类型必须同步改文档与用例。"""
     assert TASK_TYPE_MAP["AntiCloudflareTask"] is Want.CLEARANCE
     assert TASK_TYPE_MAP["TurnstileTaskProxyless"] is Want.TURNSTILE
     assert TASK_TYPE_MAP["RecaptchaV3TaskProxyless"] is Want.RECAPTCHA_V3
+    # M1 等变体是上游模型变体，对我们是同一件事
+    assert TASK_TYPE_MAP["TurnstileTaskProxylessM1"] is Want.TURNSTILE
+
+
+def test_multicaptcha_task_type_map_covers_graft_vendors():
+    """v6.2：11 厂商通过兼容层命名族接入（嫁接层路径）。"""
+    assert MC_TASK_TYPE_MAP["HCaptchaTaskProxyless"] == "hcaptcha"
+    assert MC_TASK_TYPE_MAP["DataDomeTaskProxyless"] == "datadome"
+    assert MC_TASK_TYPE_MAP["PerimeterXTaskProxyless"] == "perimeterx"
+    assert MC_TASK_TYPE_MAP["AkamaiTaskProxyless"] == "akamai"
+    assert MC_TASK_TYPE_MAP["FunCaptchaTaskProxyless"] == "arkose"
+    for mc_type in MC_TASK_TYPE_MAP.values():
+        assert mc_type in multicaptcha.CAPTCHA_TYPES, f"{mc_type} 不在嫁接层注册表"
+
+
+def test_mc_task_spec_carries_no_main_chain_want():
+    """两条路径绝不混淆：嫁接层 spec 的 want 必须为 None（否则会走错执行分支）。"""
+    spec = spec_from_task({"type": "HCaptchaTaskProxyless",
+                           "websiteURL": "https://e.com/", "websiteKey": "k"})
+    assert spec.want is None
+    assert spec.mc_type == "hcaptcha"
+    assert spec.want_value == "hcaptcha"
 
 
 def test_clearance_task_needs_only_url():
@@ -86,22 +106,25 @@ def test_unknown_type_lists_supported_ones():
 
 @pytest.mark.parametrize("task", [None, [], "str", 42])
 def test_task_must_be_object(task):
+    """v6.2：对齐生态后，'对象缺失'归 ERROR_TASK_PROPERTY_EMPTY（不再是自造码）。"""
     with pytest.raises(CompatError) as ei:
         spec_from_task(task)
-    assert ei.value.error_code == ERR_PARAM
+    assert ei.value.error_code == ERR_PROPERTY_EMPTY
 
 
-@pytest.mark.parametrize("payload", [
-    {"type": "AntiCloudflareTask"},                                  # 缺 websiteURL
-    {"type": "AntiCloudflareTask", "websiteURL": ""},                 # 空 url
-    {"type": "AntiCloudflareTask", "websiteURL": "e.com"},            # 无 scheme
-    {"type": "TurnstileTaskProxyless", "websiteURL": "https://e/"},    # 缺 websiteKey
-    {"type": "", "websiteURL": "https://e.com/"},                     # 空 type
+@pytest.mark.parametrize(("payload", "code"), [
+    ({"type": "AntiCloudflareTask"}, ERR_PROPERTY_EMPTY),                 # 缺 websiteURL
+    ({"type": "AntiCloudflareTask", "websiteURL": ""}, ERR_PROPERTY_EMPTY),  # 空 url
+    ({"type": "AntiCloudflareTask", "websiteURL": "e.com"}, ERR_PARAM),   # 无 scheme（值非法）
+    ({"type": "TurnstileTaskProxyless", "websiteURL": "https://e/"}, ERR_PROPERTY_EMPTY),
+    ({"type": "", "websiteURL": "https://e.com/"}, ERR_PROPERTY_EMPTY),   # 空 type
 ])
-def test_param_errors(payload):
+def test_param_errors(payload, code):
+    """缺失/为空 → 生态码 PROPERTY_EMPTY；值非法 → 我们的扩展码 PARAM_INVALID。
+    这条区分很重要：客户端对前者应当"补齐重发"，对后者应当"改值再说"。"""
     with pytest.raises(CompatError) as ei:
         spec_from_task(payload)
-    assert ei.value.error_code == ERR_PARAM
+    assert ei.value.error_code == code
 
 
 @pytest.mark.parametrize("field_name", ["proxyType", "proxyAddress", "proxyPort", "proxyLogin", "proxyPassword"])
@@ -454,3 +477,245 @@ def test_sitekey_length_is_capped_like_solve():
                         "websiteURL": "https://e.com/", "websiteKey": long_key})
     assert ei.value.error_code == ERR_PARAM
     assert "websiteKey" in ei.value.description
+
+
+# ── v6.2：生态错误码对齐 ────────────────────────────
+
+
+def test_error_codes_match_yescaptcha_vocabulary():
+    """兼容层的错误码必须是生态的真实词表。
+
+    为什么单独立一条：v5 用的是自造词（ERROR_TASK_TYPE_NOT_SUPPORTED 等），
+    按 YesCaptcha 协议写死的客户端是按 errorCode 分支的 —— 词不对，错误处理全落 default。
+    """
+    assert ERR_TYPE == "ERROR_TASK_NOT_SUPPORTED"
+    assert ERR_PROPERTY_EMPTY == "ERROR_TASK_PROPERTY_EMPTY"
+    assert ERR_TASK_ID == "ERROR_NO_SUCH_CAPCHA_ID"     # 生态里就是这个拼写
+    assert ERR_KEY == "ERROR_KEY_DOES_NOT_EXIST"
+    assert ERR_UNSOLVABLE == "ERROR_CAPTCHA_UNSOLVABLE"
+    assert ERR_NO_SLOT == "ERROR_NO_SLOT_AVAILABLE"
+
+
+def test_unsupported_type_says_why():
+    """解不了的类型必须说清原因，而不是笼统的 not supported。"""
+    with pytest.raises(CompatError) as ei:
+        spec_from_task({"type": "ImageToTextTask", "websiteURL": "https://e.com/"})
+    assert ei.value.error_code == ERR_TYPE
+    assert "视觉模型" in ei.value.description
+
+
+# ── v6.2：嫁接层路径 ────────────────────────────────
+
+
+def test_solution_mapping_for_graft_types():
+    """生态字段约定：hCaptcha/reCAPTCHA → gRecaptchaResponse；cookie 类 → cookies。"""
+    assert solution_from_result(None, {"token": "T"}, "hcaptcha")["gRecaptchaResponse"] == "T"
+    assert solution_from_result(None, {"token": "T"}, "recaptcha_x")["gRecaptchaResponse"] == "T"
+    assert solution_from_result(None, {"token": "T"}, "arkose")["token"] == "T"
+    cookies = solution_from_result(
+        None, {"cookies": {"datadome": "c"}}, "datadome")["cookies"]
+    assert cookies == {"datadome": "c"}
+    # 有的求解器只在顶层给单个 cookie
+    top = solution_from_result(None, {"cf_clearance": "abc"}, "cloudflare_x")["cookies"]
+    assert top == {"cf_clearance": "abc"}
+
+
+def test_registry_runs_mc_task(monkeypatch, tmp_path):
+    """端到端（假求解器）：createTask → 嫁接层求解 → getTaskResult 拿 solution。"""
+    from solver import multicaptcha as mc
+
+
+    async def fake(*a, **k):
+        return {"token": "HCAPTOKEN", "user_agent": "UA"}
+
+    # 用假模块替掉 hcaptcha 求解器（无需 cloakbrowser）
+    import types as _types
+    mod = _types.ModuleType("hcaptcha.solve")
+    mod.solve_hcaptcha = fake
+    mod.solve_hcaptcha_invisible = fake
+    monkeypatch.setitem(__import__("sys").modules, "hcaptcha.solve", mod)
+    monkeypatch.setattr(mc, "_TIMEOUT_GRACE", 5.0)
+
+    class _S:
+        def _entry_for(self, host): return None
+        def solve(self, *a, **k):  # pragma: no cover - 不该走主链路
+            raise AssertionError("mc 任务不该走主链路")
+
+    reg = TaskRegistry(_S(), ttl=60)
+    task = reg.create({"type": "HCaptchaTaskProxyless",
+                       "websiteURL": "https://e.com/", "websiteKey": "k"})
+    wait_until(lambda: reg.result(task.task_id).status == "ready", timeout=15)
+    payload = reg.result(task.task_id).result_payload()
+    assert payload["solution"]["gRecaptchaResponse"] == "HCAPTOKEN"
+
+
+# ── v6.2：嫁接层分支的边界 ──────────────────────────
+
+
+@pytest.mark.parametrize("type_", ["HCaptchaTaskProxyless", "RecaptchaV2TaskProxyless",
+                                   "CloudflareTurnstileTaskProxyless"])
+def test_mc_types_require_sitekey(type_):
+    with pytest.raises(CompatError) as ei:
+        spec_from_task({"type": type_, "websiteURL": "https://e.com/"})
+    assert ei.value.error_code == ERR_PROPERTY_EMPTY
+
+
+def test_mc_recaptcha_version_selection():
+    """v2 / Enterprise / 默认 v3 的选择由 task.type 决定，不能靠猜。"""
+    v2 = spec_from_task({"type": "RecaptchaV2TaskProxyless",
+                         "websiteURL": "https://e.com/", "websiteKey": "k"})
+    assert v2.mc_extra == {"version": "v2"}
+    ent = spec_from_task({"type": "RecaptchaV2EnterpriseTaskProxyless",
+                          "websiteURL": "https://e.com/", "websiteKey": "k"})
+    assert ent.mc_extra == {"enterprise": True, "version": "v2"}
+    v3e = spec_from_task({"type": "RecaptchaV3EnterpriseTask",
+                          "websiteURL": "https://e.com/", "websiteKey": "k"})
+    assert v3e.mc_extra == {"enterprise": True, "version": "v3"}
+
+
+def test_mc_extra_fields_passthrough():
+    dd = spec_from_task({"type": "DataDomeTaskProxyless", "websiteURL": "https://e.com/",
+                         "referer": "https://ref.test/"})
+    assert dd.mc_extra == {"referer": "https://ref.test/"}
+    px = spec_from_task({"type": "PerimeterXTaskProxyless", "websiteURL": "https://e.com/",
+                         "render_flow": "outlook_signup"})
+    assert px.mc_extra == {"render_flow": "outlook_signup"}
+    ark = spec_from_task({"type": "FunCaptchaTaskProxyless", "websiteURL": "https://e.com/",
+                          "public_key": "pk"})
+    assert ark.mc_extra == {"public_key": "pk"}
+    assert ark.sitekey == "pk"
+
+
+def test_result_payload_for_mc_alias_token():
+    """部分类型的 token 是 dict（aliyun 的 certifyId/deviceToken），必须原样透传。"""
+    sol = solution_from_result(None, {"token": {"certifyId": "c", "deviceToken": "d"}}, "aliyun")
+    assert sol["token"] == {"certifyId": "c", "deviceToken": "d"}
+
+
+def test_result_id_must_be_non_empty():
+    class _S:
+        def _entry_for(self, host): return None
+        def solve(self, *a, **k):  # pragma: no cover
+            raise AssertionError
+    reg = TaskRegistry(_S())
+    with pytest.raises(CompatError) as ei:
+        reg.result("")
+    assert ei.value.error_code == ERR_PROPERTY_EMPTY
+
+
+def test_mc_timeout_maps_to_ecosystem_code(monkeypatch):
+    """嫁接层求解报错 → 兼容层错误码必须是生态词表（不是内部 ErrorCode）。"""
+
+    from solver import multicaptcha as mc
+    from solver.errors import ErrorCode, SolveError
+
+    async def boom(*a, **k):
+        raise SolveError(ErrorCode.NOT_CONFIGURED, "缺 cloakbrowser", stage="admit")
+
+    import types as _types
+    mod = _types.ModuleType("hcaptcha.solve")
+    mod.solve_hcaptcha = boom
+    mod.solve_hcaptcha_invisible = boom
+    monkeypatch.setitem(__import__("sys").modules, "hcaptcha.solve", mod)
+    monkeypatch.setattr(mc, "_TIMEOUT_GRACE", 3.0)
+
+    class _S:
+        def _entry_for(self, host): return None
+        def solve(self, *a, **k):  # pragma: no cover
+            raise AssertionError("不该走主链路")
+
+    reg = TaskRegistry(_S(), ttl=60)
+    task = reg.create({"type": "HCaptchaTaskProxyless",
+                       "websiteURL": "https://e.com/", "websiteKey": "k"})
+    wait_until(lambda: reg.result(task.task_id).status == "ready", timeout=15)
+    payload = reg.result(task.task_id).result_payload()
+    assert payload["errorCode"] == "ERROR_INTERNAL"      # NOT_CONFIGURED → ERROR_INTERNAL
+
+
+def test_action_too_long_rejected():
+    """超长 action 走的是"值非法"码（不是"缺失"）。"""
+    with pytest.raises(CompatError) as ei:
+        spec_from_task({"type": "TurnstileTaskProxyless", "websiteURL": "https://e.com/",
+                        "websiteKey": "k", "action": "x" * 300})
+    assert ei.value.error_code == ERR_PARAM
+
+
+def test_mc_path_uses_sticky_egress(monkeypatch):
+    """嫁接层路径同样要粘出口：cookie 类产物绑 IP（与 /solve 旁路同一规则）。"""
+    import types as _types
+    from solver import multicaptcha as mc
+
+    seen = {}
+
+    async def fake(*a, **k):
+        seen["proxy"] = k.get("proxy") or ""
+        return {"success": True, "user_agent": "UA"}
+
+    mod = _types.ModuleType("datadome.solve")
+    mod.solve_datadome = fake
+    monkeypatch.setitem(__import__("sys").modules, "datadome.solve", mod)
+    monkeypatch.setattr(mc, "_TIMEOUT_GRACE", 3.0)
+
+    class _Entry:
+        raw_url = "http://u:p@10.1.1.1:3128"
+        egress_id = "ip:10.1.1.1"
+
+    class _S:
+        def _entry_for(self, host): return _Entry()
+        def solve(self, *a, **k):  # pragma: no cover
+            raise AssertionError
+
+    reg = TaskRegistry(_S(), ttl=60)
+    task = reg.create({"type": "DataDomeTaskProxyless", "websiteURL": "https://e.com/"})
+    wait_until(lambda: reg.result(task.task_id).status == "ready", timeout=15)
+    payload = reg.result(task.task_id).result_payload()
+    assert "10.1.1.1" in seen["proxy"], f"没用粘性出口：{seen}"
+    assert payload["solution"]["cookies"] == {} or isinstance(payload["solution"]["cookies"], dict)
+
+
+def test_mc_path_tolerates_egress_lookup_failure(monkeypatch):
+    """取出口失败不能让任务直接失败 —— 只是没有粘性而已。"""
+    import types as _types
+    from solver import multicaptcha as mc
+
+    async def fake(*a, **k):
+        return {"token": "T"}
+
+    mod = _types.ModuleType("hcaptcha.solve")
+    mod.solve_hcaptcha = fake
+    mod.solve_hcaptcha_invisible = fake
+    monkeypatch.setitem(__import__("sys").modules, "hcaptcha.solve", mod)
+    monkeypatch.setattr(mc, "_TIMEOUT_GRACE", 3.0)
+
+    class _S:
+        def _entry_for(self, host):
+            raise RuntimeError("pool broken")
+        def solve(self, *a, **k):  # pragma: no cover
+            raise AssertionError
+
+    reg = TaskRegistry(_S(), ttl=60)
+    task = reg.create({"type": "HCaptchaTaskProxyless",
+                       "websiteURL": "https://e.com/", "websiteKey": "k"})
+    wait_until(lambda: reg.result(task.task_id).status == "ready", timeout=15)
+    assert reg.result(task.task_id).result_payload()["solution"]["gRecaptchaResponse"] == "T"
+
+
+def test_task_type_catalog_is_consistent():
+    """三张表必须互不重叠、且覆盖生态 19 种命名族（v6.2 的对外承诺）。"""
+    from solver.compat import UNSUPPORTED_TASK_TYPES
+    all_types = list(TASK_TYPE_MAP) + list(MC_TASK_TYPE_MAP) + list(UNSUPPORTED_TASK_TYPES)
+    assert len(all_types) == len(set(all_types)), "同一 task.type 出现在多张表里"
+    # ohmycaptcha / 生态的 19 种命名族必须都能被明确答复（doing 或 not-support）
+    eco19 = {
+        "RecaptchaV3TaskProxyless", "RecaptchaV3TaskProxylessM1",
+        "RecaptchaV3TaskProxylessM1S7", "RecaptchaV3TaskProxylessM1S9",
+        "RecaptchaV3EnterpriseTask", "RecaptchaV3EnterpriseTaskM1",
+        "NoCaptchaTaskProxyless", "RecaptchaV2TaskProxyless",
+        "RecaptchaV2EnterpriseTaskProxyless", "HCaptchaTaskProxyless",
+        "TurnstileTaskProxyless", "TurnstileTaskProxylessM1",
+        "ImageToTextTask", "ImageToTextTaskMuggle", "ImageToTextTaskM1",
+        "HCaptchaClassification", "ReCaptchaV2Classification",
+        "FunCaptchaClassification", "AwsClassification",
+    }
+    missing = eco19 - set(all_types)
+    assert not missing, f"生态 19 种里这些没有明确答复：{sorted(missing)}"

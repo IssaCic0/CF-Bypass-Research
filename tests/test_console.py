@@ -111,3 +111,49 @@ def test_console_no_external_resources():
     html = console_html.CONSOLE_PAGE_HTML
     assert not re.search(r'(src|href)\s*=\s*["\'](https?:)?//', html)
     assert "<link" not in html.lower() or 'rel="stylesheet" href="/' not in html.lower()
+
+
+# ── v6.2 回归：wedged 必须被 console 正确识别 ──────────
+
+
+def test_console_recognises_wedged_state():
+    """回归（真 Chrome 实测缺陷）：wedged 时 /health 返回 503，
+    console 原来把它一律当"异常/down"，丢掉了 wedged 语义与"需要重启"的处置提示。
+
+    现在要求：只要响应体带 state 就按 state 渲染；wedged 要有专属徽章与横幅。
+    """
+    from solver.console_html import CONSOLE_PAGE_HTML
+    assert ".badge.wedged" in CONSOLE_PAGE_HTML
+    assert "wedged_reason" in CONSOLE_PAGE_HTML
+    assert "退出码 75" in CONSOLE_PAGE_HTML
+    # 关键：不能"设了横幅又立刻清空"
+    import re
+    seg = CONSOLE_PAGE_HTML[CONSOLE_PAGE_HTML.find("function refresh"):]
+    seg = seg[:seg.find("function ")] if seg.find("function ", 10) > 0 else seg
+    # wedged 分支在 setBanner("") 之前、且 setBanner("") 只在 else 分支里
+    idx_wedged = CONSOLE_PAGE_HTML.find('st === "wedged"')
+    idx_clear = CONSOLE_PAGE_HTML.find('} else {\n        setBanner("");')
+    assert idx_wedged > 0
+    assert idx_clear > idx_wedged, "setBanner('') 必须在 wedged 分支之外，否则提示被抹掉"
+
+
+def test_console_shows_captcha_types():
+    from solver.console_html import CONSOLE_PAGE_HTML
+    assert "captcha_types" in CONSOLE_PAGE_HTML
+
+
+def test_console_setkv_restores_kv_class():
+    """回归（看截图才发现）：setEmpty 把 class 改成 "empty" 后 setKV 不还原，
+    `display:grid` 失效 → 键值上下堆叠而不是两列并排。"""
+    from solver.console_html import CONSOLE_PAGE_HTML
+    assert 'el.className = "kv"' in CONSOLE_PAGE_HTML
+
+
+def test_console_formats_iso_and_epoch_timestamps():
+    """回归（截图显示 "上次快照 Invalid Date"）：
+    服务端给的是 ISO 字符串，前端按 epoch 秒 `* 1000` 处理 → NaN → Invalid Date。"""
+    from solver.console_html import CONSOLE_PAGE_HTML
+    assert "function _fmtTime" in CONSOLE_PAGE_HTML
+    assert "isNaN(d.getTime())" in CONSOLE_PAGE_HTML
+    # 不能有任何地方还在裸用 * 1000
+    assert "new Date(r.last_snapshot_at * 1000)" not in CONSOLE_PAGE_HTML

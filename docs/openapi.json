@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "CF-Bypass-Research 求解服务",
-    "version": "6.0.1",
+    "version": "6.2.0",
     "description": "Cloudflare `cf_clearance` / Turnstile token / reCAPTCHA v3 / AWS WAF token 的获取与回放服务。\n\n**这份规格是手写的**（本项目不引入 FastAPI/pydantic，见 policy.md 的『零新依赖』），因此必须由 `scripts/validate-openapi.mjs` 反向核对：规格里声明的 `path + method` 必须与 `solver/service.py` 里实际存在的路由**完全一致**，多一个少一个都报错。\n\n约定：\n- 鉴权：`Authorization: Bearer <token>`；`/health` 免鉴权（容器探活）。\n- 错误响应体：2xx 读 `ok`，非 2xx 读 `error_code`（另有 `stage` / `hint` 供自动重试与自助修复）。\n- `POST /shutdown` 额外限制来源必须是回环地址（除非启动时加 `--allow-remote-shutdown`）。"
   },
   "servers": [
@@ -98,9 +98,20 @@
               "clearance",
               "turnstile",
               "recaptcha_v3",
-              "awswaf"
+              "awswaf",
+              "turnstile_x",
+              "recaptcha_x",
+              "hcaptcha",
+              "cloudflare_x",
+              "awswaf_x",
+              "botguard",
+              "datadome",
+              "perimeterx",
+              "akamai",
+              "aliyun",
+              "arkose"
             ],
-            "description": "要哪种凭证；空=clearance（cf_clearance）"
+            "description": "要哪种凭证；空=clearance（cf_clearance） | v6.1 扩展类型（captchas/ 子包，见 docs/API.md 万盾扩展类型一节）：turnstile_x / recaptcha_x / hcaptcha / cloudflare_x / awswaf_x / botguard / datadome / perimeterx / akamai / aliyun / arkose"
           },
           "sitekey": {
             "type": "string",
@@ -310,7 +321,7 @@
         "security": [],
         "responses": {
           "200": {
-            "description": "ready",
+            "description": "ready（浏览器在线、worker 活着）",
             "headers": {
               "X-Request-Id": {
                 "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
@@ -321,7 +332,7 @@
             }
           },
           "503": {
-            "description": "starting / degraded",
+            "description": "starting / degraded / wedged —— wedged = worker 卡死，**不会自愈**，服务模式会以退出码 75 退出交 supervisor 重启",
             "headers": {
               "X-Request-Id": {
                 "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
@@ -623,12 +634,106 @@
         "description": "与 /stats 的差别：这里有 inflight 明细（rid / method / path / elapsed_sec）。响应**刻意不含** last_error、代理地址、UA 指纹等高敏字段。",
         "responses": {
           "200": {
-            "description": "状态 + 在途明细",
+            "description": "服务状态 + 在途明细（含嫁接层在途与卡死快照）",
             "headers": {
               "X-Request-Id": {
                 "description": "请求级追踪标识（v6.0 T-79）。调用方带合法 X-Request-Id 则沿用，否则服务端生成 12 位 hex。",
                 "schema": {
                   "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "state"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "code": {
+                      "type": "integer"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "ready",
+                        "starting",
+                        "degraded",
+                        "wedged"
+                      ]
+                    },
+                    "pid": {
+                      "type": "integer"
+                    },
+                    "backends": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "cache_backend": {
+                      "type": "string"
+                    },
+                    "uptime_sec": {
+                      "type": "number"
+                    },
+                    "queue_depth": {
+                      "type": "integer"
+                    },
+                    "inflight_count": {
+                      "type": "integer"
+                    },
+                    "inflight": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "multicaptcha_inflight": {
+                      "type": "array",
+                      "description": "万盾嫁接层（captchas/）正在跑的求解；与主链路 inflight 分列",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "type": {
+                            "type": "string"
+                          },
+                          "url": {
+                            "type": "string"
+                          },
+                          "started": {
+                            "type": "number"
+                          }
+                        }
+                      }
+                    },
+                    "wedge": {
+                      "type": "object",
+                      "description": "卡死状态快照（v6.2）",
+                      "properties": {
+                        "wedged": {
+                          "type": "boolean"
+                        },
+                        "reason": {
+                          "type": "string"
+                        },
+                        "wedge_restart": {
+                          "type": "boolean"
+                        }
+                      }
+                    },
+                    "events_total": {
+                      "type": "integer"
+                    },
+                    "compat": {
+                      "type": "object"
+                    }
+                  }
                 }
               }
             }

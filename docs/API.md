@@ -34,7 +34,7 @@ $TOKEN = (Select-String -Path .env -Pattern '^CF_SOLVE_TOKEN=(.+)$').Matches[0].
 | `url` | string | 是 | — | 目标绝对地址，必须 `http://` 或 `https://`，≤ 2048 字符 |
 | `timeout` | number | 否 | `45` | 本次求解预算（秒），会被收敛到 **[5, 120]** |
 | `force` | boolean | 否 | `false` | `true` = 忽略服务端域名缓存，强制重新求解 |
-| `want` | string | 否 | `clearance` | 要哪种产物：`clearance`（CF WAF，默认）/ `awswaf` / `turnstile` / `recaptcha_v3` |
+| `want` | string | 否 | `clearance` | 要哪种产物：`clearance`（CF WAF，默认）/ `awswaf` / `turnstile` / `recaptcha_v3`，或**万盾扩展类型**（见下节） |
 | `sitekey` | string | `turnstile`/`recaptcha_v3` 必填 | — | 从页面取：`data-sitekey`，或 reCAPTCHA 的 `api.js?render=<sitekey>` |
 | `action` | string | 否 | — | Turnstile / reCAPTCHA v3 的 action，要**与目标站一致**（不一致拿到的 token 会被判无效） |
 | `cdata` | string | 否 | — | Turnstile 的 customer data（目标站用了就且要一致） |
@@ -50,6 +50,8 @@ $TOKEN = (Select-String -Path .env -Pattern '^CF_SOLVE_TOKEN=(.+)$').Matches[0].
 | Cloudflare `managed`/`jsd` | 照常求解，**纯协议优先**（零浏览器） | 正常成功响应 + `routed_by` |
 | Cloudflare `turnstile`/`recaptcha` | 照常求解，浏览器优先（token 必须在浏览器内取） | 正常成功响应 + `routed_by` |
 | AWS WAF | 照常求解，浏览器优先；要 token 请把 `want` 设为 `awswaf` | 正常成功响应 + `routed_by` |
+| 万盾厂商（DataDome / PerimeterX / Akamai / Arkose / hCaptcha / reCAPTCHA） | **自动分发**到 `captchas/`（`routed_by.reason=multicaptcha`，`detail.multicaptcha_want` 指明选了哪个 want） | 与显式传该 want 相同 |
+| 无求解器的防护（Kasada / Incapsula / Shape…） | 明确拒绝（`unsolved` + `stage=detect`），不白等一个超时 | 错误响应 + `routed_by.unsupported` |
 | 其它厂商（DataDome / PerimeterX / Kasada …） | **直接拒绝**：`200 {"ok":false,"error_code":"unsolved","stage":"detect"}`，不白等一整个超时 | 带 `routed_by.detail.unsupported` |
 | 探测失败 / 闸门满 | 退回 `fixed`，照常求解 | 正常成功响应 + `routed_by.reason="detect-unavailable"` |
 
@@ -116,6 +118,48 @@ $TOKEN = (Select-String -Path .env -Pattern '^CF_SOLVE_TOKEN=(.+)$').Matches[0].
 
 一次性 token 的 `cacheable` 恒为 `false`、`cached` 恒为 `false`（复用必然失败，所以设计上不缓存）。
 
+#### 万盾扩展类型（v6.1 嫁接层）
+
+除上表四类 CF/AWS 产型外，`want` 还接受 11 种**扩展类型**，由 `captchas/` 子包承接
+（自带 `common/`，与上游 `captcha-solver` 解耦，是我们自己的副本）。
+命中这些值时**完全不进主链路**：不查缓存、不建浏览器、不走后端回落链，
+响应里的 `routed_by.backend` 恒为 `"captchas"`。
+
+| `want` | 厂商 / 产物 | 额外必填 | 说明 |
+|---|---|---|---|
+| `turnstile_x` | Turnstile widget → `token` | `sitekey` + `url` | 与主链路 `turnstile` 是**两套实现**；CF 站请用主链路 |
+| `recaptcha_x` | reCAPTCHA v2/v3/invisible → `token` | `sitekey` + `url` | `version`：`v2`（默认）/`v3`/`invisible`；可加 `enterprise`、`secret`、`classifier` |
+| `hcaptcha` | hCaptcha → `token` | `sitekey` + `url` | `action:"invisible"` 走 execute 路径 |
+| `cloudflare_x` | `cf_clearance` | `url` | 另一套 CF 实现（route 拦截）；**常规用途请用主链路 `clearance`** |
+| `awswaf_x` | `aws-waf-token` | `url` | 另一套 AWS WAF 实现；常规用途用主链路 `awswaf` |
+| `botguard` | Google OAuth `bgRequest` token | — | 可选 `email`/`password`；URL 有默认值 |
+| `datadome` | `datadome` clearance cookie | `url` | 可选 `referer`（让 DataDome 看到与真实流程一致的 framing） |
+| `perimeterx` | `_px3` cookie | — | 可选 `render_flow`（默认 `outlook_signup`）触发 press-hold 闸门 |
+| `akamai` | `_abck` cookie | `url` | 走 `bmak` 遥测 sensor |
+| `aliyun` | `{sceneId, certifyId, deviceToken, data}` | `scene_id` + `prefix` | 拖动轨迹时序敏感，**强制子进程**执行（实测主线程以外 0/12） |
+| `arkose` | `fc_token` | `public_key` | FunCaptcha 视觉拼图，ONNX 分类；可选 `game_type`（默认 `4`） |
+
+共同契约：
+
+- **成功信号统一**：所有类型都归一成顶层 `solved` bool（`token` / `cf_clearance` /
+  `verify_success` / `success` 任一为真即可）。读 `solved`，不要按类型分支。
+- **错误契约与主链路一致**：跑了没解出来 → `200` + `solved:false` + `error`；
+  参数错 → `400`；超时 → 该类型自己的 deadline 到点后 `200` + `solved:false`。
+- **不缓存、不 prewarm**：扩展类型全部一次性/会话级产物，`route=auto` 命中万盾厂商时
+  会直接分发（见下），但不会写域名缓存。
+- **依赖**：需要 `cloakbrowser`（`pip install cloakbrowser`，自托管反检测 Chromium）。
+  未安装时该类型报依赖错误，主链路不受影响。
+- `real_page` / `pre_actions` / `post_fetch` 对支持它们的类型（turnstile_x/recaptcha_x/
+  hcaptcha/cloudflare_x/awswaf_x/akamai）可用，语义与主链路一致。
+
+- **出口粘性（cookie 类必读）**：`cloudflare_x` / `awswaf_x` / `datadome` / `perimeterx` /
+  `akamai` 的产物**绑出口 IP**。服务端在调用方未显式给 `proxy` 时，会沿用主链路为该域
+  粘住的出口（代理池），并在响应里回传 `egress_id`。**客户端回放必须走同一出口**，
+  否则 cookie 立刻失效（表现为静默 403）。
+- `proxy` 字段是**调用方可信输入**：引擎会用你给的代理去连目标站。服务本身要求 Bearer
+  token，非可信调用方不应暴露；它也能让你把浏览器指到任意 `host:port`（含内网代理）。
+  这一点与主链路的 `--proxy` 配置不同（后者只来自服务端配置）。
+
 后端优先级（配置了多个时）：**`cfsolve`（纯协议）→ 本地浏览器 → `flaresolverr`**，
 失败会自动回落并在 `attempts` 里留下每一跳的原因。
 
@@ -174,11 +218,13 @@ curl -s -X POST http://127.0.0.1:8878/solve \
 
 ## GET /health — 公开，不需要 token
 
-用于容器健康检查与运维判断。**语义是三态**，不是恒 200：
+用于容器健康检查与运维判断。**语义是四态**，不是恒 200：
 
 - `200` + `state: ready` —— 浏览器在线、worker 线程活着
 - `503` + `state: starting` —— 首次启动中（浏览器还没起来）
 - `503` + `state: degraded` —— 曾经好过，现在挂了；`last_error` 说明原因。worker 会指数退避自愈
+- `503` + `state: wedged` —— **v6.2**：worker 卡死（任务超预算 + 宽限仍未返回）。**不会自愈**，
+  附带 `wedged_reason` 与 `wedge_restart`；服务模式下进程会以退出码 75 退出交 supervisor 拉起
 
 ### 两级视图（**免鉴权只给最小集**）
 
@@ -201,6 +247,9 @@ curl -s -X POST http://127.0.0.1:8878/solve \
   "worker_alive": true,
   "browser": "camoufox",
   "backends": ["cfsolve", "camoufox"],
+  "captcha_types": ["akamai", "aliyun", "arkose", "awswaf_x", "botguard",
+                    "cloudflare_x", "datadome", "hcaptcha", "perimeterx",
+                    "recaptcha_x", "turnstile_x"],
   "egress_id": "default",
   "cache_backend": "sqlite:/var/lib/cfsolve/cache",
   "browser_os": "windows",
@@ -244,6 +293,12 @@ curl -s -X POST http://127.0.0.1:8878/solve \
 
 `proxies` 只在配置了代理池时出现，且**永远不含用户名/密码**（只给脱敏后的 `scheme://host:port`）。
 
+`captcha_types`（v6.1）是**万盾嫁接层受理的扩展 `want` 清单**（11 种，见「万盾扩展类型」一节）。
+它只是"受理清单"，**不代表依赖已就绪**：没装 `cloakbrowser` 时这些类型会报
+`not-configured` + 安装提示，而 CF 主链路完全不受影响。
+带 `_x` 后缀的是避让主链路命名的变体（`turnstile_x` / `recaptcha_x` / `cloudflare_x` / `awswaf_x`），
+它们与主链路的同名能力是**两套实现**（CloakBrowser vs Camoufox/pydoll/cfsolve）。
+
 `ua_fingerprint` 是**当前浏览器 UA 的 sha256 前 12 位**（不是 UA 本体），纯观测字段：
 UA **不在缓存键里**，所以两个进程这个值不同**照样共享缓存**（键是 `host|egress`）。
 它不同只说明两边的浏览器指纹不同 —— 若目标站严格校验 UA，命中旧凭证会以 403 暴露，
@@ -263,6 +318,19 @@ UA **不在缓存键里**，所以两个进程这个值不同**照样共享缓�
 
 语义：`skipped` 是"剩余寿命还够、无需续期"的次数；单个域连续失败会进入指数退避
 （`next_attempt_at` 可见），**不会原速重试**（对已提分的域连续求解只会更糟）。
+
+### 卡死状态 `wedged`（v6.2）
+
+`state` 可能出现的第四种值：`wedged`。语义是"worker 线程卡死不返回，服务已废，**等不会好**"。
+
+- 触发：一个任务超过 `timeout + --wedge-grace`（默认 30s）仍未返回，或浏览器启动超过 300s 未就绪；
+- 与 `degraded` 的区别：`degraded` 会自愈（浏览器自动重拉），`wedged` 不会；
+- 响应里额外带 `wedged_reason` 与 `wedge_restart`；
+- 服务模式下（`--wedge-restart`，默认开）进程**以退出码 75 退出**，由 supervisor 拉起 ——
+  `docker compose` 的 `restart: unless-stopped` 与 `scripts/run-pool.ps1` 的重启循环都会接住。
+
+> 为什么独立状态而不是合并进 `degraded`：运维看到 `degraded` 的默认反应是"等等看"，
+> 而那对卡死是无效动作。状态必须诚实地告诉人"手动/自动重启是唯一出路"。
 
 ### research 段（T-76，**仅带 token 的完整视图**）
 
@@ -407,17 +475,42 @@ POST /shutdown      Authorization: Bearer <token>
   "solution": { "token": "0.abc...", "userAgent": "Mozilla/5.0 ..." } }
 ```
 
-### 支持的 task type（**刻意只做 3 种**）
+### 支持的 task type（v6.2：27 种 = 主链路 7 + 嫁接层 12 + 明确拒绝 8）
+
+**A. 主链路类型**（Camoufox / pydoll / cfsolve，按域缓存）
 
 | `task.type` | 映射到 | 必填 | 可选 | `solution` 结构 |
 |---|---|---|---|---|
 | `AntiCloudflareTask` | `want=clearance` | `websiteURL` | — | `{"cookies":{"cf_clearance":"…"},"userAgent":"…"}` |
-| `TurnstileTaskProxyless` | `want=turnstile` | `websiteURL`、`websiteKey` | `action`、`cdata` | `{"token":"…","userAgent":"…"}` |
-| `RecaptchaV3TaskProxyless` | `want=recaptcha_v3` | `websiteURL`、`websiteKey` | `pageAction` | `{"gRecaptchaResponse":"…","userAgent":"…"}` |
+| `TurnstileTaskProxyless`<br>`TurnstileTaskProxylessM1` | `want=turnstile` | `websiteURL`、`websiteKey` | `action`、`cdata` | `{"token":"…","userAgent":"…"}` |
+| `RecaptchaV3TaskProxyless`</br>`…M1` / `…M1S7` / `…M1S9` | `want=recaptcha_v3` | `websiteURL`、`websiteKey` | `pageAction` | `{"gRecaptchaResponse":"…","userAgent":"…"}` |
 
-未知类型返回 `errorId=1` + `ERROR_TASK_TYPE_NOT_SUPPORTED`，并在 `errorDescription` 里列出上面这 3 个。
-**不做的**：图片/滑块类（`ImageToTextTask` 等）、Akamai/DataDome/PerimeterX（本服务解不了，
-返回明确错误而不是让你白等）。
+*M1 / S7 / S9 是上游的模型变体标记，对本服务是同一件事。*
+
+**B. 嫁接层类型**（`captchas/` 子包，需 `pip install cloakbrowser`；不缓存）
+
+| `task.type` | 映射到 `want` | 必填 | `solution` 结构 |
+|---|---|---|---|
+| `NoCaptchaTaskProxyless`<br>`RecaptchaV2TaskProxyless`<br>`RecaptchaV2EnterpriseTaskProxyless` | `recaptcha_x`（v2 / Enterprise） | `websiteURL`、`websiteKey` | `{"gRecaptchaResponse":"…","userAgent":"…"}` |
+| `RecaptchaV3EnterpriseTask` / `…M1` | `recaptcha_x`（v3 + enterprise） | `websiteURL`、`websiteKey` | `{"gRecaptchaResponse":"…","userAgent":"…"}` |
+| `HCaptchaTaskProxyless` | `hcaptcha` | `websiteURL`、`websiteKey` | `{"gRecaptchaResponse":"…","userAgent":"…"}` |
+| `FunCaptchaTaskProxyless` | `arkose` | `websiteURL`、`websiteKey`(public key) | `{"token":"…","userAgent":"…"}` |
+| `DataDomeTaskProxyless` ∗ | `datadome` | `websiteURL` | `{"cookies":{"datadome":"…"},"userAgent":"…"}` |
+| `PerimeterXTaskProxyless` ∗ | `perimeterx` | `websiteURL` | `{"cookies":{"_px3":"…"},"userAgent":"…"}` |
+| `AkamaiTaskProxyless` ∗ | `akamai` | `websiteURL` | `{"cookies":{"_abck":"…"},"userAgent":"…"}` |
+| `AwsWafTaskProxyless` ∗ | `awswaf_x` | `websiteURL` | `{"cookies":{"aws-waf-token":"…"},"userAgent":"…"}` |
+| `CloudflareTurnstileTaskProxyless` ∗ | `turnstile_x` | `websiteURL`、`websiteKey` | `{"token":"…","userAgent":"…"}` |
+
+`∗` = **本仓库扩展名**：YesCaptcha 官方没有对应 task type，但本服务真解得了，
+命名沿用生态的 `xxxTaskProxyless` 风格。上游客户端不认识这些名字是正常的 ——
+它们存在的意义是"我们的能力有名字可调"，不是冒充官方类型。
+
+**C. 明确不做的类型**（共 8 种，返回 `ERROR_TASK_NOT_SUPPORTED` + 原因，不静默）
+
+`ImageToTextTask` / `…Muggle` / `…M1`、`HCaptchaClassification`、`ReCaptchaV2Classification`、
+`AwsClassification`、`FunCaptchaClassification`：这些需要视觉模型后端（OCR / 纯图片分类），
+本服务不内置。
+`AntiTurnstileTaskProxyLess`：请用 `TurnstileTaskProxyless`。
 
 ### 两条刻意的拒绝（都不是"没实现"，是设计）
 
@@ -439,14 +532,27 @@ YesCaptcha 生态的客户端**按 `errorId` 判断成败**，不看 HTTP 状态
 | `errorCode` | 触发 |
 |---|---|
 | `ERROR_KEY_DOES_NOT_EXIST` | 缺少/错误的 token 或 clientKey |
-| `ERROR_TASK_TYPE_NOT_SUPPORTED` | 未知 `task.type` |
-| `ERROR_TASK_PARAM_INVALID` | 必填字段缺失/超长/类型错 |
-| `ERROR_PROXY_NOT_SUPPORTED` | 传了任务级代理字段 |
-| `ERROR_TASK_ID_INVALID` | `taskId` 不存在、已过期（结果保留 10 分钟）或已清理 |
+| `ERROR_TASK_NOT_SUPPORTED` | 未知 / 明确不做的 `task.type`（`errorDescription` 里带原因） |
+| `ERROR_TASK_PROPERTY_EMPTY` | 必填字段缺失或为空（`task` / `task.type` / `websiteURL` / `websiteKey` / `taskId`） |
+| `ERROR_TASK_PARAM_INVALID` ∗ | 字段存在但值非法（超长 / 非 http / 类型错） |
+| `ERROR_PROXY_NOT_SUPPORTED` ∗ | 传了任务级代理字段 |
+| `ERROR_NO_SUCH_CAPCHA_ID` | `taskId` 不存在、已过期（结果保留 10 分钟）或已清理 |
 | `ERROR_NO_SLOT_AVAILABLE` | 待处理任务已达上限（`--compat-max-pending`，默认 64） |
-| `ERROR_CAPTCHA_UNSOLVABLE` | 求解失败（浏览器跑完但没拿到凭证 / 目标站拒绝） |
-| `ERROR_SERVICE_OVERLOAD` | 本服务准入拒绝（队列满 / 并发上限） |
-| `ERROR_TIMEOUT` / `ERROR_TRANSPORT` / `ERROR_INTERNAL` | 与 `/solve` 的 `timeout`/`transport`/`internal` 一一对应 |
+| `ERROR_CAPTCHA_UNSOLVABLE` | 求解失败（跑完但没拿到凭证 / 目标站拒绝） |
+| `ERROR_SERVICE_OVERLOAD` ∗ | 本服务准入拒绝（队列满 / 并发上限） |
+| `ERROR_TIMEOUT` / `ERROR_TRANSPORT` / `ERROR_INTERNAL` ∗ | 与 `/solve` 的 `timeout`/`transport`/`internal` 一一对应 |
+
+`∗` = 本服务扩展码（生态词表里没有对应项）。`ERROR_NO_SUCH_CAPCHA_ID` 的 **`CAPCHA` 拼写就是生态原样**，
+不要"修正"成 `CAPTCHA` —— 按 YesCaptcha 文档写死的客户端匹配的就是这个字符串。
+
+> **v6.2 破坏性变更**：v5 用的自造码 `ERROR_TASK_TYPE_NOT_SUPPORTED` / `ERROR_TASK_ID_INVALID`
+> 已改为生态码。按错误码分支的客户端请对照上表更新；只看 `errorId` 的客户端不受影响。
+
+### v6.2：兼容层也会**自动挑选**嫁接层
+
+`/solve` 的 `want` 命中扩展类型时走 `captchas/`；兼容层同理（见上表 B）。
+区别只在触发方式：`/solve` 用 `want`，兼容层用 `task.type`，映射表是 `solver/compat.py` 里的
+`MC_TASK_TYPE_MAP`（与 `TASK_TYPE_MAP` 分立 —— 两者执行路径、依赖与缓存语义都不同）。
 
 ### 一个必须知道的代价：兼容层**没有** `route=auto`
 
@@ -483,9 +589,17 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8878/status
   "backends": ["camoufox"], "cache_backend": "sqlite:/data/cache",
   "uptime_sec": 812.4, "queue_depth": 0,
   "inflight_count": 1, "events_total": 37,
-  "inflight": [{ "rid": 12, "method": "POST", "path": "/solve", "elapsed_sec": 3.21 }]
+  "inflight": [{ "rid": 12, "method": "POST", "path": "/solve", "elapsed_sec": 3.21 }],
+  "multicaptcha_inflight": [{ "type": "datadome", "url": "https://example.com/", "started": 1761000000.0 }],
+  "wedge": { "wedged": false, "reason": "", "wedge_restart": true }
 }
 ```
+
+- `multicaptcha_inflight`（v6.1）：万盾嫁接层正在跑的求解。**与 `inflight` 分开列** ——
+  两者的超时预算与产物语义不同（主链路是浏览器串行任务，嫁接层是各厂商独立管线），
+  混在一张表里排障看不出是谁卡住了。
+- `wedge`（v6.2）：卡死状态快照。`wedged=true` 时 `reason` 给原因、`wedge_restart` 说明
+  进程会不会自己退出重启。排障第一问"是不是卡死了"不必再跳去 `/health` 看。
 
 - `inflight` **最久的排最前**（卡住的就是它）。
 - `GET /status` **不会把自己算进 `inflight_count`**（否则调用方每次都要减一）。
@@ -513,6 +627,7 @@ curl -s -H "Authorization: Bearer $TOKEN" 'http://127.0.0.1:8878/logs?lines=5'
   这类字段即使被误传也进不来；被丢弃的字段数会体现在 `dropped_fields` 里，不静默。
 - 每个 worker 各有自己的一份（多进程部署时逐个查）。
 
+
 ## GET /metrics — 需要 token
 
 Prometheus 文本格式。暴露的指标：
@@ -527,6 +642,9 @@ Prometheus 文本格式。暴露的指标：
 | `cfsolve_failures_total` | counter | 求解失败 |
 | `cfsolve_timeouts_total` | counter | 超时 |
 | `cfsolve_rejected_total` | counter | 准入拒绝（队列满/inflight 满） |
+| `cfsolve_process_rss_bytes` | gauge | **v6.2** 进程常驻内存（字节）。内存爆炸的第一现场信号（本项目有过 21GB/31GB 两次） |
+| `cfsolve_process_peak_rss_bytes` | gauge | **v6.2** 进程峰值常驻内存（字节） |
+| `cfsolve_process_threads` | gauge | **v6.2** 进程线程数（worker 卡死时线程只增不减是一条线索） |
 | `cfsolve_browser_restarts_total` | counter | 浏览器重启 |
 | `cfsolve_browser_alive` | gauge | 浏览器存活（0/1） |
 | `cfsolve_queue_depth` | gauge | 队列深度 |
@@ -536,6 +654,10 @@ Prometheus 文本格式。暴露的指标：
 | `cfsolve_research_snapshot_age_seconds` | gauge | 距上次研究快照的秒数；**无快照时为 `NaN`，绝不填 0**（0 会假装"刚拍过快照"） |
 
 不暴露任何域名、cookie 或 token。
+
+`cfsolve_process_*` 三条序列在**采集失败时直接不出现**（不是报 0）——"没有数据"与"数据是 0"
+必须能区分；`/metrics` 也不会因为采集失败而 500。
+
 
 ```bash
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8878/metrics

@@ -1,6 +1,265 @@
+## [6.2.0] - 2026-11-05
+
+主题：**把"验收"从一次性快照变成可复跑的门禁**，同时修掉 v6.1/v6.2 交付后暴露的 UI 与决策分叉。
+
+参考项目（用户指定四项）：pinchtab（工程治理范式）、cipherwire/disarm（验证方法论）、
+FlareSolverr（`/v1` 契约）、xiaomaozjj666/web-crawler（双档覆盖率门禁）。
+
+### 修复（UI：真 Chrome 看截图才发现的 5 条）
+
+| # | 缺陷 | 怎么暴露的 | 修法 |
+|---|---|---|---|
+| **U1** | `state=wedged` 在状态页渲染成**默认深色徽章** —— 服务已死却看起来正常 | 真 Chrome 取 `getComputedStyle().backgroundColor` = `rgb(255,255,255)` | 新增 `.badge.wedged`（**实心反色**，比 down 更刺眼：degraded 会自愈、wedged 只能重启） |
+| **U2** | 控制台把 wedged 的 503 一律当"异常/down"，**丢掉"不会自愈、需重启"** | 真 Chrome 看徽章文字 | 503 只要带 `state` 就按 state 渲染；wedged 走独立分支 + 横幅说明处置 |
+| **U3** | `setKV()` 不还原被 `setEmpty()` 改成 `empty` 的 class → `display:grid` 失效，**键值从两列退化成上下堆叠** | 截图里 `state`/`wedged` 各占一行 | `setKV` 自己保证 `className="kv"` |
+| **U4** | 研究资产「上次快照」显示 **Invalid Date** | 截图直接可见 | 新增 `_fmtTime()`，同时吃 ISO 字符串与 epoch 秒 |
+| **U5** | 11 个扩展类型铺在健康卡里换 4 行，**把卡片撑得比旁边高一倍** | 截图布局明显歪 | 状态页独立成一张全宽卡（标签式排版）；控制台只留计数 |
+| **U6** | 状态页在飞表格**不清空容器**就 `insertAdjacentHTML` → 上一轮的行残留 | 写渲染逻辑时自查 | 渲染前先 `innerHTML = ""` |
+
+> U1–U4 的共同点：**静态断言全绿，只有真浏览器执行才看得见**。这正是
+> "UI 截图验收"不可被单测替代的原因，也是新增 `scripts/verify_ui_e2e.py` 的动机。
+
+### 修复（决策分叉：语义差分 Oracle 抓到的 2 条真缺陷）
+
+参考 disarm 的 "Semantic Differential Oracle"：**不靠读代码觉得对，拿两份实现跑同一批输入比对**。
+
+| # | 缺陷 | 证据 | 修法 |
+|---|---|---|---|
+| **D1** | `route.decide()` 的 multicaptcha 分支先于 unsupported 检查 → 一页同时有 perimeterx（能解）与 kasada（解不了）时**假承诺 solve**，调用方会白等一个完整超时 | 差分用例 55 组当场红 | 先判不可解再判怎么解 |
+| **D2** | `detect.recommend()` 只看命中榜首，于是 `cloudflare + kasada` 被它说"走浏览器能解"、被 `decide` 判"拒绝" | 同一批用例 | 改为**看全集**：任何一家解不了 ⇒ 整页过不去（拿得到 A 家凭证也进不去 B 家） |
+
+**D3（P0，自查时发现，比 D1/D2 更严重）**：在把判断口径改成"看全集"之后，`Fingerprint` 类命中
+（`localStorage.setItem` / `navigator.clipboard` / `Intl.DateTimeFormat` …）被当成了"解不了的厂商"——
+而任何现代站点都用了这些 API。实测：一个普通 CF 站只因为页面里有 `localStorage.setItem('x',1)`
+就被 `recommend()` 判 `unsupported_or_browser`、被 `decide()` 判 `reject`。
+**这会让服务对几乎全部真实站点失效。** 修法：新增 `vendors.is_shield()` 按 `category` 过滤，
+只有 Anti-Bot / ANTIBOT / CAPTCHA 才算"盾"；`route._provider_ids()` 同样按 category 过滤
+（无 `category` 的旧 payload 仍按"是盾"处理，保证升级瞬间的缓存兼容）。
+回归用例：`tests/test_differential_oracle.py::test_fingerprint_hits_do_not_make_a_site_unsolvable` 等 4 条。
+
+根治方式不是"记得两边一起改"，而是**让能力表只有一份**：新增 `solver/vendors.py`
+（`MAIN_CHAIN_PROVIDERS` / `MULTICAPTCHA_PROVIDERS` / `solvable()` / `pick_multicaptcha()`），
+`detect.py` 与 `route.py` 都从它取。`tests/test_differential_oracle.py` 81 例守着两者永远一致。
+
+### 新增（四类验收全部脚本化，不再是人工一次性快照）
+
+| 脚本 | 覆盖 | 实测 |
+|---|---|---|
+| `scripts/verify_ui_e2e.py` | 真 Chrome × 5 种状态（ready/wedged/degraded/无 token/不可达）+ 真实按钮交互（保存/刷新/自动刷新的 `aria-pressed` 同步）+ JS 错误收集 + 逐张截图 | **23/23** |
+| `scripts/verify_real_calls.py` | 真进程 + 真 token，**37 项**：公开/鉴权两态、SSRF 守卫、413、兼容层四个生态错误码、未知路径两态、审计不落凭证、优雅退出 | **37/37** |
+| `scripts/e2e_local.py`（扩） | 新增 6 项：状态页 CSP 三件套/不含服务端数据、兼容层生态错误码、嫁接层 11 类型公示、缺依赖 → `not-configured` | **40/40**（含真浏览器段） |
+| `scripts/service_report.py` | **确定性服务报告 vs golden**（借鉴 pinchtab 的 `docs/audit.md`）：真进程打 13 个端点，把响应的**字段形状**（只记类型不记值）与 `docs/golden/service-report.golden.json` 逐字节比对 | 一致；**故意注入一个字段能立刻抓到** |
+
+### 新增（工程治理）
+
+- `run.py` 新增 `ui` / `realcalls` / `report` 三个子命令（`run.ps1` 的 ValidateSet 同步，有测试锁）。
+- `run.py verify` 与 CI 都加入 `service-report(golden)`。
+- `solver/engines.py` 覆盖率 **57% → 100%**，**撤销长期 waiver**：工厂分支逻辑与专有二进制无关，
+  注入假模块即可全路径覆盖（`tests/test_engines_factories.py` 12 例）。门禁 56 → **95**。
+- `tests/test_statuspage.py` 新增 11 例（`statuspage.py` 此前**零行为测试**，覆盖率 100% 是假象 ——
+  模块体只是一个字符串常量）。
+- FlareSolverr 后端补齐**会话生命周期**（借鉴其 `/v1` 契约）：首次使用 `sessions.create`（幂等），
+  退出时 `sessions.destroy`；**共享会话（already exists）不销毁**。新增 `--flaresolverr-session`。
+  此前 `session` 字段是死参数且从不创建 —— 上游对不存在的会话会**隐式新建并永久保留**，
+  等于每请求泄漏一个远端 driver 进程。
+
+### 变更（对外契约）
+
+- `detect.recommend()` 的 `unsupported_or_browser` 语义收紧：命中里**任何一家**解不了即整页判不可解
+  （此前只看榜首）。文案从"暂不支持"改为"没有对应求解器 + 硬试会白等一个超时"。
+- `/health` 状态词表从三态扩为**四态**（新增 `wedged`），文档补齐 `captcha_types`。
+- `/status` 新增 `wedge` 与 `multicaptcha_inflight` 两个字段（此前只有代码没有文档），
+  `docs/openapi.json` 补上 `/status` 的 200 响应 schema。
+
+### 刻意不做
+
+- 不引入 React 仪表盘（pinchtab 的做法）：本仓库的硬约束是**零依赖单文件 HTML**，
+  引入构建链会让"改一个字段要看两套工具链"。
+- 不照搬 pinchtab 的 `pinchtab audit` 站点审计器：那是"审计**别人的站**"，与本项目的
+  "审计**自己的服务契约**"是两回事，golden 那部分已经取到了。
+
+### 验证
+
+Python **863 passed / 7 skipped**；`solver/` 覆盖率 **89.3%**，**23 模块**全部达标；
+openapi 13 操作一致；文档 9 处一致；服务报告 golden 一致；仓库卫生通过。
+四类验收：UI **23/23**（真 Chrome + 逐张看片）、真实调用 **37/37**、E2E **40/40**、
+真实代码复审见 `plans/证据/independent-review-v6.2-r1.md`。
+
 # Changelog
 
 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
+
+### 修复（独立复审两轮抓到的 5 条，全部已修 + 回归用例）
+
+| # | 级别 | 缺陷 |
+|---|---|---|
+| **R1** | P2 | `_CHALLENGE_PREFERS` 键写成 `non_interactive`（下划线），而 `detect` 真实产出是 `non-interactive`（连字符）→ **永不命中** → `prefer` 静默降级 `any` → pydoll/flaresolverr 不被跳过 → cfsolve 失败后白起一次 Chrome |
+| **R2** | P2 | `recommend()` 取 want 仍用未过滤的 `detections[0]`：一个 50 分的 Fingerprint 排在 50 分 hCaptcha 前时返回 `unsupported_or_browser`，而 `decide()` 同输入返回 `multicaptcha` —— **两个公共决策函数再次分叉** |
+| **R3** | P3 | `route.py` 的 `from vendors import ...` 绝对导入，包方式导入会 `ModuleNotFoundError` |
+| **R4** | P2 | `summarize()` 的 `protected = bool(detections)` —— 指纹命中也会让它为真 → `route=auto` 对**无盾站**照常起浏览器（16–20s + 1.2GB） |
+| **R5** | P2 | 只有指纹命中时 `recommend()` 落到 fallback，返回 `unsupported_or_browser` + "检测到非 CF 防护：Web Storage Fingerprint"，比"什么都没命中"（`direct`）还糟 —— **语义倒挂** |
+| **R6** | P3 | `route._MC_PRIORITY` 死代码 |
+
+**元结论（比单条缺陷更值得记）**：R2 / R4 / R5 是**同一类错误的三次复发** ——
+把"命中某特征"当成"有盾/有厂商"。每轮只修了显式位置，没修**所有**判断口径。
+最终收敛成**一个谓词** `vendors.is_shield(category)`，三处（`recommend` 的 unsolvable /
+`summarize` 的 `protected` / `route._provider_ids`）全部走它。这比"每处单独修"可靠。
+
+**同时确认"不是缺陷"的一条**：`detect.CTYPE_ROUTE` 与 `route._CHALLENGE_PREFERS`
+对 `managed` / `non-interactive` 给出不同建议（前者 `browser`、后者 `pure`）。
+这不是矛盾 —— 前者回答"靠什么能过"，后者回答"后端链里先试谁"。**不改任何一边的值**
+（复审自己也说"定表前应做实测，否则改哪边都是猜"），而是把关系写进注释 + 加守门用例
+（`pure` 绝不能把 camoufox 跳出链）。
+
+### 同期交付（v6.1 万盾嫁接层 + 卡死看门狗）
+
+两部分合并说明：
+
+#### v6.2 卡死看门狗 + 生态兼容 —— 「服务死了也不会自己说」的那类缺陷
+
+参考项目：camofox-browser（工程参照）、ohmycaptcha（YesCaptcha 生态参照）。
+
+#### 修复（P0：worker 卡死 = 服务事实上已死）
+
+- **实测复现的缺陷**：浏览器"半死"时（`is_connected()` 仍为真，但 `ctx.new_page()`
+  永不返回），worker 线程永久阻塞。`_submit` 的超时只让**调用方**拿到 504/503，
+  worker 不会醒 —— 实测两次请求各等 10s 后 `/health` 停在 `starting`、queue 深度 2，
+  服务只能重启进程才能恢复。
+- 修法（参考 camofox-browser 的 `new-page-recovery.js`，但按"进程自重启"落地）：
+  - worker 执行任务时登记 `budget + --wedge-grace`（默认 30s）的绝对 deadline；
+  - 独立看门狗线程每 2s 检查，**连续 2 次**超期才判定卡死（防时间跳变/GC 长停顿误杀）；
+  - 判定后 `/health` 的 `state` 变为 **`wedged`**（与 `degraded` 分开：后者会自愈，前者不会），
+    响应带 `wedged_reason` / `wedge_restart`；
+  - 服务模式（`--wedge-restart`，默认开）下进程以**退出码 75** 退出，
+    由 `docker compose restart: unless-stopped` 或 `run-pool.ps1` 的重启循环拉起；
+  - 库/测试构造 `Solver` 时默认 **不** 自重启 —— 不能因为构造一个对象就杀掉宿主进程。
+- `scripts/run-pool.ps1` 新增监督循环：任一 worker 退出（含 75）按同一份参数重拉；
+  `-NoRestart` 保留给调试。没有它，"自重启"在本地部署里就等于"服务停了"。
+
+#### 变更（对外契约，破坏性）
+
+- **YesCaptcha 错误码对齐生态真实词表**：
+  `ERROR_TASK_TYPE_NOT_SUPPORTED` → `ERROR_TASK_NOT_SUPPORTED`；
+  `ERROR_TASK_ID_INVALID` → `ERROR_NO_SUCH_CAPCHA_ID`（生态里拼写就是 CAPCHA）；
+  新增 `ERROR_TASK_PROPERTY_EMPTY`（字段缺失/为空），与扩展码 `ERROR_TASK_PARAM_INVALID`
+  （字段存在但值非法）分开 —— 客户端对前者应"补齐重发"，对后者应"改值再说"。
+  只看 `errorId` 的客户端不受影响。
+
+#### 新增
+
+- **19 种 task type 命名族**：主链路 7 种（含 M1/S7/S9 变体）+ 嫁接层 12 种 +
+  明确拒绝 8 种（图片识别/分类类，需视觉模型后端）。
+  新增 `MC_TASK_TYPE_MAP`（与 `TASK_TYPE_MAP` 分立：两条执行路径依赖与缓存语义不同）。
+- 嫁接层类型的 `solution` 字段按生态约定映射：hCaptcha/reCAPTCHA → `gRecaptchaResponse`，
+  cookie 类（DataDome/PerimeterX/Akamai/AWS/Clearance）→ `cookies`，Arkose → `token`。
+- 兼容层同样沿用代理池的**出口粘性**（cookie 类产物绑 IP，与 `/solve` 旁路同一规则），
+  取出口失败只是没有粘性，不会让任务失败。
+- `/metrics` 新增三条进程自检序列：`cfsolve_process_rss_bytes` /
+  `cfsolve_process_peak_rss_bytes` / `cfsolve_process_threads`
+  （参考 camofox-browser 的 `camofox_memory_usage_bytes`；本项目有过 21GB/31GB 内存爆炸史）。
+  采集失败时**不输出**而不是报 0。
+- 新增 `--no-wedge-restart`、`--wedge-grace` 启动参数。
+
+#### 刻意不做
+
+- **`getBalance`**：ohmycaptcha 返回固定 99999，我们继续拒绝 —— 没有计费模型，
+  返回假余额只会误导客户端。
+- **图片识别 / 纯图片分类 task type**：需要视觉模型后端；返回明确的
+  `ERROR_TASK_NOT_SUPPORTED` + 原因，而不是"静默 unsupported"。
+- **page-lease / inflight 合并（camofox 的另外两个）**：本服务的并发模型是
+  "单 worker 串行 + 跨进程 claim + 按域缓存"，与它的"多会话 tab 池"不是同一问题；
+  硬搬会引入它那套 reaper 语义，得不偿失。
+
+#### 验证
+
+Python 748 项（741 passed + 7 skipped）；`solver/` 覆盖率 88.2%，22 模块全部达标；
+openapi 13 操作一致；文档 9 处一致；仓库卫生通过。
+看门狗专项：`tests/test_watchdog.py`（含 subprocess 验证退出码 75）。
+
+#### v6.1 万盾嫁接层 —— 从「CF 专项」扩成「多厂商通解」
+
+
+
+#### 新增
+
+- `captchas/`：11 厂商求解器的**自有副本**（Turnstile / reCAPTCHA v2·v3·invisible /
+  hCaptcha / Cloudflare / AWS WAF / BotGuard / DataDome / PerimeterX / Akamai /
+  Aliyun 滑块 / Arkose FunCaptcha），共约 4800 行，源自 `captcha-solver`。
+  副本自包含（含 `common/`），内部 import 收敛到 `captchas.common.*`，
+  **不追上游**——上游更新按需 cherry-pick，主项目的演进不被上游节奏绑架。
+- `solver/multicaptcha.py`：嫁接层。类型注册 / 参数校验 / 单类型串行锁 /
+  统一成功谓词归一（`token`+`cf_clearance`+`verify_success`+`success` 任一为真 →
+  顶层 `solved`）/ 依赖缺失映射成 `not-configured`（不是看起来像崩溃的 `internal`）。
+- `POST /solve` 接受 11 个**扩展 want**（`turnstile_x` / `recaptcha_x` / `hcaptcha` /
+  `cloudflare_x` / `awswaf_x` / `botguard` / `datadome` / `perimeterx` / `akamai` /
+  `aliyun` / `arkose`），命中时不进主链路（不查缓存、不建主浏览器、不走后端链）。
+- `route=auto`：探测命中 Akamai / DataDome / PerimeterX / Arkose / hCaptcha / reCAPTCHA
+  时**自动分发**到 `captchas/` 并选好对应 want；`routed_by.detail.multicaptcha_want` 可见。
+- `/health` 新增 `captcha_types` 字段（受理清单，不代表依赖已就绪）。
+- `docs/API.md` 新增「万盾扩展类型」一节；`docs/检测-防护识别.md` 新增 `multicaptcha` 路由行。
+
+#### 变更（对外契约）
+
+- `detect.recommend()`：Akamai / DataDome / PerimeterX / Arkose / hCaptcha / reCAPTCHA
+  的 route 从 `unsupported_or_browser` 改为 `multicaptcha`（附可执行的 `want`）。
+  Kasada / Incapsula / Shape / GeeTest / 腾讯 turing 等**仍如实报告不支持**。
+- `route=auto` 的拒绝范围收窄：只有**确实没有求解器**的厂商才 `reject`。
+  CF 与万盾同时在场时仍优先走 CF 主链路。
+- `scripts/pick-prewarm-targets.py`：`multicaptcha` 路由不纳入 prewarm（产物不落主缓存链）。
+
+#### 修复（施工中实测发现，已回归测试守住）
+
+- **每类型串行锁用错类型**：最初按上游写法用 `asyncio.Lock`。但主服务是
+  `ThreadingHTTPServer`，每个请求在**自己的线程里 `asyncio.run` 一个新事件循环**；
+  `asyncio.Lock` 绑定首个使用它的事件循环，第二个同类型请求在另一循环里 await 会
+  `RuntimeError: bound to a different event loop` 且**永久挂住**（4 线程并发实测：
+  2 个报错、进程需 kill）。改为 `threading.Lock`（跨线程/跨循环安全），等锁时间计入
+  deadline，排队超时报 `solved:false` + "排队超时"而不是无限等待。
+  回归测试：`tests/test_multicaptcha.py::test_same_type_concurrent_across_threads`
+  与 `::test_lock_contention_reports_busy_not_hang`。
+
+- **出口粘性没接**：cookie 类产物（DataDome/PerimeterX/Akamai/CF）绑出口 IP，最初嫁接层
+  默认裸连 —— 拿到的 cookie 在客户端换 IP 回放就是静默 403，而且响应里没有 `egress_id`
+  告诉客户端该从哪个出口回放。现改为：调用方未显式给 `proxy` 时沿用主链路为该域粘住的
+  出口（代理池），并回传 `egress_id`；显式 `proxy` 优先（有人要轮换出口）。
+  回归测试：`test_http_bypass_uses_sticky_egress_proxy` /
+  `test_http_explicit_proxy_not_overridden`。
+
+- **厂商求解器的模块级 `asyncio.Lock` 是同一颗雷的第二处**：8 个厂商 solve.py 各自在
+  模块级写 `_solve_lock = asyncio.Lock()`（上游单事件循环 uvicorn 跑，没问题）。本服务
+  每请求一个新循环 → 第二个同类型请求同样会 `bound to a different event loop` 并挂死。
+  新增 `captchas/common/looplock.py`（`loop_lock()`：按运行中的循环惰性各分配一把锁），
+  8 个厂商文件改为 `_solve_lock = loop_lock()`；跨**线程**互斥仍由 multicaptcha 的
+  `threading.Lock` 提供。另加静态护栏测试，防止将来 cherry-pick 上游时把它改回去。
+
+- **在途表/全局路径的并发写**：`_inflight` 由请求线程增删、`/status` 另一个线程遍历，
+  不加锁时 `list(dict.values())` 可能撞上 "dictionary changed size during iteration"；
+  `sys.path` 的首次插入同理。均加锁，并给 `/status` 的 `multicaptcha_inflight` 提供快照。
+- **LoopLock 的释放语义**：第一版把"本次持有的锁"存共享列表，同循环两协程并发进入时
+  按 LIFO 出栈会配错锁（提前释放/永不释放）。改为按当前 task 记录；补串行性测试
+  断言"退出后 `lock.locked()` 必须为 False"。
+- **归一兜底失效**：求解器返回 `{"error": None}` 时，原 `setdefault("error", ...)` 对
+  "键存在但值为 None"无效，失败响应可能没有 error 文案；改为显式判空。
+
+#### 刻意不做
+
+- **不合并两套 CF 实现**：`cloudflare_x` / `awswaf_x` / `turnstile_x` / `recaptcha_x`
+  与主链路是两套引擎（CloakBrowser vs Camoufox/pydoll/cfsolve）。CF 站请用主链路，
+  扩展类型用于非 CF 站点上的同类 widget。硬合并等于把两条已验证的链路一起改坏。
+- **扩展类型不缓存、不 prewarm**：产物全是一次性 token 或会话级 cookie，
+  复用必然失败（与主链路 `TOKEN_WANTS` 同一条纪律）。
+
+#### 依赖
+
+- 运行扩展类型需要 `cloakbrowser`（`pip install cloakbrowser`）；`aliyun` / `arkose`
+  另需 `onnxruntime` + `opencv-python-headless`。**不装不影响 CF 主链路**。
+
+#### 验证
+
+Python 718 项（711 passed + 7 skipped）；`solver/` 覆盖率 87.4%，22 个模块全部达标
+（新增 `solver/multicaptcha.py` 门槛 88%，实测 88.5%）；openapi 13 操作一致；
+文档 9 处数字一致。真机验证状态：**嫁接层契约已测（假模块注入），11 个求解器本体
+未做真机实测**——需 cloakbrowser 与真实挑战页，属后续真机预算范畴。
 
 ## [6.0.1] - 2026-11-04
 
@@ -915,3 +1174,5 @@ v4.0.0 的 tag 保持不动（不改写已发布引用），发布方式为 patc
 - 多挑战类型：`want=clearance|awswaf|turnstile|recaptcha_v3`
 - 防护识别 `/detect`（33 厂商特征 + 5 条强特征）
 - 174 项 Python 测试 + 17 项 Go 测试；`docs/findings.json` 结论机器化校验
+
+### v6.1 万盾嫁接层（同期交付）

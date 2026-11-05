@@ -7,8 +7,8 @@
 
 | 层 | 数量 | 命令 | 最近结果 |
 |---|---|---|---|
-| Python 用例 | **659** | `python -m pytest tests/ -q` | 652 passed + 7 skipped |
-| Python 覆盖率 | **86%**（`solver/service.py` 83%；逐模块门禁见 `docs/coverage-policy.json`） | `... --cov=solver --cov-fail-under=80` + `node scripts/check-coverage.mjs` | 门槛通过 |
+| Python 用例 | **898** | `python -m pytest tests/ -q` | 891 passed + 7 skipped |
+| Python 覆盖率 | **89%**（`solver/service.py` 84%；逐模块门禁见 `docs/coverage-policy.json`） | `... --cov=solver --cov-fail-under=80` + `node scripts/check-coverage.mjs` | 门槛通过 |
 | Go 用例 | **46 个 Test** | `cd gocfsolve && go test -count=1 -race ./...` | 全部 PASS |
 | Go 静态检查 | — | `cd gocfsolve && go vet ./...` | 无输出 |
 | 结论库校验 | **54 条** | `node scripts/validate-findings.mjs` | exit 0 |
@@ -82,3 +82,16 @@
 3. 不许为了让门禁变绿而放宽断言；发现断言与实现矛盾时，**先判断谁错**（本轮 `TestPoolDo403*` 就是一次真实的口径冲突，最终以"403 不 blame 节点 + 清该域凭证"定稿）。
 4. **in-process 用例证明不了"真进程交付链路"**：起进程、读 `.env`、401 体、`/metrics` 的 content-type、
    `202` 之后进程是否真退出、退出码、审计文件里有没有混入凭证 —— 这些只有 `scripts/e2e_local.py` 覆盖。
+
+## 四类验收 → 可复跑脚本（v6.2）
+
+| 验收类型 | 脚本 | 实测 | 证据落点 |
+|---|---|---|---|
+| UI 截图验收 | `python run.py ui`（`scripts/verify_ui_e2e.py`） | **23/23**，5 种状态 + 按钮交互 + 逐张看片 | `plans/证据/ui-*.png` |
+| 真实调用验收 | `python run.py realcalls`（`scripts/verify_real_calls.py`） | **37/37** | 控制台输出 |
+| 真实 E2E 验收 | `python run.py e2e`（`scripts/e2e_local.py`） | **40/40** | `evidence/e2e-local.json` |
+| 服务契约 golden | `python run.py report`（`scripts/service_report.py`） | 13 端点形状一致 | `docs/golden/service-report.golden.json` |
+| 真实代码复审 | `claude -p` 独立进程 | 见 `plans/证据/independent-review-v6.2-r1.md` | — |
+
+> 这四类在 v5.0.1 是**人工跑一次**写进 `workflow_status.md` 的 —— 证明过当时那一刻，但不可复跑。
+> v6.2 起全部脚本化，`run.py` 一个命令就能重来。

@@ -424,3 +424,272 @@ def test_router_reports_timeout_when_budget_too_small_to_try_any_backend():
 def test_backend_id_is_the_allowlist_for_every_chain_member():
     """`BackendId` 自称白名单，那它就必须覆盖链上每一个后端（cfsolve/pydoll 曾经不在里面）。"""
     assert {m.value for m in be.BackendId} >= {"camoufox", "cfsolve", "pydoll", "flaresolverr"}
+
+
+# ── FlareSolverr 会话生命周期（v6.2，对齐上游 /v1 契约）──────
+
+
+def test_flaresolverr_creates_session_before_first_request():
+    """传了 session 就必须**先 sessions.create 再 request.get**。
+
+    回归的隐患：上游 `SESSIONS_STORAGE.get(session_id, ttl)` 在会话不存在时会**隐式新建**
+    并永久保留 —— "复用会话"与"每次泄漏一个 session"都能跑通，区别只在远端进程数。
+    """
+    cmds: list[str] = []
+
+    def handler(body):
+        cmds.append(body.get("cmd", ""))
+        if body.get("cmd") == "sessions.create":
+            return 200, {"status": "ok", "message": "Session created successfully."}
+        return 200, FLARE_OK
+
+    srv, base = _serve(handler)
+    try:
+        be.FlareSolverrBackend(base, session="s1").solve("https://e.com/", 30)
+        assert cmds == ["sessions.create", "request.get"], cmds
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_flaresolverr_creates_session_only_once():
+    """同进程内多次求解只 create 一次（幂等，避免每请求打一次 sessions.create）。"""
+    cmds: list[str] = []
+
+    def handler(body):
+        cmds.append(body.get("cmd", ""))
+        if body.get("cmd") == "sessions.create":
+            return 200, {"status": "ok", "message": "Session created successfully."}
+        return 200, FLARE_OK
+
+    srv, base = _serve(handler)
+    try:
+        backend = be.FlareSolverrBackend(base, session="s1")
+        backend.solve("https://e.com/", 30)
+        backend.solve("https://e.com/", 30)
+        assert cmds.count("sessions.create") == 1, cmds
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_flaresolverr_shares_existing_session_without_owning_it():
+    """already exists → 是共享会话，close() **不许**销毁别人的。"""
+    cmds: list[str] = []
+
+    def handler(body):
+        cmds.append(body.get("cmd", ""))
+        if body.get("cmd") == "sessions.create":
+            return 200, {"status": "ok", "message": "Session already exists."}
+        return 200, FLARE_OK
+
+    srv, base = _serve(handler)
+    try:
+        backend = be.FlareSolverrBackend(base, session="shared")
+        backend.solve("https://e.com/", 30)
+        backend.close()
+        assert "sessions.destroy" not in cmds, "共享会话不能被我们销毁"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_flaresolverr_destroys_own_session_on_close():
+    """自己建的会话必须销毁 —— 否则远端 driver 进程会一直涨。"""
+    cmds: list[str] = []
+
+    def handler(body):
+        cmds.append(body.get("cmd", ""))
+        if body.get("cmd") == "sessions.create":
+            return 200, {"status": "ok", "message": "Session created successfully."}
+        if body.get("cmd") == "sessions.destroy":
+            return 200, {"status": "ok", "message": "The session has been removed."}
+        return 200, FLARE_OK
+
+    srv, base = _serve(handler)
+    try:
+        backend = be.FlareSolverrBackend(base, session="mine")
+        backend.solve("https://e.com/", 30)
+        backend.close()
+        assert cmds[-1] == "sessions.destroy", cmds
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_flaresolverr_close_without_session_is_noop():
+    """没配 session 时 close() 不该发任何命令（每次请求独占 driver，上游自己 quit）。"""
+    cmds: list[str] = []
+
+    def handler(body):
+        cmds.append(body.get("cmd", ""))
+        return 200, FLARE_OK
+
+    srv, base = _serve(handler)
+    try:
+        backend = be.FlareSolverrBackend(base)
+        backend.solve("https://e.com/", 30)
+        backend.close()
+        assert all(c == "request.get" for c in cmds), cmds
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_flaresolverr_session_create_failure_is_browser_unavailable():
+    """create 失败要报"后端不可用"，而不是继续拿一个不存在的 session 去求解。"""
+    srv, base = _serve(lambda body: (200, {"status": "error", "message": "boom"}))
+    try:
+        with pytest.raises(SolveError) as ei:
+            be.FlareSolverrBackend(base, session="s1").solve("https://e.com/", 30)
+        assert ei.value.code is ErrorCode.BROWSER_UNAVAILABLE
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_router_close_releases_backends():
+    """router.close() 必须把 close 钩子透传下去（bootstrap 的优雅退出依赖它）。"""
+    released = []
+
+    class _B:
+        def name(self): return "fake"
+        def is_configured(self): return True
+        def solve(self, *a, **k):  # pragma: no cover
+            raise AssertionError
+        def close(self): released.append(True)
+
+    router = be.BackendRouter([_B()])
+    router.close()
+    assert released == [True]
+
+
+# ── v6.2：会话生命周期的边界（对齐 coverage 门禁）─────
+
+
+def test_flaresolverr_rejects_empty_base_url():
+    with pytest.raises(ValueError) as ei:
+        be.FlareSolverrBackend("")
+    assert "base_url" in str(ei.value)
+
+
+def test_flaresolverr_is_configured_reflects_url():
+    assert be.FlareSolverrBackend("http://x:1").is_configured()
+    # 空 base_url 在构造时就抛了，所以这里只断言正向
+
+
+def test_flaresolverr_close_swallows_destroy_failure():
+    """关闭路径上的失败不能掩盖真错误（进程退出阶段尤其不能抛）。"""
+    def handler(body):
+        if body.get("cmd") == "sessions.create":
+            return 200, {"status": "ok", "message": "Session created successfully."}
+        if body.get("cmd") == "sessions.destroy":
+            return 500, {"status": "error", "message": "boom"}
+        return 200, FLARE_OK
+
+    srv, base = _serve(handler)
+    try:
+        backend = be.FlareSolverrBackend(base, session="s1")
+        backend.solve("https://e.com/", 30)
+        backend.close()          # 不抛 = 通过
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_camoufox_backend_reports_configured_and_forwards():
+    class _S:
+        def solve(self, url, timeout, force, **kw):
+            return {"ok": True, "url": url, "force": force}
+
+    b = be.CamoufoxBackend(_S())
+    assert b.is_configured() is True
+    assert b.name() == "camoufox"
+    out = b.solve("https://e.com/", 5, force=True, want="clearance")
+    assert out["force"] is True
+
+
+def test_flaresolverr_concurrent_first_use_creates_once():
+    """并发首用只能 create 一次。
+
+    回归：没有锁时两个线程各发一次 create —— 先到的拿到 "created"（owns=True），
+    后到的拿到 "already exists"（owns=False）→ **谁都不销毁**，远端照样泄漏。
+    """
+    import threading as _t
+
+    cmds: list[str] = []
+    lock = _t.Lock()
+
+    def handler(body):
+        with lock:
+            cmds.append(body.get("cmd", ""))
+            first = cmds.count("sessions.create") == 1
+        if body.get("cmd") == "sessions.create":
+            return 200, {"status": "ok",
+                         "message": "Session created successfully." if first
+                                    else "Session already exists."}
+        return 200, FLARE_OK
+
+    srv, base = _serve(handler)
+    try:
+        backend = be.FlareSolverrBackend(base, session="race")
+        threads = [_t.Thread(target=lambda: backend.solve("https://e.com/", 10)) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=20)
+        assert cmds.count("sessions.create") == 1, cmds
+        assert backend._owns_session is True, "并发下会把归属判错，导致永不销毁"
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_flaresolverr_close_skips_destroy_while_inflight():
+    """在途请求还没结束时 close() 不许销毁会话（会拆掉正在被用的 driver）。"""
+    started = __import__("threading").Event()
+    release = __import__("threading").Event()
+
+    def handler(body):
+        if body.get("cmd") == "sessions.create":
+            return 200, {"status": "ok", "message": "Session created successfully."}
+        if body.get("cmd") == "sessions.destroy":
+            return 200, {"status": "ok", "message": "removed"}
+        started.set()
+        release.wait(10)
+        return 200, FLARE_OK
+
+    srv, base = _serve(handler)
+    try:
+        backend = be.FlareSolverrBackend(base, session="busy")
+        t = __import__("threading").Thread(target=lambda: backend.solve("https://e.com/", 15))
+        t.start()
+        started.wait(10)
+        backend.close()          # 在途 → 不销毁
+        assert backend._owns_session is True
+        release.set()
+        t.join(timeout=20)
+        backend.close()          # 归零后 → 销毁
+        assert backend._owns_session is False
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_flaresolverr_rejects_new_work_after_close():
+    def handler(body):
+        if body.get("cmd") == "sessions.create":
+            return 200, {"status": "ok", "message": "Session created successfully."}
+        return 200, FLARE_OK
+
+    srv, base = _serve(handler)
+    try:
+        backend = be.FlareSolverrBackend(base, session="s1")
+        backend.solve("https://e.com/", 10)
+        backend.close()
+        with pytest.raises(SolveError) as ei:
+            backend.solve("https://e.com/", 10)
+        assert ei.value.code is ErrorCode.BROWSER_UNAVAILABLE
+    finally:
+        srv.shutdown()
+        srv.server_close()

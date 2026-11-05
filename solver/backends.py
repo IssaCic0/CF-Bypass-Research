@@ -23,6 +23,7 @@ v4.1 起路由层还负责**治理**（`governance=`）：缓存查询/写入、
 from __future__ import annotations
 
 import json
+import threading
 import time
 from enum import Enum
 from typing import Protocol
@@ -156,6 +157,20 @@ class FlareSolverrBackend:
         self.egress_id = egress_id        # 兜底后端也有出口身份，必须回传（否则缓存键无从判断）
         self.default_ttl = default_ttl
         self._client = None
+        #: 本次进程内是否已经向远端申请过这个 session（幂等：只 create 一次）
+        self._session_ready = False
+        #: 关闭时要不要顺手 destroy（只有"我们创建的"才销毁，别人共享的不能删）
+        self._owns_session = False
+        # ── 并发保护 ──
+        # BackendRouter 是被**多个 HTTP handler 线程**同时调用的，所以：
+        #   · 两个线程同时 `_ensure_session` 会各发一次 create：先到的拿到"created"、
+        #     后到的拿到"already exists" → 后者把 `_owns_session` 覆盖成 False，
+        #     于是**谁都不销毁**，远端 driver 照样泄漏。
+        #   · `close()` 与 `solve()` 并发时会销毁**正在被使用**的会话。
+        # 一把锁 + 在途计数就够（这个后端本来就是串行的备胎，不需要更复杂的机制）。
+        self._session_lock = threading.Lock()
+        self._inflight = 0
+        self._closing = False
 
     def name(self) -> str:
         return BackendId.FLARESOLVERR.value
@@ -170,10 +185,89 @@ class FlareSolverrBackend:
             self._client = urllib.request  # 零依赖：只用标准库
         return self._client
 
-    def solve(self, url: str, timeout: float, force: bool = False, **kwargs) -> dict:
-        # 这个后端只发 GET、只回收 cookie，不支持 want=token 之类的语义（未知参数忽略）
+    def _v1(self, payload: dict, timeout: float) -> dict:
+        """发一个 `/v1` 命令并解析响应；HTTP/网络错误统一翻成 SolveError。"""
         import urllib.error
         import urllib.request
+
+        req = urllib.request.Request(
+            self.base_url + "/v1",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read(2 * 1024 * 1024).decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            raise SolveError(
+                ErrorCode.TRANSPORT, f"FlareSolverr 返回 HTTP {e.code}", stage="solve",
+                hint="检查自托管实例是否存活、版本是否匹配",
+            ) from e
+        except urllib.error.URLError as e:
+            raise SolveError(
+                ErrorCode.BROWSER_UNAVAILABLE,
+                f"连不上 FlareSolverr：{type(e).__name__}: {str(e)[:120]}",
+                stage="admit",
+                hint="确认 FLARESOLVERR_URL 可访问，且容器已就绪",
+            ) from e
+
+    def _ensure_session(self, timeout: float) -> None:
+        """首次使用时向远端 `sessions.create`（幂等）。
+
+        为什么要显式创建（v6.2，对齐上游 `/v1` 契约）：
+          · FlareSolverr 的 `request.get` 传了 `session` 但远端不存在时，会**隐式新建**
+            一个会话并**永久保留**（上游 `SESSIONS_STORAGE.get` 就是这么写的）。
+          · 于是"想复用会话"与"每次泄漏一个会话"看起来都能跑通，区别只在远端
+            driver 进程数：跑一天下来几十个 Chromium 挂在 FlareSolverr 那边。
+          · 显式 create 是幂等的（已存在返回 "Session already exists."），
+            配合 `close()` 里的 destroy，才形成**闭环**：谁建谁拆。
+        """
+        if not self.session:
+            return
+        with self._session_lock:
+            if self._session_ready:
+                return
+            body = {"cmd": "sessions.create", "session": self.session}
+            if self.proxy:
+                body["proxy"] = {"url": self.proxy}
+            payload = self._v1(body, timeout)
+            if str(payload.get("status", "")).lower() != "ok":
+                msg = str(payload.get("message", "unknown"))[:160]
+                raise SolveError(
+                    ErrorCode.BROWSER_UNAVAILABLE,
+                    f"FlareSolverr 无法创建 session {self.session!r}：{msg}",
+                    stage="admit",
+                    hint="检查该 session 名是否被占用，或换一个 --flaresolverr-session",
+                )
+            # 只有真的新建了才由我们负责销毁；"already exists" 说明是共享的，别动它
+            self._owns_session = "already exists" not in str(payload.get("message", "")).lower()
+            self._session_ready = True
+
+    def close(self) -> None:
+        """销毁本次进程创建的 session（别人的会话不碰）。失败静默——关闭路径不掩盖真错误。
+
+        安全阀：**还有在途请求时不销毁**（销毁正在被使用的会话会让对端拿到空结果）。
+        bootstrap 的优雅退出是"drain 完才 close"，正常路径上计数已归零；这条只是兜底。
+        """
+        if not self.session:
+            return
+        with self._session_lock:
+            self._closing = True
+            if self._inflight:
+                # 有在途：不动远端会话（宁可留一个 driver，也不要把在用会话拆掉）
+                return
+            if not self._owns_session:
+                return
+            try:
+                self._v1({"cmd": "sessions.destroy", "session": self.session}, timeout=5.0)
+            except Exception:  # noqa: BLE001
+                pass
+            self._owns_session = False
+            self._session_ready = False
+
+    def solve(self, url: str, timeout: float, force: bool = False, **kwargs) -> dict:
+        # 这个后端只发 GET、只回收 cookie，不支持 want=token 之类的语义（未知参数忽略）
 
         body = {
             "cmd": "request.get",
@@ -186,30 +280,20 @@ class FlareSolverrBackend:
         if self.proxy:
             body["proxy"] = {"url": self.proxy}
 
+        self._ensure_session(timeout)
+        with self._session_lock:
+            if self._closing:
+                raise SolveError(
+                    ErrorCode.BROWSER_UNAVAILABLE, "FlareSolverr 后端正在关闭，不再受理",
+                    stage="admit",
+                )
+            self._inflight += 1
         t0 = time.monotonic()
-        req = urllib.request.Request(
-            self.base_url + "/v1",
-            data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(req, timeout=self.request_timeout) as resp:
-                payload = json.loads(resp.read(2 * 1024 * 1024).decode("utf-8", "replace"))
-        except urllib.error.HTTPError as e:
-            raise SolveError(
-                ErrorCode.TRANSPORT,
-                f"FlareSolverr 返回 HTTP {e.code}",
-                stage="solve",
-                hint="检查自托管实例是否存活、版本是否匹配",
-            ) from e
-        except Exception as e:  # noqa: BLE001
-            raise SolveError(
-                ErrorCode.BROWSER_UNAVAILABLE,
-                f"连不上 FlareSolverr：{type(e).__name__}: {str(e)[:120]}",
-                stage="admit",
-                hint="确认 FLARESOLVERR_URL 可访问，且容器已就绪",
-            ) from e
+            payload = self._v1(body, self.request_timeout)
+        finally:
+            with self._session_lock:
+                self._inflight -= 1
 
         elapsed = round(time.monotonic() - t0, 2)
         if str(payload.get("status", "")).lower() != "ok":
@@ -310,6 +394,21 @@ class BackendRouter:
     换后端只对"这个后端解不出来"有意义；参数写错、没鉴权、队列满时换谁都一样，
     继续试只会放大攻击面与负载。
     """
+
+    def close(self) -> None:
+        """关闭所有后端的自有资源（目前只有 FlareSolverr 的远端 session）。
+
+        为什么必须显式关：FlareSolverr 的 session 在远端是一个**长期存活的 driver 进程**。
+        只 create 不 destroy，跑一天就在对方机器上积几十个 Chromium —— 我们没有它的
+        内存视图，只会看到"对面越来越慢"，排查起来极贵。
+        """
+        for backend in self._backends:
+            closer = getattr(backend, "close", None)
+            if callable(closer):
+                try:
+                    closer()
+                except Exception:  # noqa: BLE001 —— 关闭路径不掩盖真错误
+                    pass
 
     def __init__(self, backends: list[SolverBackend], *, governance=None) -> None:
         """`governance` 需提供 cache_lookup / remember / begin_backend_call / end_backend_call。
