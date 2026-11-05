@@ -285,7 +285,7 @@ scripts/
   probe_camoufox.py     # Camoufox 过盾实验
   diag_challenge.py     # 挑战页 DOM 诊断：iframe / checkbox / 按钮 / 截图
 captchas/               # 万盾求解器副本（11 厂商；自包含，不追上游，见 captchas/README.md）
-tests/                  # 898 项 Python 测试（注入假浏览器/假后端，离线）
+tests/                  # 911 项 Python 测试（注入假浏览器/假后端，离线）
 docs/
   项目规格.md            # ★ 单一事实源：是什么/边界/承诺什么/不承诺什么
   API.md                # ★ 接口契约（参数/响应/错误码表）

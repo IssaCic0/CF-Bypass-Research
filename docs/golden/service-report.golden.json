@@ -102,8 +102,8 @@
               "assertions_skipped": "number",
               "assertions_total": "number",
               "corpus_variants": "number",
-              "last_diff_at": "null",
-              "last_snapshot_at": "string",
+              "last_diff_at": "<volatile>",
+              "last_snapshot_at": "<volatile>",
               "note": "string"
             },
             "type": "object"
@@ -247,8 +247,8 @@
               "assertions_skipped": "number",
               "assertions_total": "number",
               "corpus_variants": "number",
-              "last_diff_at": "null",
-              "last_snapshot_at": "string",
+              "last_diff_at": "<volatile>",
+              "last_snapshot_at": "<volatile>",
               "note": "string"
             },
             "type": "object"

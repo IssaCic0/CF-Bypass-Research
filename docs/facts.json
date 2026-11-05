@@ -3,7 +3,7 @@
   "_note": "文档里出现的测试数/覆盖率/结论条数必须与本文件一致（由 validate-docs.mjs 校验）。测试数/覆盖率/条数由 --write 重新测量；**version 例外：它是一次人为的发版决定，--write 不会覆盖它**，升版时手动改本文件 + CHANGELOG + docs/openapi.json + Dockerfile + docker-compose.yml 五处。",
   "_measured_at": "2026-11-05",
   "version": "6.2.0",
-  "python_tests": 898,
+  "python_tests": 911,
   "python_coverage_percent": 89,
   "go_tests": 46,
   "findings": 54

@@ -65,10 +65,21 @@ GOLDEN = ROOT / "docs" / "golden" / "service-report.golden.json"
 #: 所以 `state=ready/starting` 这类差异天然不进报告；需要归一化的只有 `/health` 的状态码。
 
 #: 运行相关的字段：值会变，形状不变。记成 `<volatile>` 只保留类型信息。
+#:
+#: 收录标准："这台机器上跑出来是什么"不构成契约。特别地：
+#:   · `last_snapshot_at` / `last_diff_at` —— 有无研究快照取决于**本机是否跑过
+#:     `scripts/research.py`**。CI 上恒为 `null`、开发机上是 ISO 字符串。
+#:     它们曾在 CI 上造成 `'string' → 'null'` 的假红（本机全绿），
+#:     因为 golden 是拿"有快照的机器"生成的 —— 那不是门禁，那是环境指纹。
+#:   · `cache_backend` —— 取决于有没有配 `--cache-dir`。
+#:   · `browser` / `browser_os` 同理（认值会绑死引擎选择）。
 VOLATILE_KEYS = {
     "pid", "uptime_sec", "last_success_at", "last_error_at", "ts", "request_id",
     "req_id", "cache_backend", "ua_fingerprint", "avg_elapsed_sec", "started",
     "cs_clearance", "cf_clearance", "token", "value", "port", "host_ts",
+    # 只收**跨环境会变类型**的（`null` ↔ `string`），不收"类型恒定、只是数值不同"的：
+    # 计数器加进来会把 `assert "number"` 这条检查也丢掉，等于自己削弱门禁。
+    "last_snapshot_at", "last_diff_at",
 }
 
 #: 端点清单：(标签, method, path, 是否需要 token, 请求体)
@@ -120,14 +131,19 @@ def shape(value, key: str = "") -> object:
             "type": "array",
             "items": list(merged.values()),
         }
+    # ⚠️ volatile 判断必须**排在类型判断之前**：`None` 曾经先返回 "null"，
+    # 于是"本机有研究快照（string）vs CI 没有（null）"仍然被判成类型漂移 ——
+    # 这正是 CI 抓到的那条假红。volatile 的语义是"这个字段的**值和有无**都不进契约"。
+    if key in VOLATILE_KEYS:
+        return "<volatile>"
     if value is None:
         return "null"
     if isinstance(value, bool):
         return "bool"
     if isinstance(value, (int, float)):
-        return "<volatile>" if key in VOLATILE_KEYS else "number"
+        return "number"
     if isinstance(value, str):
-        return "<volatile>" if key in VOLATILE_KEYS else "string"
+        return "string"
     return "unknown"
 
 
