@@ -53,7 +53,7 @@ def check(name: str, ok: bool, detail: str = "") -> bool:
 class _Service:
     """起一个真服务（假浏览器：不联网、不出站；验的是 HTTP 面 + 页面本身）。"""
 
-    def __init__(self, setup=None) -> None:
+    def __init__(self, setup=None, audit_path: str = "") -> None:
         self.solver = service.Solver(
             browser_factory=factory_returning(FakeBrowser()), allow_private_hosts=True
         )
@@ -62,6 +62,7 @@ class _Service:
             setup(self.solver)
         service.Handler.solver = self.solver
         service.Handler.token = TOKEN
+        service.Handler.audit_path = audit_path
         self.srv = service.Server(("127.0.0.1", 0), service.Handler)
         threading.Thread(
             target=self.srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
@@ -211,6 +212,69 @@ def case_no_token(browser) -> None:
         svc.close()
 
 
+def case_audit(browser) -> None:
+    """审计日志区块（v6.3，参考 logdy）。
+
+    看真浏览器里的四件事（静态断言都覆盖不到）：
+      · 表格真的渲染出来了（行数对得上）
+      · 失败行有红色标记、成功行是 ok
+      · **列宽合理**（曾经因为缺 table 样式，"时间"列被撑得极宽、后面几列挤成一坨）
+      · 无 JS 错误（曾经因为本页没有 esc()、我误用 innerHTML+esc，首屏直接报错）
+    """
+    import json as _j
+    import tempfile
+    from pathlib import Path as _P
+
+    NL = chr(10)
+    d = _P(tempfile.mkdtemp(prefix="ui-audit-"))
+    f = d / "audit.jsonl"
+    rows = [{"event": "solve", "req_id": f"r{i}", "host": f"site{i}.example.com",
+             "ok": i % 3 != 0, "error_code": "" if i % 3 else "unsolved",
+             "ms": 16530, "backend": "camoufox", "ts": 1761000000 + i} for i in range(8)]
+    f.write_text(NL.join(_j.dumps(r) for r in rows) + NL, encoding="utf-8")
+
+    svc = _Service(audit_path=str(f))
+    try:
+        ctx = browser.new_context(extra_http_headers={"Authorization": f"Bearer {TOKEN}"},
+                                  viewport={"width": 1280, "height": 900})
+        page = ctx.new_page()
+        page.add_init_script(f"sessionStorage.setItem('cfsolve_token','{TOKEN}')")
+        page.on("dialog", lambda dlg: dlg.accept(TOKEN))
+        errs = _open(page, svc.base + "/console")
+        area = page.locator("#audit")
+        text = area.inner_text()
+        check("audit/表格渲染出 8 行", page.locator("#audit tbody tr").count() == 8,
+              str(page.locator("#audit tbody tr").count()))
+        check("audit/含表头", "事件" in text and "目标" in text, text[:60])
+        check("audit/失败行有标记", "unsolved" in text, text[:120])
+        check("audit/耗时按秒显示（不是 16530 ms）",
+              "16.5 s" in text and "16530 ms" not in text, text[:120])
+        # 列宽：没有任何一列 > 总宽的一半（曾经"时间"列独占 414px/1210px）
+        widths = page.evaluate(
+            "() => Array.from(document.querySelectorAll('#audit thead th'))"
+            ".map(th => Math.round(th.getBoundingClientRect().width))")
+        total = sum(widths)
+        check("audit/列宽未被单列撑爆",
+              bool(widths) and max(widths) < total * 0.5, f"{widths} total={total}")
+        check("audit/无 JS 错误", not [e for e in errs if "401" not in e], str(errs[:2]))
+        # 顶部「刷新」必须把审计区块一起刷 —— 曾经它只刷 /health，审计表停在旧数据。
+        # 探法：往审计文件里再追加一行，点顶部刷新，表里必须多出这一行。
+        with f.open("a", encoding="utf-8") as fh:
+            fh.write(_j.dumps({"event": "solve", "req_id": "rnew", "host": "新增.example.com",
+                               "ok": True, "ms": 120, "backend": "cfsolve",
+                               "ts": 1761000100}) + NL)
+        page.click("#refresh")
+        page.wait_for_timeout(800)
+        after = page.locator("#audit tbody tr").count()
+        check("audit/顶部刷新会带上审计区块", after == 9, f"rows={after}")
+        check("audit/顶部刷新无新增 JS 错误",
+              not [e for e in errs if "401" not in e], str(errs[-2:]))
+        page.screenshot(path=str(OUT_DIR / "ui-audit-console.png"), full_page=True)
+        ctx.close()
+    finally:
+        svc.close()
+
+
 def case_unreachable(browser) -> None:
     svc = _Service()
     base = svc.base
@@ -232,6 +296,7 @@ CASES = {
     "wedged": case_wedged,
     "degraded": case_degraded,
     "no-token": case_no_token,
+    "audit": case_audit,
     "unreachable": case_unreachable,
 }
 
@@ -245,6 +310,10 @@ def main() -> int:
     from playwright.sync_api import sync_playwright
 
     names = [args.only] if args.only else list(CASES)
+    unknown = [n for n in names if n not in CASES]
+    if unknown:      # 写错状态名不该甩一个 KeyError 栈出来
+        print(f"未知状态：{unknown}\n可选：{', '.join(CASES)}", file=sys.stderr)
+        return 2
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         try:

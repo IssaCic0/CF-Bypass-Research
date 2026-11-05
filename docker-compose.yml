@@ -29,7 +29,7 @@ x-solver: &solver
       PREWARM_ADDONS: "0"
   # 与 CHANGELOG / git tag 同步：`docker compose up` 会优先用这个 tag 的本地镜像，
   # 没有才 build。写死版本号是故意的 —— 否则"线上跑的是哪个镜像"永远说不清。
-  image: cf-bypass-solver:6.2.2
+  image: cf-bypass-solver:6.3.0
   restart: unless-stopped
   volumes:
     - solver-data:/data

@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "CF-Bypass-Research 求解服务",
-    "version": "6.2.2",
+    "version": "6.3.0",
     "description": "Cloudflare `cf_clearance` / Turnstile token / reCAPTCHA v3 / AWS WAF token 的获取与回放服务。\n\n**这份规格是手写的**（本项目不引入 FastAPI/pydantic，见 policy.md 的『零新依赖』），因此必须由 `scripts/validate-openapi.mjs` 反向核对：规格里声明的 `path + method` 必须与 `solver/service.py` 里实际存在的路由**完全一致**，多一个少一个都报错。\n\n约定：\n- 鉴权：`Authorization: Bearer <token>`；`/health` 免鉴权（容器探活）。\n- 错误响应体：2xx 读 `ok`，非 2xx 读 `error_code`（另有 `stage` / `hint` 供自动重试与自助修复）。\n- `POST /shutdown` 额外限制来源必须是回环地址（除非启动时加 `--allow-remote-shutdown`）。"
   },
   "servers": [
@@ -1048,6 +1048,62 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/audit": {
+      "get": {
+        "tags": [
+          "monitoring"
+        ],
+        "summary": "审计 JSONL 尾部（v6.3，需 --audit-log）",
+        "description": "读 --audit-log 写的 JSONL 尾部。有界读取（最多 512KB，从文件末尾倒读），坏行跳过并在 note 里说明。lines 夹取到 [0,200]。",
+        "operationId": "getAudit",
+        "parameters": [
+          {
+            "name": "lines",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 50,
+              "minimum": 0,
+              "maximum": 200
+            },
+            "description": "返回多少条（新的在前）"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "审计尾部",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "lines": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    },
+                    "total_lines_estimate": {
+                      "type": "integer"
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    },
+                    "note": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
           }
         }
       }

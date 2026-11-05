@@ -574,6 +574,44 @@ YesCaptcha 的协议里没有 `route` 字段，所以兼容层一律按 `fixed` 
 - 待处理任务上限默认 **64**（`--compat-max-pending`），满了立刻 `ERROR_NO_SLOT_AVAILABLE`；
 - 每个任务跑在守护线程里，进程退出不会挂在上面；`POST /shutdown` 的优雅退出照常生效。
 
+## GET /audit — 需要 token（v6.3）
+
+读**审计 JSONL 的尾部**（`--audit-log` 写的那个文件）。存在的理由：审计一直在落盘，
+但此前没有任何查看手段 —— 只能 ssh 上去 `tail -f | jq`，而"昨天那次失败的完整链路"
+恰恰在文件里。参考 [logdy](https://github.com/logdyhq/logdy-core) 的思路：
+把日志变成浏览器里能看的东西。
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" "localhost:8878/audit?lines=50"
+```
+
+```json
+{
+  "lines": [ {"event":"solve","req_id":"ab12","host":"e.com","ok":false,
+              "error_code":"unsolved","ms":16530,"ts":1761000000.0}, ... ],
+  "total_lines_estimate": 812,
+  "truncated": true,
+  "note": ""
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `lines` | 最近 N 条，**新的在前**（与 `/logs` 契约一致） |
+| `total_lines_estimate` | **这段**读到的行数，不是全文行数（`truncated=true` 时尤其别当总数用） |
+| `truncated` | 只读了文件尾部一段（大文件不全文读取） |
+| `note` | 未开启审计 / 文件不可读 / 有坏行等原因说明 |
+
+三条硬约束：
+
+1. **有界读取**：从文件末尾倒着按 64KB 块读，最多 512KB。审计文件可能几百 MB，
+   一次 `read()` 就把内存打爆（本项目有过 21GB 内存爆炸史）。
+2. **坏行跳过而不是 500**：审计是 append 写入，进程被杀时最后一行可能是半截 JSON。
+   跳过的行数会写在 `note` 里，不静默。
+3. **只读**：不轮转、不删、不加锁。轮转仍是外部 logrotate 的事。
+
+`lines` 是调用方可控输入，与 `/logs` 同一套夹取规则（`[0, 200]`，非法值回默认，不报 400）。
+
 ## GET /status — 需要 token
 
 "**现在正在干什么**"。与 `/stats` 的分工：`/stats` 给总量与运维全量字段，

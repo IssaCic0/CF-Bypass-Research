@@ -70,6 +70,19 @@ CONSOLE_PAGE_HTML = """<!doctype html>
   .empty, .error { color:var(--muted); font-size:13px; padding:8px 0; }
   .error { color:var(--bad); }
   .foot { margin-top:16px; color:var(--muted); font-size:12px; }
+  .seg { display:inline-flex; align-items:center; gap:6px; font-weight:400;
+         text-transform:none; letter-spacing:0; cursor:pointer; }
+  .seg input { margin:0; }
+  /* 审计表格：本页原来只有 dl.kv，没有表格样式 —— 不加就会用浏览器默认布局，
+     实测「时间」列被撑得极宽、后面几列挤成一坨（看截图才发现）。 */
+  #audit table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  #audit th, #audit td { text-align:left; padding:5px 8px; border-bottom:1px solid var(--line); }
+  #audit th { color:var(--muted); font-weight:600; white-space:nowrap; }
+  #audit td.ts { color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  #audit td.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  /* 「结果」列固定窄宽：失败码长短不一时不能让它把「耗时」挤走 */
+  #audit td:nth-child(4) { white-space:nowrap; }
+  #audit tr:last-child td { border-bottom:none; }
   code { background:rgba(127,127,127,.15); padding:1px 5px; border-radius:4px; font-size:12px; }
 </style>
 </head>
@@ -103,8 +116,20 @@ CONSOLE_PAGE_HTML = """<!doctype html>
   </section>
 </div>
 
+<div class="grid" style="margin-top:12px">
+  <section class="card" style="grid-column:1 / -1">
+    <h2>审计日志（最近事件）
+      <span class="spacer"></span>
+      <label class="seg"><input type="checkbox" id="audit-auto"> 自动刷新</label>
+      <button id="audit-refresh" type="button">刷新</button>
+    </h2>
+    <div id="audit" class="empty">未加载</div>
+  </section>
+</div>
+
 <div class="foot">
-  本页只读（零写入）：数据只来自 <code>/health</code>（含 <code>research</code> 段），
+  本页只读（零写入）：数据只来自 <code>/health</code>（含 <code>research</code> 段）
+  与 <code>/audit</code>（审计 JSONL 尾部，需启动时带 <code>--audit-log</code>），
   没有任何表单或提交入口。token 用 <code>prompt()</code> 现问、只存
   <code>sessionStorage</code>（关标签页即失效），不写进这个页面、不落 localStorage。
 </div>
@@ -119,6 +144,10 @@ CONSOLE_PAGE_HTML = """<!doctype html>
   var cacheEl = document.getElementById("cache");
   var researchEl = document.getElementById("research");
   var errEl = document.getElementById("err");
+  var auditEl = document.getElementById("audit");
+  var auditRefreshBtn = document.getElementById("audit-refresh");
+  var auditAutoBox = document.getElementById("audit-auto");
+  var auditTimer = null;
   var refreshBtn = document.getElementById("refresh");
   var forgetBtn = document.getElementById("forget");
 
@@ -164,14 +193,18 @@ CONSOLE_PAGE_HTML = """<!doctype html>
     el.textContent = msg;
   }
 
-  function getHealth() {
+  // 统一的 JSON 拉取：所有端点同一套 header/cache 语义（多一个端点就多一份漂移风险）
+  function getJSON(path) {
     var headers = {};
     var t = token();
     if (t) headers["Authorization"] = "Bearer " + t;
-    return fetch("/health", { headers: headers, cache: "no-store" }).then(function (r) {
-      return r.json().then(function (body) { return { status: r.status, body: body }; });
+    return fetch(path, { headers: headers, cache: "no-store" }).then(function (r) {
+      return r.json().then(function (body) { return { status: r.status, body: body }; })
+        .catch(function () { return { status: r.status, body: {} }; });
     });
   }
+
+  function getHealth() { return getJSON("/health"); }
 
   function renderEmptyStates() {
     setEmpty(svcEl, "未收到 /health 响应：检查服务是否启动");
@@ -203,6 +236,22 @@ CONSOLE_PAGE_HTML = """<!doctype html>
       // 只给计数：11 项全铺在这张窄卡里会换 4 行，把四列布局撑歪（看截图才发现）。
       // 完整清单在状态页 `/` 的「万盾扩展类型」全宽卡上。
       svcRows.push(["扩展类型", b.captcha_types.length + " 种（清单见状态页）"]);
+    }
+    // 出口（v6.3）：出口选错 = 凭证绑在别的 IP 上 = 静默 403，必须在首页可见。
+    // 控制台只给摘要，逐出口明细在状态页 `/` 的那张全宽卡里（这里 4 列布局放不下）。
+    if (b.proxies) {
+      var pool = b.proxies;
+      var cooling = (pool.entries || []).filter(function (e) { return (e.cooldown_left_sec || 0) > 0; });
+      var unregistered = (pool.entries || []).filter(function (e) { return !e.egress_ip_known; });
+      svcRows.push(["出口", pool.size + " 个（健康 " + pool.healthy + "）"]);
+      if (cooling.length) {
+        svcRows.push(["冷却中", cooling.length + " 个", "bad"]);
+      }
+      if (unregistered.length) {
+        svcRows.push(["未登记 IP", unregistered.length + " 个（同 IP 的不同入口不共享缓存）", "warn"]);
+      }
+    } else if (b.egress_id) {
+      svcRows.push(["出口", b.egress_id + "（未配置代理池）"]);
     }
     setKV(svcEl, svcRows);
     var solves = b.solves || 0;
@@ -237,7 +286,106 @@ CONSOLE_PAGE_HTML = """<!doctype html>
     }
   }
 
-  function refresh() {
+  // ── 审计日志（v6.3）──────────────────────────────
+  //
+  // 为什么要有它：`--audit-log` 一直在写 JSONL，但此前**没有任何查看手段** ——
+  // 只能 ssh 上去 tail/jq。而"昨天那次失败的完整链路"恰恰在文件里。
+  // 这里只读 /audit（服务端已有界读取尾部 512KB，不会把内存打爆）。
+  function renderAudit(r) {
+    clearEl(auditEl);
+    if (r.status === 401) {
+      auditEl.className = "empty";
+      auditEl.textContent = "需要 token 才能看审计日志（与其它区块同一套鉴权）";
+      return;
+    }
+    if (r.status !== 200) {
+      auditEl.className = "error";
+      auditEl.textContent = "/audit 返回异常：" + r.status;
+      return;
+    }
+    var b = r.body || {};
+    var rows = b.lines || [];
+    if (!rows.length) {
+      auditEl.className = "empty";
+      auditEl.textContent = b.note || "审计日志为空（启动时加 --audit-log <path> 才有）";
+      return;
+    }
+    auditEl.className = "";
+    if (b.note) { auditEl.appendChild(noteDiv(b.note)); }
+    if (b.truncated) {
+      auditEl.appendChild(noteDiv("只显示了文件尾部一段（大文件不全文读取，避免吃内存）"));
+    }
+    // 约束 4：全用 createElement + textContent，不拼 HTML 字符串
+    var table = document.createElement("table");
+    var thead = document.createElement("thead");
+    var htr = document.createElement("tr");
+    [["时间", ""], ["事件", ""], ["目标", ""], ["结果", ""], ["耗时", "num"], ["后端", ""]]
+      .forEach(function (h) {
+        var th = document.createElement("th");
+        th.textContent = h[0];
+        if (h[1]) th.className = h[1];
+        htr.appendChild(th);
+      });
+    thead.appendChild(htr); table.appendChild(thead);
+    var tbody = document.createElement("tbody");
+    rows.forEach(function (ln) {
+      var tr = document.createElement("tr");
+      var when = ln.ts ? new Date(ln.ts * 1000).toLocaleTimeString() : "—";
+      // 耗时：>1s 用秒（"16.5 s" 比 "16530 ms" 好读），<1s 保留毫秒（求解失败常常 <200ms，
+      // 折成 "0.2 s" 会看不出量级差异）
+      var took = "—";
+      if (ln.ms != null) {
+        took = (ln.ms >= 1000) ? (ln.ms / 1000).toFixed(1) + " s" : ln.ms + " ms";
+      } else if (ln.elapsed != null) {
+        took = ln.elapsed + " s";
+      }
+      addCell(tr, when, "ts");
+      addCell(tr, ln.event || "—");
+      addCell(tr, ln.host || ln.path || "—");
+      var tdResult = document.createElement("td");
+      var span = document.createElement("span");
+      // ok===false 才算失败；缺这个字段（老审计行）按"没有失败标记"处理，不猜
+      span.className = (ln.ok === false) ? "bad" : "ok";
+      span.textContent = (ln.ok === false) ? (ln.error_code || "失败") : "ok";
+      tdResult.appendChild(span);
+      tr.appendChild(tdResult);
+      addCell(tr, took, "num");
+      addCell(tr, ln.backend || "—");
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    auditEl.appendChild(table);
+  }
+
+  function addCell(tr, text, cls) {
+    var td = document.createElement("td");
+    td.textContent = text == null ? "—" : String(text);
+    if (cls) td.className = cls;
+    tr.appendChild(td);
+  }
+
+  function noteDiv(text) {
+    var div = document.createElement("div");
+    div.className = "empty";
+    div.textContent = text;
+    return div;
+  }
+
+  function clearEl(el) {
+    while (el.firstChild) { el.removeChild(el.firstChild); }
+  }
+
+  function refreshAudit() {
+    auditRefreshBtn.disabled = true;
+    getJSON("/audit?lines=100").then(function (r) {
+      renderAudit(r);
+    }).catch(function (e) {
+      auditEl.className = "error";
+      auditEl.textContent = "拉取 /audit 失败：" + (e && e.message ? e.message : "请求失败");
+    }).then(function () { auditRefreshBtn.disabled = false; });
+  }
+
+  function refreshHealth() {
     refreshBtn.disabled = true;
     renderEmptyStates();
     if (!token()) {
@@ -246,11 +394,11 @@ CONSOLE_PAGE_HTML = """<!doctype html>
         setState("未鉴权", "unauthorized");
         setBanner("未提供 token：所有区块都没有数据。点「刷新」可重新输入。", false);
         refreshBtn.disabled = false;
-        return;
+        return Promise.resolve();
       }
       sessionStorage.setItem(TOKEN_KEY, t.trim());
     }
-    getHealth().then(function (r) {
+    return getHealth().then(function (r) {
       if (r.status === 401) {
         sessionStorage.removeItem(TOKEN_KEY);
         setState("token 无效", "unauthorized");
@@ -292,8 +440,23 @@ CONSOLE_PAGE_HTML = """<!doctype html>
     }).then(function () { refreshBtn.disabled = false; });
   }
 
+  // 「刷新」是**整页**操作：审计区块也在这一页上，不能让主刷新留下旧数据。
+  // （同时保留审计区块自己的「刷新」：只想看日志尾部时不必重拉 /health。）
+  function refresh() {
+    return refreshHealth().then(refreshAudit);
+  }
+
   // 不用内联事件属性，全部 addEventListener（约束 4）
   refreshBtn.addEventListener("click", refresh);
+  auditRefreshBtn.addEventListener("click", refreshAudit);
+  auditAutoBox.addEventListener("change", function () {
+    if (auditAutoBox.checked) {
+      auditTimer = setInterval(refreshAudit, 5000);
+      refreshAudit();
+    } else if (auditTimer) {
+      clearInterval(auditTimer); auditTimer = null;
+    }
+  });
   forgetBtn.addEventListener("click", function () {
     sessionStorage.removeItem(TOKEN_KEY);
     setState("未鉴权", "unauthorized");
@@ -302,7 +465,7 @@ CONSOLE_PAGE_HTML = """<!doctype html>
   });
 
   renderEmptyStates();
-  refresh();
+  refresh();          // 整页刷新，含审计区块（不并发的另一个 refreshAudit 会造成两次请求）
 })();
 </script>
 </body>

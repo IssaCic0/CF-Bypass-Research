@@ -278,6 +278,7 @@ scripts/
   loadtest.py           # 离线压测三模式（hot/cold/share）
   doctor.py             # 环境自检（起一次服务打 /health）
   capture_sample.py     # CF 挑战样本采集（默认 dry-run；产出带 sha256 的 manifest）
+  record_traffic.py     # 真实浏览器会话流量录制（默认 dry-run；Set-Cookie 只记名不记值）
   validate-findings.mjs # 校验 docs/findings.json（证据路径必须存在 + 定级规则）
   analyze.py            # 静态分析 jsd main.js：字符串字面量 / 码表 / 关键字命中
   scan_ctype.py         # 50 站采样，统计 CF 挑战类型 cType 分布
@@ -285,7 +286,7 @@ scripts/
   probe_camoufox.py     # Camoufox 过盾实验
   diag_challenge.py     # 挑战页 DOM 诊断：iframe / checkbox / 按钮 / 截图
 captchas/               # 万盾求解器副本（11 厂商；自包含，不追上游，见 captchas/README.md）
-tests/                  # 912 项 Python 测试（注入假浏览器/假后端，离线）
+tests/                  # 971 项 Python 测试（注入假浏览器/假后端，离线）
 docs/
   项目规格.md            # ★ 单一事实源：是什么/边界/承诺什么/不承诺什么
   API.md                # ★ 接口契约（参数/响应/错误码表）
@@ -379,6 +380,8 @@ cd gocfsolve && go vet ./... && go test -race ./...           # Go 侧（httptes
 node scripts/validate-findings.mjs              # 校验研究结论的证据链
 python scripts/capture_sample.py --url https://<target>/ --out samples/x        # 试运行（不联网）
 python scripts/capture_sample.py --url https://<target>/ --out samples/x --real # 真抓（受 --max-requests 预算约束）
+python scripts/record_traffic.py --url https://<target>/ --out samples/x        # 流量录制（试运行）
+python scripts/record_traffic.py --url https://<target>/ --out samples/x --real # 真录（浏览器会话，受 --max-requests 预算约束）
 ```
 
 ### 压测与缓存共享演练（默认离线，不打真实站点）

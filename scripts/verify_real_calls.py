@@ -148,7 +148,7 @@ def main() -> int:
         for path, method, payload in (
             ("/status", "GET", None), ("/logs", "GET", None),
             ("/stats", "GET", None), ("/metrics", "GET", None),
-            ("/console", "GET", None),
+            ("/console", "GET", None), ("/audit", "GET", None),
             ("/detect", "POST", {"url": "http://127.0.0.1:1/"}),
             ("/solve", "POST", {"url": "http://127.0.0.1:1/", "want": "clearance"}),
         ):
@@ -173,6 +173,25 @@ def main() -> int:
         check("11 /status 不把自身算进 inflight", s.get("inflight_count") == 0, str(s.get("inflight_count")))
         st, body, _ = call(base, "GET", "/logs?lines=5", token=token)
         check("12 GET /logs 返回环形缓冲", st == 200 and "lines" in as_json(body))
+        # /audit（v6.3）：此刻审计文件里还没有 solve 事件以外的内容，但它必须**能读**、
+        # 且返回结构稳定（lines 是最新在前的数组，total_lines_estimate/truncated 在）。
+        st, body, _ = call(base, "GET", "/audit?lines=5", token=token)
+        aud = as_json(body)
+        check("12b GET /audit 返回尾读结构",
+              st == 200 and isinstance(aud.get("lines"), list)
+              and "total_lines_estimate" in aud and "truncated" in aud,
+              f"status={st} keys={sorted(aud)[:6]}")
+        st, body, _ = call(base, "GET", "/audit?lines=999999", token=token)
+        aud_big = as_json(body)
+        # 夹取上界 = MAX_LOG_LINES(200)。**注意这个端点此刻审计行通常很少，
+        # 所以"行数 <= 200"在真进程里多半空转** —— 真正的夹取证据在
+        # tests/test_observability.py::test_audit_endpoint_serves_tail_and_clamps_lines
+        # （fixture 造 500 行）。这里守的是"响应体不许被放大"这条可观测下界。
+        check("12c /audit lines 超限不放大响应",
+              st == 200 and len(aud_big.get("lines") or []) <= 200 and len(body) < 200_000,
+              f"status={st} n={len(aud_big.get('lines') or [])} bytes={len(body)}")
+        st, body, _ = call(base, "GET", "/audit?lines=abc", token=token)
+        check("12d /audit 非数字 lines 不炸（退回默认）", st == 200, f"status={st}")
         st, body, _ = call(base, "GET", "/stats", token=token)
         check("13 GET /stats 200", st == 200)
         st, body, _ = call(base, "GET", "/metrics", token=token)

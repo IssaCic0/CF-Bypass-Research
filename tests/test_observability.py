@@ -486,3 +486,130 @@ def test_process_metrics_samples_current_before_peak():
     code = chr(10).join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
     assert code.index("/proc/self/statm") < code.index("ru_maxrss"), \
         "必须先读 statm（当前）再读 ru_maxrss（峰值），否则 peak<rss 的窗口更大"
+
+
+# ── v6.3：/audit 端点（审计 JSONL 尾部）──────────────
+
+
+def _audit_file(tmp_path, n=8, bad_tail=False):
+    import json as _j
+    p = tmp_path / "audit.jsonl"
+    rows = [{"event": "solve", "req_id": f"r{i}", "host": f"s{i}.com", "ok": i % 3 != 0,
+             "error_code": "" if i % 3 else "unsolved", "ms": 1500, "ts": 1761000000 + i}
+            for i in range(n)]
+    text = "\n".join(_j.dumps(r) for r in rows) + "\n"
+    if bad_tail:
+        text += '{"half": '          # 进程被杀时的半截行
+    p.write_text(text, encoding="utf-8")
+    return p
+
+
+def test_read_jsonl_tail_returns_newest_first(tmp_path):
+    from solver.eventlog import read_jsonl_tail
+
+    f = _audit_file(tmp_path, 8)
+    got = read_jsonl_tail(str(f), 3)
+    assert len(got["lines"]) == 3
+    assert got["lines"][0]["req_id"] == "r7", "最新的必须在最前（与 /logs 契约一致）"
+
+
+def test_read_jsonl_tail_skips_half_written_line(tmp_path):
+    """审计是 append 写入，进程被杀时最后一行可能是半截 JSON。
+
+    一行坏**不能**把端点弄挂 —— 运维恰恰在事故后最需要看它。
+    """
+    from solver.eventlog import read_jsonl_tail
+
+    f = _audit_file(tmp_path, 5, bad_tail=True)
+    got = read_jsonl_tail(str(f), 10)
+    assert len(got["lines"]) == 5, "半截行应被跳过，其余行照常返回"
+    assert "无法解析" in got["note"], "跳过的行数必须如实告知，不能静默"
+
+
+def test_read_jsonl_tail_is_bounded(tmp_path):
+    """大文件只读尾部一段 —— 这是本函数存在的**主要**理由（内存）。"""
+    from solver.eventlog import read_jsonl_tail
+
+    f = tmp_path / "big.jsonl"
+    line = '{"event":"x","req_id":"' + "a" * 200 + '"}\n'
+    f.write_text(line * 20000, encoding="utf-8")     # ≈4MB
+    got = read_jsonl_tail(str(f), 5, max_bytes=64 * 1024)
+    assert len(got["lines"]) == 5
+    assert got["truncated"] is True, "只读了尾部一段时必须如实标注"
+
+
+def test_read_jsonl_tail_notes_for_missing_cases(tmp_path):
+    from solver.eventlog import read_jsonl_tail
+
+    assert "未开启" in read_jsonl_tail("", 5)["note"]
+    assert "不可读" in read_jsonl_tail(str(tmp_path / "nope"), 5)["note"]
+    empty = tmp_path / "empty.jsonl"
+    empty.write_text("", encoding="utf-8")
+    assert "为空" in read_jsonl_tail(str(empty), 5)["note"]
+
+
+def test_audit_endpoint_requires_token(live_server):
+    base = live_server
+    status, _ = _get(base, "/audit")
+    assert status == 401
+
+
+def test_audit_endpoint_serves_tail_and_clamps_lines(live_server, monkeypatch, tmp_path):
+    import json as _j
+    base = live_server
+    # ⚠️ fixture 必须**超过** MAX_LOG_LINES，否则"夹取"断言是空转的：
+    # 之前这里只造了 6 行，`lines=99999` 无论夹不夹都 <= 200 —— 于是漏掉了
+    # `/audit?lines=100000` 真能吐 3506 行的缺陷（实测 524KB）。
+    f = _audit_file(tmp_path, MAX_LOG_LINES + 300)
+    # 必须 patch 脚本模式那个 Handler：live_server fixture 用的是 `import service`
+    # （sys.path 里插了 solver/），而 `solver.service` 是另一个模块对象、另一个 Handler 类。
+    import service as svc_mod
+    monkeypatch.setattr(svc_mod.Handler, "audit_path", str(f))
+    status, body = _get(base, "/audit?lines=2", "test-token")
+    assert status == 200
+    data = _j.loads(body)
+    assert len(data["lines"]) == 2
+    # lines 是调用方可控输入：超大值必须被夹取，不能返回全文件
+    status, body = _get(base, "/audit?lines=99999", "test-token")
+    rows = _j.loads(body)["lines"]
+    assert status == 200
+    assert len(rows) == MAX_LOG_LINES, f"夹取失效：拿到 {len(rows)} 行"
+    # 0/负数：与 `/logs?lines=0` 一致 —— 要 0 行就回 0 行，不许"至少一行"
+    for q in ("/audit?lines=0", "/audit?lines=-5"):
+        status, body = _get(base, q, "test-token")
+        assert status == 200 and _j.loads(body)["lines"] == [], q
+
+
+def test_audit_endpoint_without_audit_log_says_so(live_server, monkeypatch):
+    """没开 --audit-log 时要说清楚原因，不能返回一个空数组让人以为"没事件"。"""
+    import json as _j
+    base = live_server
+    import service as svc_mod
+    monkeypatch.setattr(svc_mod.Handler, "audit_path", "")
+    status, body = _get(base, "/audit", "test-token")
+    assert status == 200
+    assert "未开启审计" in _j.loads(body)["note"]
+
+
+def test_console_renders_audit_section():
+    """logdy 的价值是"浏览器里能看"；区块必须在页面里，且遵守 DOM 写入纪律。"""
+    from solver.console_html import CONSOLE_PAGE_HTML
+
+    assert 'id="audit"' in CONSOLE_PAGE_HTML
+    assert "/audit?lines=" in CONSOLE_PAGE_HTML
+    assert "innerHTML" not in CONSOLE_PAGE_HTML, "本页硬约束：禁止 innerHTML"
+    assert "createElement" in CONSOLE_PAGE_HTML
+
+
+def test_read_jsonl_tail_zero_lines_returns_zero(tmp_path):
+    """`lines=0` 要 0 行 —— 与 `/logs?lines=0` 同一套夹取规则（API.md 这么承诺的）。
+
+    回归：`read_jsonl_tail` 内部曾是 `max(1, lines)`，于是 `/audit?lines=0` 回 1 行，
+    和 `/logs?lines=0` 回 0 行对不上。
+    """
+    from solver.eventlog import read_jsonl_tail
+
+    f = _audit_file(tmp_path, 12)
+    got = read_jsonl_tail(str(f), 0)
+    assert got["lines"] == [], got
+    assert got["truncated"] is False

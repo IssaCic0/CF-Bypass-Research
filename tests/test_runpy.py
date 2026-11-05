@@ -89,3 +89,20 @@ def test_runpy_verify_fails_fast_on_first_failure():
     rc = mod.run_steps(steps)
     assert executed == ["step-a-ok", "step-b-fail"], f"fail-fast 失效，实际执行: {executed}"
     assert rc == 3, f"退出码应为第一个失败步骤的 3，实际 {rc}"
+
+
+def test_command_echo_redacts_proxy_password(capsys):
+    """回显的那行命令不许带出口口令（它常被重定向进文件/CI 日志/贴进 issue）。"""
+    run = _load_runpy()
+    run.run(["--proxy", "http://usr:S3CRET@127.0.0.1:47530", "--port", "8878"])
+    out = capsys.readouterr().out
+    assert "S3CRET" not in out, out
+    assert "http://usr:***@127.0.0.1:47530" in out
+    assert "--port 8878" in out          # 其余部分照常可读，不是整行吞掉
+
+
+def test_command_echo_keeps_passwordless_url_intact():
+    """没有口令的地址不能被误伤成 `h:***@`。"""
+    run = _load_runpy()
+    assert run._redact(["--proxy", "http://h:8080"]) == "--proxy http://h:8080"
+    assert run._redact(["--proxy", "socks5://u:p@h:1"]) == "--proxy socks5://u:***@h:1"

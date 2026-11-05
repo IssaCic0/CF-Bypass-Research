@@ -1,3 +1,126 @@
+## [6.3.0] - 2026-11-05
+
+主题：**补上两条断链 —— "出口到底是谁"和"挑战页到底在干什么"**。
+
+这两件事一直只能靠猜：
+- `cf_clearance` 与 (domain + **出口 IP** + UA) 三者绑定，任何一个不匹配都是静默 403。
+  但出口 IP 只能从 `--proxy` 参数和部署记录里"认为"，池里登记的地址**从没被实测过**。
+  填错了不会报错，只会表现为"这个代理莫名过不去"。
+- 挑战页在什么时机、按什么顺序、下发哪个 cookie，是这套项目最需要的第一手材料。
+  而 `scripts/capture_sample.py` 走的是 urllib —— 能拿到 HTML 和脚本正文，但拿不到
+  真实浏览器会话的 header 顺序与真实值、JS 设的 cookie、子资源时序、状态码序列。
+
+参考：`proxypool` 的出口 tester 思路（A）、`logdy` 的"日志要能直接看"（B）、
+`mitmproxy` 的流量 addon 架构（C，用 Playwright `page.on` 等价实现，**零新依赖**）。
+
+### A. 出口 IP 实测校验
+
+`python run.py egress --proxy URL [--proxy-egress-ip URL=IP]`（= `scripts/doctor.py --offline --verify-egress`）。
+
+- `ProxyPool.entries_snapshot()`：内部只读快照，含 `raw_url`（校验出口必须用真地址）。
+  这个值**永不进日志、永不进 HTTP 响应** —— 池对外的 `snapshot()` 仍然脱敏。
+- `parse_echo_ip()`：认三种回显格式（Cloudflare `/cdn-cgi/trace` 的 `key=value` 行、
+  httpbin 的 `{"origin": ...}`、纯 IP 文本）。拿不到合法 IPv4 就返回空串，
+  **绝不把原文当 IP** —— 否则回显页 302 到 HTML 时会把一堆标签当成"实测 IP"。
+- `verify_egress()`：五路判断。只有**登记值 ≠ 实测值**才判红（那是缓存键错位、
+  凭证发给错出口的源头）；未登记 + 实测成功判绿并给出登记建议；探测失败不判红
+  （代理挂了是另一件事）。
+- **刻意不写回**：实测结果只报告，不自动改池里的 `egress_ip`。自动写回会把
+  "登记错了"这种配置问题变成静默自愈，从此再没人发现出口换过。
+- `doctor` 默认不出站。整个工具只有显式加 `--verify-egress` 才发请求。
+
+### B. 审计日志可看：`GET /audit?lines=N`
+
+- `solver/eventlog.py::read_jsonl_tail()`：**尾部**有界读取（`AUDIT_TAIL_MAX_BYTES = 512KB`，
+  64KB 分块反向读）。最新在前；碰到写了一半的行就跳过（并发 append 时最后一行常是半截）；
+  返回 `total_lines_estimate` 与 `truncated`，让人知道"看到的是尾巴，不是全部"。
+- 端点要 token，`lines` 有上限钳制；没有审计文件时明确回"没有审计日志"而不是空数组。
+- 控制台新增审计区块：时间/事件/结果/耗时/说明。耗时按人读的方式显示
+  （`16.5 s`，不是 `16530 ms`），失败行有标记。
+
+### C. 真实浏览器会话流量录制：`scripts/record_traffic.py`
+
+```
+python scripts/record_traffic.py --url <target> --out samples/x            # dry-run（默认）
+python scripts/record_traffic.py --url <target> --out samples/x --real     # 真录
+  --engine camoufox|chromium   --max-requests N   --wait-after SEC   --ua UA
+```
+
+产物：`traffic.jsonl`（一行一个请求/响应配对，新的在后）+ `summary.json`（按资源类型/
+状态码/主机计数、时序、Set-Cookie 名清单、失败原因）+ `manifest.json`（元数据与预算）。
+
+三条硬约束：
+1. **默认 dry-run**，不传 `--real` 只打印"会去哪儿、会录什么"，零网络；
+2. **请求预算** `--max-requests`（默认 60，硬上限 200，突破需显式 `--allow-over-budget`）。
+   真机预算不可再生，所以预算必须**严格**；
+3. **凭证永不落盘**：header 走白名单（`X-*` 一律不记）；`Cookie`/`Authorization`/`X-Api-Key`
+   只记"有没有"；`Set-Cookie` 只记**名字与个数**，值一律不写。`body` 只量大小不落盘。
+
+### D. 出口状态进 UI 与控制台
+
+- 状态页新增「出口（代理池）」卡片：出口、`egress_id`、评分、连续失败、冷却剩余、
+  成功/失败、出口 IP 是否已登记。
+- 控制台 `/health` 的代理行同步展示。
+- **三种"没有 proxies"分开说**，否则就是谎报：未带 token（读不到）／带 token 且确实没配／
+  服务端版本太老没有这个字段。
+
+### 本轮自查发现并修掉的缺陷
+
+| # | 位置 | 缺陷 |
+|---|---|---|
+| 1 | `record_traffic.py` | 录制预算被**并发请求**打穿：`--max-requests 2` 实跑录到 5 条 |
+| 2 | `record_traffic.py` | 改成数 `len(records)+len(pending)` 仍录到 3 条 —— 真因是 `resp.body()` 切 greenlet 时本条响应还没入账；修法是放行瞬间自增的单调计数器 + **先入账再取可能切 greenlet 的东西** |
+| 3 | `record_traffic.py` | `headers_array` 是**方法**不是属性（写成属性访问 → Set-Cookie 一个都收不到） |
+| 4 | `record_traffic.py` | `headers_array()` 返回**全部** header 不只是 set-cookie（漏过滤 → `['28','text/html','Thu, 05 Nov…']` 被当成 cookie 名） |
+| 5 | `console_html.py` | 审计区块用 `innerHTML` + 一个不存在的 `esc()` → 整块永远显示失败；改成纯 DOM API |
+| 6 | `console_html.py` | 审计表没有 CSS → 时间列独占 414px、其余挤成一坨 |
+| 7 | `statuspage.py` | 没有 token 时**谎报**"未配置代理池"（实际只是读不到） |
+| 8 | `statuspage.py` | `setEmptyEl` 写死 class `"chips"` → 代理卡片被套上 flex 布局 |
+| 9 | `statuspage.py` | 代理表列贴死（`70` 与 `3` 粘在一起）→ 补 `padding: 6px 12px` |
+| 10 | `run.py` | 回显的命令行带出口口令（`http://u:p@h:8080` 会进 CI 日志/贴进 issue） |
+| 11 | `run.py` / `verify_ui_e2e.py` | `ui --only` 写错状态名甩 `KeyError` 栈；`egress` 的回显地址参数名是 `--value`（与 doctor 的 `--egress-echo-url` 不一致） |
+| 12 | `eventlog.py` | `read_audit_tail` 曾是 `Handler` 的 `@staticmethod` 却按实例属性调用 → `AttributeError`；移到 `eventlog.py` 作模块函数 |
+| 13 | `console_html.py` | 顶部「刷新」只刷 `/health`，审计表**停在旧数据** —— 同一页两个「刷新」一个全量一个局部，主操作竟是局部的 |
+| 14 | `record_traffic.py` | `--url https://u:p@host/` 把口令逐字写进 `traffic.jsonl` / `manifest.json` / dry-run 输出 —— 违反本模块自己的「凭证永不落盘」 |
+| 15 | `service.py::_query_lines` | **完全不夹取**：`/audit?lines=100000` 吐 3506 行 / 524KB（实测），而 `API.md` 承诺与 `/logs` 同一套 `[0, 200]` 规则。`/logs` 的夹取在 `Solver.logs()` 里，`/audit` 走的 `read_jsonl_tail()` 只有 `max(1, lines)`，没有上界 |
+| 16 | 两条断言 | 上面这条缺陷被**两条空转断言**漏掉：单测 fixture 只造 6 行、真实调用用的是刚建的空审计文件，`lines=99999` 无论夹不夹都 `<= 200`。改法是 fixture 造 `MAX_LOG_LINES + 300` 行并断言**恰好等于**上限 |
+
+### 独立复审（第 1 轮，`claude -p` 独立进程，范围收窄到 4 个交付文件）
+
+详见 `plans/证据/independent-review-v6.3-r1.md`。4 条真缺陷，全部已修 + 回归用例 + 变异验证：
+
+| # | 级别 | 缺陷 |
+|---|---|---|
+| R1 | **P1** | `nav_error` 未脱敏：Playwright 的超时消息**内嵌完整 URL**，而"挑战页导航超时"正是本工具最常走的分支 → `manifest.json` 与 stdout 带出口令，`traffic.jsonl` 却是干净的 |
+| R2 | P2 | `--engine camoufox` 仍强行塞 Windows/Firefox UA：求解侧**不加 UA**（身份由 persona 决定，缓存键取 `navigator.userAgent` 实测值），于是"与求解时同一套指纹"在这一维上是假的 |
+| R3 | P2 | `doctor.py` 里任一 `--proxy-egress-ip` 匹配不上就 `return` → `--verify-egress` **静默不执行**，报告里连"未实测"都不出现，读起来像"没问题" |
+| R4 | P3 | `item.partition("=")` 按第一个等号切：代理口令含 `=`（base64 填充）时必然登记失败，还报"出口不在 `--proxy` 列表里"（它就在）。`doctor.py` 与 `bootstrap.py` 两处同源 |
+
+复审另指出 `/audit?lines=0` 回 1 行而 `/logs?lines=0` 回 0 行与 `API.md` 的"同一套夹取规则"
+不符 —— 已修（`max(1, lines)` → `max(0, lines)`）。
+
+这四条里有三条是同一个形状：**承诺与主干路不一致**（脱敏漏了最常走的分支、宣称同一套指纹
+却改了那个维度、宣称实测却在参数写错时静默不测）。单跑一遍 happy path 永远发现不了。
+
+第 1/2 项的回归测试用变异验证过：把实现退回任一旧版，三条预算用例当场变红。
+第 13 项同样验证过：把「主刷新」改回不碰审计，`audit/顶部刷新会带上审计区块` 立刻红（rows=8，期望 9）。
+
+### 验证
+
+- 本机 Python：**964 passed / 7 skipped**（总 971）；`solver/` **89.62%**，23 个模块全部达标。
+- UI 截图验收：**31/31**，6 种状态（新增 `audit`）+ 按钮交互 + 逐张看片。
+- 真实调用验收：**41/41**（真进程 + 真 token；新增 `/audit` 的 401、尾读结构、`lines` 钳制与非数字容错）。
+- 真实 E2E：**40/40**；服务契约 golden 13 端点一致；openapi 14 操作与源码一致。
+- 录制真跑：本机 chromium 打本地「1 文档 + 1 CSS + 1 JS + 2 图（1 个 404）」站点，
+  预算 1/2/3/5/6 各档严格、连跑 10 轮无越界；`Set-Cookie` 多值解析、
+  凭证不落盘（含 `--url https://u:p@host/`）、白名单外 header 不落盘均实测确认。
+- 两个引擎都真跑过，并且 `manifest.user_agent` 记的是**实测**值：
+  chromium → `HeadlessChrome/151`；camoufox → `Macintosh; Intel Mac OS X 10.15 … Firefox/156`。
+  （旧默认硬塞的是 `Windows NT 10.0 … Firefox/156` —— 与实际 persona 自相矛盾。）
+- 出口校验真跑：本地模拟回显代理，一致 → ✓、不一致 → ✗ FAIL(exit=2)、未登记 → WARN + 实测成功。
+- `/audit` 大文件真跑（876KB / 6000 行）：`lines=100000` 由 3506 行 / 524KB / 56.7ms
+  收到 **200 行 / 30KB / 3.3ms**；`lines=0` → 1 行；`lines=abc` → 回落默认 50。
+
 ## [6.2.2] - 2026-11-05
 
 主题：**修 v6.2.1 的第三处 CI 红**（`python (3.11)` only；3.12 绿）。

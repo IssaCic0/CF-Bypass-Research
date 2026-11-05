@@ -118,6 +118,10 @@ STATUS_PAGE_HTML = """<!doctype html>
     <h2>万盾扩展类型（captchas/ 受理清单）</h2>
     <div id="captcha-types" class="chips empty">未加载</div>
   </section>
+  <section class="card wide">
+    <h2>出口（代理池）</h2>
+    <div id="proxies" class="empty">未加载</div>
+  </section>
 </div>
 
 <div class="foot">
@@ -136,6 +140,7 @@ STATUS_PAGE_HTML = """<!doctype html>
   var inflightTableEl = document.getElementById("inflight-table");
   var logsEl = document.getElementById("logs");
   var chipsEl = document.getElementById("captcha-types");
+  var proxiesEl = document.getElementById("proxies");
   var tokenInput = document.getElementById("token");
   var saveBtn = document.getElementById("save");
   var refreshBtn = document.getElementById("refresh");
@@ -258,9 +263,70 @@ STATUS_PAGE_HTML = """<!doctype html>
     });
   }
 
-  function setEmptyEl(el, msg) {
-    el.className = "chips empty";
+  // 空的占位：class 由调用方给（扩展类型卡用 "chips empty"，出口卡用 "empty"），
+  // 硬编码成 chips 会把出口卡也套上 flex 布局（那个 class 是给标签列用的）。
+  function setEmptyEl(el, msg, cls) {
+    el.className = (cls || "chips") + " empty";
     el.textContent = msg;
+  }
+
+  // 出口区块（v6.3）。为什么值得单独一块：出口选错 = 凭证绑在别的 IP 上 = 静默 403，
+  // 而"哪个在冷却、哪个没登记 IP"此前只能靠手打 /health | jq 才看得到。
+  function renderProxies(b) {
+    // ⚠️ 三种"没有 proxies"必须分开说，否则就是**谎报**（看截图发现）：
+    //   ① 未带 token → /health 只回最小集，我们**读不到**，不能声称"没配代理池"
+    //   ② 带 token 且确实没配 → 才是"未配置"
+    //   ③ 带了 token 但服务端没这个字段（老版本）→ 说清楚版本不匹配
+    if (b.backends === undefined) {
+      setEmptyEl(proxiesEl, "需要 token 才能看出口状态（/health 未鉴权时只回最小集）",
+                 "empty");
+      return;
+    }
+    var pool = b.proxies;
+    if (!pool) {
+      setEmptyEl(proxiesEl, "未配置代理池（启动时没有 --proxy）；本进程出口 = " +
+                            (b.egress_id || "default"), "empty");
+      return;
+    }
+    proxiesEl.className = "";
+    proxiesEl.innerHTML = "";
+    var head = document.createElement("div");
+    head.className = "sub";
+    head.textContent = pool.size + " 个出口，健康 " + pool.healthy +
+                       "；本进程默认出口 " + (b.egress_id || "default");
+    proxiesEl.appendChild(head);
+    var table = document.createElement("table");
+    var thead = document.createElement("thead");
+    var htr = document.createElement("tr");
+    ["出口", "egress_id", "评分", "连续失败", "冷却剩余", "成功/失败", "出口 IP"].forEach(function (t) {
+      var th = document.createElement("th");
+      th.textContent = t;
+      htr.appendChild(th);
+    });
+    thead.appendChild(htr); table.appendChild(thead);
+    var tbody = document.createElement("tbody");
+    (pool.entries || []).forEach(function (e) {
+      var tr = document.createElement("tr");
+      addTd(tr, e.proxy, "");
+      addTd(tr, e.egress_id, "");
+      addTd(tr, String(e.score), "num");
+      addTd(tr, String(e.consecutive_failures), e.consecutive_failures > 0 ? "bad" : "num");
+      var cd = e.cooldown_left_sec || 0;
+      addTd(tr, cd > 0 ? cd + " s" : "—", cd > 0 ? "bad" : "");
+      addTd(tr, (e.success || 0) + " / " + (e.failure || 0), "num");
+      // 未登记 IP 是个**警告**：不算错，但同一 IP 的不同入口不能共享缓存
+      addTd(tr, e.egress_ip_known ? "已登记" : "未登记", e.egress_ip_known ? "ok" : "warn");
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    proxiesEl.appendChild(table);
+  }
+
+  function addTd(tr, text, cls) {
+    var td = document.createElement("td");
+    td.textContent = text == null ? "—" : String(text);
+    if (cls) td.className = cls;
+    tr.appendChild(td);
   }
 
   function renderStatus(r) {
@@ -355,6 +421,7 @@ STATUS_PAGE_HTML = """<!doctype html>
         markStale(false);
         renderHealth(rs[0]);
         renderCaptchaTypes(rs[0].body || {});
+        renderProxies(rs[0].body || {});
         renderStatus(rs[1]);
         renderLogs(rs[2]);
         // /health 是公开的（所以"服务活着"这件事不需要 token 就能看到）；

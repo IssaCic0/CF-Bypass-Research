@@ -23,7 +23,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('doctor', 'test', 'quick', 'go', 'findings', 'smoke', 'e2e', 'start', 'stop', 'bench', 'verify', 'ui', 'realcalls', 'report', 'help')]
+    [ValidateSet('doctor', 'test', 'quick', 'go', 'findings', 'smoke', 'e2e', 'start', 'stop', 'bench', 'verify', 'ui', 'realcalls', 'report', 'egress', 'help')]
     [string]$Command = 'help',
 
     [int]$Port = 8878,

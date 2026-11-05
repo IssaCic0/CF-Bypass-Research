@@ -16,8 +16,10 @@ go → findings → e2e → repo hygiene → research doctor → service-report(
     python run.py doctor [--port N]
     python run.py test | quick | go | findings | verify | e2e | bench | start | stop
     python run.py smoke [--port N] [--no-auth]
-    python run.py ui [--only ready|wedged|degraded|no-token|unreachable]
+    python run.py ui [--only ready|wedged|degraded|no-token|audit|unreachable]
     python run.py realcalls | report [--write]
+    python run.py egress --proxy URL [--proxy URL ...] [--proxy-egress-ip URL=IP ...]
+                    [--egress-echo-url URL]          # 唯一会出站的子命令
 """
 import argparse
 import os
@@ -55,6 +57,7 @@ COMMANDS = {
     'ui': None,
     'realcalls': None,
     'report': None,
+    'egress': None,
     'help': None,
 }
 
@@ -63,9 +66,20 @@ def step(msg):
     print(f"\n=== {msg} ===")
 
 
+def _redact(cmd) -> str:
+    """回显命令时把 `scheme://user:pass@host` 里的口令抹掉。
+
+    这一行是打在**终端**上的，而终端经常被重定向进文件 / CI 日志 / 贴进 issue
+    （`python run.py egress --proxy http://u:p@h:8080` 是最常见的用法）。
+    实际执行的 argv 不受影响 —— 只改显示。
+    """
+    return " ".join(re.sub(r"(://[^:/@\s]+):[^@\s]*@", r"\1:***@", str(c))
+                    for c in cmd)
+
+
 def run(cmd, cwd=None, **kw):
     """跑外部命令，透传退出码；command not found 视为失败 127。"""
-    print(f"+ {' '.join(str(c) for c in cmd)}")
+    print(f"+ {_redact(cmd)}")
     try:
         return subprocess.call([str(c) for c in cmd],
                                cwd=str(cwd or ROOT), **kw)
@@ -340,7 +354,7 @@ def cmd_verify(a):
 
 
 def cmd_ui(a):
-    """UI 验收：真 Chrome 跑 5 种状态 + 按钮交互 + 截图（v6.2）。
+    """UI 验收：真 Chrome 跑 6 种状态 + 按钮交互 + 截图（v6.3）。
 
     为什么单独一个命令而不是塞进 verify：它需要 Playwright 的 Chromium，
     而 CI 按规定不下载浏览器（policy §2：全程离线）。本地跑，把截图落 plans/证据/。
@@ -358,6 +372,23 @@ def cmd_report(a):
     """确定性服务报告 vs golden（响应字段形状门禁）。"""
     p = ROOT / "scripts" / "service_report.py"
     return run([sys.executable, str(p)] + (["--write"] if getattr(a, "write", False) else []))
+
+
+def cmd_egress(a):
+    """出口 IP 实测校验（v6.3，参考 proxypool 的 tester 思路）。
+
+    为什么单独一个命令：它会**出站**（经每个代理请求一次 IP 回显）。
+    doctor 默认不带网络等待；要实测就显式跑这个。
+    """
+    cmd = [sys.executable, str(ROOT / "scripts" / "doctor.py"),
+           "--offline", "--verify-egress"]
+    for p in getattr(a, "proxy", []) or []:
+        cmd += ["--proxy", p]
+    for p in getattr(a, "proxy_egress_ip", []) or []:
+        cmd += ["--proxy-egress-ip", p]
+    if getattr(a, "egress_echo_url", ""):
+        cmd += ["--egress-echo-url", a.egress_echo_url]
+    return run(cmd)
 
 
 def cmd_help(a):
@@ -387,6 +418,12 @@ def build_parser():
                             help="只跑某个状态：ready/wedged/degraded/no-token/unreachable")
         if name == "report":
             sp.add_argument("--write", action="store_true", help="重新生成 golden")
+        if name == "egress":
+            sp.add_argument("--proxy", action="append", default=[], help="要实测的出口（可重复）")
+            sp.add_argument("--proxy-egress-ip", action="append", default=[],
+                            help="已登记的出口 IP，格式 scheme://host:port=1.2.3.4")
+            sp.add_argument("--egress-echo-url", default="",
+                            help="IP 回显地址（默认 Cloudflare /cdn-cgi/trace）")
     return p
 
 

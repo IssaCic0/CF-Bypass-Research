@@ -8,9 +8,14 @@
 
 用法：
     python scripts/doctor.py                # 全量自检（会起一次真实的临时服务）
-    python scripts/doctor.py --offline      # 只查环境，不启动服务、不联网
+    python scripts/doctor.py --offline      # 只查环境，不启动服务
     python scripts/doctor.py --port 8878    # 指定端口（默认 8878）
     python scripts/doctor.py --json         # 机器可读输出（给 CI / 部署脚本用）
+    python scripts/doctor.py --offline --proxy http://u:p@h:8080 --verify-egress
+                                            # 实测出口 IP（**唯一会出站的组合**，见下）
+
+`--offline` 只表示"不启动服务"。默认全量自检会起一次临时服务，但那也是本机回环。
+**整个工具默认不出站**；唯有显式加 `--verify-egress` 才会经每个代理请求一次 IP 回显。
 
 退出码：0=全绿 / 1=有可降级项（能用但非最优）/ 2=有阻断项（起不来）
 """
@@ -199,6 +204,75 @@ def check_optional_backends(rep: Report) -> None:
         rep.add("pydoll/Chrome", WARN, f"不可用（{type(e).__name__}）", "pip install pydoll-python")
 
 
+def check_proxy_pool(rep: Report, proxies: list[str], registered: list[str],
+                     *, verify: bool, echo_url: str, timeout: float) -> None:
+    """代理池自检（v6.3，参考 proxypool 的 tester 思路）。
+
+    两件事分开报：
+      1. **配置**（离线可查）：地址能不能解析、有没有登记出口 IP。缺登记只是 WARN ——
+         没登记也能跑，只是退回 `px:<地址哈希>`，代价是"同一 IP 的不同入口不能共享缓存"。
+      2. **实测**（`--verify-egress` 才做）：真的经每个代理请求一次 IP 回显，
+         与登记值比对。**不一致是 FAIL** —— 那是缓存键错位、凭证发给错出口的源头。
+
+    为什么默认不实测：它会出站。虽然 IP 回显不计入真机预算（用户 2026-11-05 拍板），
+    但 doctor 是"5 秒查完环境"的工具，默认不该有网络等待。
+    """
+    if not proxies:
+        return
+    from proxypool import ProxyPool, parse_proxy_url  # type: ignore
+
+    try:
+        pool = ProxyPool(proxies)
+    except ValueError as e:
+        rep.add("代理池", FAIL, f"配置无法解析：{e}",
+                "地址形如 scheme://user:pass@host:port；缺 scheme 会按 http 处理")
+        return
+
+    parsed_registered = {}
+    for item in registered:
+        # `rpartition` 而不是 `partition`：代理口令里带 `=` 很常见（base64 填充），
+        # 而 IP 里不可能有 `=` —— 按第一个等号切会把 `scheme://u:dGVzdA==@h:8080`
+        # 切成 server=`scheme://u:dGVzdA`，于是"出口明明在列表里"却报"不在列表里"。
+        server, _, ip = item.rpartition("=")
+        parsed_registered[server.strip()] = ip.strip()
+    unknown = [s for s in parsed_registered
+               if not pool.set_egress_ip_by_server(s, parsed_registered[s])]
+    if unknown:
+        # ⚠️ 这里**不能 return**：一旦有一条登记项写错，`--verify-egress` 就整段被跳过 ——
+        # 用户唯一想要的东西（登记值和真实出口对不对得上）静默不执行，报告里连
+        # "未实测"都不会出现，读起来像"没问题"。继续往下走，未匹配项自然落到 missing 里。
+        rep.add("代理池 · --proxy-egress-ip", WARN,
+                f"这些出口不在 --proxy 列表里：{unknown}",
+                "检查拼写：格式是 scheme://host:port=1.2.3.4；其余出口照常检查")
+
+    snapshot = pool.snapshot()
+    missing = [e["proxy"] for e in snapshot["entries"] if not e["egress_ip_known"]]
+    if missing:
+        rep.add(f"代理池 · {snapshot['size']} 个出口", WARN,
+                f"{len(missing)} 个未登记出口 IP：{missing}",
+                "用 --proxy-egress-ip scheme://host:port=IP 登记；"
+                "不登记会退回地址哈希（同 IP 的不同入口无法共享缓存）")
+    else:
+        rep.add(f"代理池 · {snapshot['size']} 个出口", OK, "全部已登记出口 IP")
+
+    if not verify:
+        rep.add("代理池 · 出口 IP 实测", WARN, "未实测（加 --verify-egress 才真发请求）",
+                "实测会经每个出口请求一次 IP 回显；能确认登记值是否真的对")
+        return
+    from proxypool import verify_egress  # type: ignore
+
+    checks = verify_egress(pool, echo_url=echo_url, timeout=timeout)
+    bad = [c for c in checks if not c.ok]
+    if bad:
+        for c in bad:
+            rep.add(f"出口实测 · {c.proxy}", FAIL, c.detail,
+                    "改登记值：--proxy-egress-ip scheme://host:port=实测IP；"
+                    "或换出口 —— 不一致会让凭证发给错 IP，表现为静默 403")
+    else:
+        detail = "；".join(f"{c.proxy}={c.observed or '未测得'}" for c in checks)
+        rep.add("代理池 · 出口 IP 实测", OK, detail)
+
+
 def check_service_boot(rep: Report, port: int, timeout: float = 90.0) -> None:
     """真起一次服务并打 /health —— 这是"端到端能不能跑"的唯一可信答案。"""
     import subprocess
@@ -244,6 +318,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offline", action="store_true", help="只查环境，不启动服务")
     ap.add_argument("--token-file", default=".env")
     ap.add_argument("--json", action="store_true", help="输出机器可读 JSON")
+    ap.add_argument("--proxy", action="append", default=[],
+                    help="要自检的代理出口（可重复）；与服务的 --proxy 同格式")
+    ap.add_argument("--proxy-egress-ip", action="append", default=[],
+                    help="已登记的出口 IP，格式 scheme://host:port=1.2.3.4（可重复）")
+    ap.add_argument("--verify-egress", action="store_true",
+                    help="经每个出口实测 IP 回显并与登记值比对（会出站；默认不做）")
+    ap.add_argument("--egress-echo-url", default="",
+                    help="IP 回显地址，默认用 Cloudflare /cdn-cgi/trace")
     args = ap.parse_args(argv)
     _force_utf8_stdout()
 
@@ -256,6 +338,13 @@ def main(argv: list[str] | None = None) -> int:
     check_cache_dir(rep)
     check_token(rep, args.token_file)
     check_optional_backends(rep)
+    _echo = args.egress_echo_url.strip()
+    if not _echo:
+        from proxypool import DEFAULT_EGRESS_ECHO_URL  # type: ignore
+
+        _echo = DEFAULT_EGRESS_ECHO_URL
+    check_proxy_pool(rep, args.proxy, args.proxy_egress_ip,
+                     verify=args.verify_egress, echo_url=_echo, timeout=10.0)
     if not args.offline:
         check_port(rep, args.port)
         check_service_boot(rep, args.port)

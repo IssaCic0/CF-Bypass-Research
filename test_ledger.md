@@ -1,19 +1,19 @@
 # 测试台账（test ledger）
 
 > 一个验收项对应哪些用例、跑在哪个文件、当前是否真跑过。没跑过的不许写"通过"。
-> 数字口径：**2026-11-02 · v4.7.0 · 本机 Python 3.14.3 / Go 1.26.1 / Windows 10**
+> 数字口径：**2026-11-05 · v6.3.0 · 本机 Python 3.14.3 / Go 1.26.1 / Windows 10**
 
 ## 1. 总览
 
 | 层 | 数量 | 命令 | 最近结果 |
 |---|---|---|---|
-| Python 用例 | **912** | `python -m pytest tests/ -q` | 905 passed + 7 skipped |
-| Python 覆盖率 | **89%**（`solver/service.py` 84%；逐模块门禁见 `docs/coverage-policy.json`） | `... --cov=solver --cov-fail-under=80` + `node scripts/check-coverage.mjs` | 门槛通过 |
+| Python 用例 | **971** | `python -m pytest tests/ -q` | 964 passed + 7 skipped |
+| Python 覆盖率 | **89%**（`solver/service.py` 84.8%；逐模块门禁见 `docs/coverage-policy.json`） | `... --cov=solver --cov-fail-under=80` + `node scripts/check-coverage.mjs` | 23 模块门槛全通过 |
 | Go 用例 | **46 个 Test** | `cd gocfsolve && go test -count=1 -race ./...` | 全部 PASS |
 | Go 静态检查 | — | `cd gocfsolve && go vet ./...` | 无输出 |
 | 结论库校验 | **54 条** | `node scripts/validate-findings.mjs` | exit 0 |
 | E2E 冒烟 | 3 个断言 | `.\run.ps1 smoke` | ✅ |
-| **E2E 真进程** | **29 项断言** | `.\run.ps1 e2e`（= `python scripts/e2e_local.py`） | **29/29**，落盘 `evidence/e2e-local.json` |
+| **E2E 真进程** | **40 项断言** | `.\run.ps1 e2e`（= `python scripts/e2e_local.py`） | **40/40**，落盘 `evidence/e2e-local.json` |
 | **热更新/滚动重启演练** | **17 项断言** | `python scripts/hot_update_drill.py` | **17/17**，落盘 `evidence/hot-update.json` |
 | 容器 E2E | 3 worker + 6 端点 + 滚动 | `docker compose up -d` | 见 `evidence/v47-container.md` |
 | 离线压测 | 3 模式 | `python scripts/loadtest.py` | hot **5959.6 QPS** / cold 16/16 / share 3 solves |
@@ -60,8 +60,11 @@
 | **F8 预算守恒** | `test_router_shares_deadline_between_backends`、`test_router_stops_when_budget_is_exhausted`、`test_router_reports_timeout_when_budget_too_small_to_try_any_backend` | `tests/test_backends.py` | pass |
 | **v4.7 缓存并发（P0 串域 / WAL 重试）** | `test_concurrent_reads_and_writes_never_corrupt_rows`、`test_read_paths_actually_take_the_connection_lock`（确定性机制门）、`test_wal_switch_retries_when_database_is_locked`、`test_wal_permanent_error_does_not_retry_from_the_moon`、`test_wal_degradation_is_loud_but_usable`、`test_wal_silent_downgrade_is_still_loud_and_safe` | `tests/test_cache_sqlite.py` | pass（改前必红，见 `evidence/v47-cache-concurrency.md`） |
 | **v4.7 早退路径审计完整性**（畸形/空/超大 body 必须留审计行） | `test_malformed_json_is_rejected_and_still_audited`、`test_empty_body_is_rejected_and_still_audited`、`test_oversized_body_is_rejected_and_still_audited` | `tests/test_governance.py` | pass（改前必红，见 `evidence/v47-early-exit-audit.md`） |
-| **v4.7 真进程交付链路**（16 + 13 = 29 断言） | `A01..A16` + `B01..B13` | `scripts/e2e_local.py` | pass 29/29 |
+| **v4.7 真进程交付链路**（16 + 13 = 29 断言） | `A01..A16` + `B01..B13` | `scripts/e2e_local.py` | pass 40/40（v6.3 增 11 条：审计端点/Audit UI/代理出口） |
 | **v4.7 排空 / 滚动 / blue-green** | `A01..A06` + `B01..B07` + `C01..C04` | `scripts/hot_update_drill.py` | pass 17/17 |
+| **v6.3 出口 IP 实测校验**（`cf_clearance` 绑出口） | `test_parse_echo_ip_*`、`test_verify_egress_*`（10 条，`tests/test_proxypool.py`）+ `test_unknown_egress_entry_*`、`test_egress_registration_survives_*`、`test_without_verify_flag_*`、`test_mismatch_is_fail_*`（4 条，`tests/test_doctor_proxypool.py`） | 同上 | pass |
+| **v6.3 审计日志尾部读取** | `test_read_jsonl_tail_*`、`test_audit_endpoint_*`（9 条） | `tests/test_observability.py` | pass（夹取断言改前必红，已变异验证） |
+| **v6.3 流量录制脱敏 + 预算 + 实测 UA** | `test_sanitize_*`、`test_set_cookie_*`、`test_summarize_*`、`test_budget_*`、`test_*_reentrancy`、`test_redact_*`、`test_nav_error_*`、`test_manifest_user_agent_*`（30 条） | `tests/test_record_traffic.py` | pass（预算 3 条、`nav_error` 1 条改前必红，已变异验证） |
 
 ## 3. 还没被用例覆盖的验收项（诚实列出）
 
@@ -87,11 +90,13 @@
 
 | 验收类型 | 脚本 | 实测 | 证据落点 |
 |---|---|---|---|
-| UI 截图验收 | `python run.py ui`（`scripts/verify_ui_e2e.py`） | **23/23**，5 种状态 + 按钮交互 + 逐张看片 | `plans/证据/ui-*.png` |
-| 真实调用验收 | `python run.py realcalls`（`scripts/verify_real_calls.py`） | **37/37** | 控制台输出 |
+| UI 截图验收 | `python run.py ui`（`scripts/verify_ui_e2e.py`） | **31/31**，6 种状态（ready / wedged / degraded / no-token / **audit** / unreachable）+ 按钮交互 + 逐张看片 | `plans/证据/ui-*.png` |
+| 真实调用验收 | `python run.py realcalls`（`scripts/verify_real_calls.py`） | **41/41** | 控制台输出 |
 | 真实 E2E 验收 | `python run.py e2e`（`scripts/e2e_local.py`） | **40/40** | `evidence/e2e-local.json` |
 | 服务契约 golden | `python run.py report`（`scripts/service_report.py`） | 13 端点形状一致 | `docs/golden/service-report.golden.json` |
-| 真实代码复审 | `claude -p` 独立进程 | 见 `plans/证据/independent-review-v6.2-r1.md` | — |
+| 出口 IP 实测 | `python run.py egress`（`scripts/doctor.py --verify-egress`） | 见 CHANGELOG v6.3.0 | 控制台输出 |
+| 流量录制（真浏览器） | `python scripts/record_traffic.py --real` | 本机 chromium × 本地站，预算 1/2/3/5/6 各档严格 | `<out>/manifest.json` |
+| 真实代码复审 | `claude -p` 独立进程 | 4 条真缺陷（1×P1 / 2×P2 / 1×P3）全部修复 | `plans/证据/independent-review-v6.3-r1.md` |
 
 > 这四类在 v5.0.1 是**人工跑一次**写进 `workflow_status.md` 的 —— 证明过当时那一刻，但不可复跑。
 > v6.2 起全部脚本化，`run.py` 一个命令就能重来。

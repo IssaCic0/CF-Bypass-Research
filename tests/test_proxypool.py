@@ -187,3 +187,107 @@ def test_request_level_error_does_not_penalize_proxy():
         assert not pool.for_host("example.com").in_cooldown(), "参数错误不得冷却代理出口"
     finally:
         s.close()
+
+
+# ── v6.3：出口 IP 实测校验（参考 proxypool 的 tester 思路）──────
+
+
+import pytest as _pytest  # noqa: E402
+
+import proxypool as pp  # noqa: E402
+
+
+@_pytest.mark.parametrize(("text", "want"), [
+    # CF /cdn-cgi/trace：多行 key=value
+    ("fl=1abc\nh=www.cloudflare.com\nip=203.0.113.9\nts=1761000000.0\n", "203.0.113.9"),
+    # httpbin.org/ip 形态（按文本处理即可）
+    ('{"origin": "198.51.100.7"}', "198.51.100.7"),
+    # ifconfig.me / ipify：整个响应就是一行 IP
+    ("192.0.2.44\n", "192.0.2.44"),
+    # 值被引号包着
+    ('ip="203.0.113.10"', "203.0.113.10"),
+    # 错误页 / 空响应 / 非法 IP 一律返回空串（**不许把原文当前 20 字符当 IP**）
+    ("<html>error</html>", ""),
+    ("", ""),
+    ("ip=999.1.1.1", ""),
+])
+def test_parse_echo_ip(text, want):
+    assert pp.parse_echo_ip(text) == want
+
+
+def _pool_with(proxies, registered=None):
+    pool = pp.ProxyPool(proxies)
+    for server, ip in (registered or {}).items():
+        assert pool.set_egress_ip_by_server(server, ip)
+    return pool
+
+
+def test_verify_egress_consistent_is_ok():
+    pool = _pool_with(["http://1.1.1.1:8080"], {"http://1.1.1.1:8080": "203.0.113.9"})
+    got = pp.verify_egress(pool, fetch=lambda u, p, t: "ip=203.0.113.9\n")
+    assert len(got) == 1 and got[0].ok
+    assert got[0].observed == "203.0.113.9" and got[0].registered == "203.0.113.9"
+
+
+def test_verify_egress_mismatch_is_not_ok():
+    """登记值与实测不一致 → **必须判失败**。
+
+    这是最危险的一种：egress_id 会停在登记值上，而真实凭证绑在另一个 IP 上，
+    结果是"求解走 A、回放走 B"的稳定静默 403。它**不会报错**，只能靠这里拦住。
+    """
+    pool = _pool_with(["http://1.1.1.1:8080"], {"http://1.1.1.1:8080": "203.0.113.9"})
+    got = pp.verify_egress(pool, fetch=lambda u, p, t: "ip=198.51.100.7\n")
+    assert got[0].ok is False
+    assert "不一致" in got[0].detail
+    assert got[0].registered == "203.0.113.9" and got[0].observed == "198.51.100.7"
+
+
+def test_verify_egress_unregistered_reports_suggestion():
+    pool = _pool_with(["http://1.1.1.1:8080"])
+    got = pp.verify_egress(pool, fetch=lambda u, p, t: "ip=203.0.113.9\n")
+    assert got[0].ok is True                      # 没登记不是错误，只是次优
+    assert "建议" in got[0].detail
+    assert got[0].registered == "" and got[0].observed == "203.0.113.9"
+
+
+def test_verify_egress_probe_failure_is_not_a_config_error():
+    """探测失败（网络不通/服务挂了）不等于配置错 —— 不能因此判 FAIL 吓人。"""
+    def boom(url, proxy_url, timeout):
+        raise OSError("connection refused")
+
+    pool = _pool_with(["http://1.1.1.1:8080"], {"http://1.1.1.1:8080": "203.0.113.9"})
+    got = pp.verify_egress(pool, fetch=boom)
+    assert got[0].ok is True
+    assert got[0].observed == ""
+    assert "探测失败" in got[0].detail
+
+
+def test_verify_egress_never_mutates_pool():
+    """实测**绝不自动写回** egress_ip —— 探测服务抖一下就把整域缓存废掉，代价太大。"""
+    pool = _pool_with(["http://1.1.1.1:8080"])
+    before = pool.for_host("a.com").egress_id
+    pp.verify_egress(pool, fetch=lambda u, p, t: "ip=203.0.113.9\n")
+    assert pool.for_host("a.com").egress_id == before, "实测不该改变出口标识"
+
+
+def test_verify_egress_does_not_leak_credentials():
+    """`EgressCheck` 是对外可打印的结构（doctor --json 会输出），不能带代理凭据。"""
+    pool = _pool_with(["http://user:secret@1.1.1.1:8080"])
+    got = pp.verify_egress(pool, fetch=lambda u, p, t: "ip=203.0.113.9\n")
+    dumped = str(got[0].as_dict())
+    assert "secret" not in dumped and "user" not in dumped
+    assert got[0].proxy == "http://1.1.1.1:8080"
+
+
+def test_default_echo_url_is_configurable():
+    """回显地址必须可配置：有些部署访问不到 CF，或更信自己家的回显服务。"""
+    assert pp.DEFAULT_EGRESS_ECHO_URL.startswith("https://")
+    pool = _pool_with(["http://1.1.1.1:8080"])
+    seen = {}
+
+    def fake(url, proxy_url, timeout):
+        seen["url"] = url
+        return "ip=203.0.113.9\n"
+
+    pp.verify_egress(pool, echo_url="https://echo.internal/trace", fetch=fake)
+    assert seen["url"] == "https://echo.internal/trace"

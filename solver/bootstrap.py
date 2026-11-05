@@ -188,7 +188,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.proxy:
         pool = ProxyPool(args.proxy)
         for item in args.proxy_egress_ip:
-            server, _, ip = item.partition("=")
+            # rpartition：口令里的 `=` 不能当分隔符（IP 里不会有 `=`）
+            server, _, ip = item.rpartition("=")
             if ip and not pool.set_egress_ip_by_server(server.strip(), ip.strip()):
                 print(f"[cfsolve] 警告：--proxy-egress-ip 里的出口不在 --proxy 列表中：{server}", flush=True)
 

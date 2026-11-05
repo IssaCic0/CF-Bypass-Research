@@ -85,7 +85,7 @@ try:  # 作为包导入（tests / 未来 solver 包）
     )
     from .prewarm import Prewarmer, parse_targets
     from .metrics import process_metrics, render_metrics_text  # v5.0 T-56 下沉；v6.2 加进程自检
-    from .eventlog import EventLog  # P2-1：最近 N 条事件环形缓冲（GET /logs 的数据源）
+    from .eventlog import AUDIT_TAIL_MAX_BYTES, EventLog, read_jsonl_tail  # P2-1 + v6.3 /audit
     # UI：只读状态页（单文件 HTML，零依赖零构建）
     from .statuspage import STATUS_PAGE_HTML_BYTES
     # T-78：只读控制台（单文件 HTML，带 token 鉴权，零写入零依赖）
@@ -166,7 +166,7 @@ except ImportError:  # 直接以脚本运行：python solver/service.py
     )
     from prewarm import Prewarmer, parse_targets  # type: ignore[no-redef]
     from metrics import process_metrics, render_metrics_text  # type: ignore[no-redef]
-    from eventlog import EventLog  # type: ignore[no-redef]
+    from eventlog import AUDIT_TAIL_MAX_BYTES, EventLog, read_jsonl_tail  # type: ignore[no-redef]
     from statuspage import STATUS_PAGE_HTML_BYTES  # type: ignore[no-redef]
     from console_html import CONSOLE_PAGE_HTML_BYTES  # type: ignore[no-redef]
     from compat import (  # type: ignore[no-redef]
@@ -2243,6 +2243,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, self.solver.logs(self._query_lines()))
         elif path == "/stats":
             self._send(200, self.solver.stats())
+        elif path == "/audit":
+            tail = read_jsonl_tail(
+                Handler.audit_path, self._query_lines(), max_bytes=AUDIT_TAIL_MAX_BYTES
+            )
+            self._send(200, tail)
         elif path == "/metrics":
             text = self.solver.metrics_text().encode()
             self.send_response(200)
@@ -2779,17 +2784,22 @@ class Handler(BaseHTTPRequestHandler):
                     pass
 
     def _query_lines(self) -> int:
-        """从 `?lines=N` 取条数。**调用方可控输入**，非法值一律回默认，不报错。
+        """从 `?lines=N` 取条数。**调用方可控输入**，一律夹到 `[0, MAX_LOG_LINES]`。
 
         为什么不报 400：这是个只读的诊断端点，为"参数写错了"返回错误只会让排障更烦；
-        夹取到合法区间并回默认值即可（响应里 `kept`/`total` 会说明实际给了多少）。
+        夹取到合法区间并回默认值即可（`/logs` 的响应里 `kept`/`total` 会说明实际给了多少）。
+
+        ⚠️ 这里**必须**夹：`/logs` 的夹取在 `Solver.logs()` 里（生产者侧），而 `/audit`
+        直接把返回值交给 `read_jsonl_tail()` —— 那一层只做 `max(1, lines)`，没有上界。
+        漏了这行，`/audit?lines=100000` 就会把 512KB 窗口里的行全吐出来
+        （实测 3506 行 / 524KB，是文档承诺上限 200 行的 17 倍）。
         """
         query = self.path.split("?", 1)[1] if "?" in self.path else ""
         for part in query.split("&"):
             name, _, value = part.partition("=")
             if name == "lines":
                 try:
-                    return int(value)
+                    return max(0, min(int(value), MAX_LOG_LINES))
                 except (TypeError, ValueError):
                     return DEFAULT_LOG_LINES
         return DEFAULT_LOG_LINES
