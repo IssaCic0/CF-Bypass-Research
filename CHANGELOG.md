@@ -1,3 +1,52 @@
+## [6.2.1] - 2026-11-05
+
+主题：**修 v6.2.0 的两处 CI 红**（本机全绿、只有 CI 才抓到的平台相关缺陷）。
+
+> 为什么是补丁版而不是移动 `v6.2.0` 的 tag：`policy.md §5` 规定"同类情况默认按发补丁版处理"，
+> 且本次**发布物内容确实变了**（改了 `solver/metrics.py` 的签名与测试）—— 不属于
+> "纯属发布标记错误"的例外。`v6.2.0` 的 tag 与 Release 保留在历史上并标注 superseded。
+
+### 修复 1：测试改全局 `os.name` 把 pytest 自己打崩（CI 第一次红）
+
+`tests/test_observability.py` 用 `monkeypatch.setattr(m.os, "name", "nt")` 模拟平台。
+`m.os` **就是全局 os 模块** —— `pathlib` 实例化时读到 `name == "nt"`，在 Linux runner 上
+`Path()` 变成 `WindowsPath` → `NotImplementedError: cannot instantiate 'WindowsPath' on your system`，
+**整个 pytest 会话 INTERNALERROR**（比普通失败更难定位）。
+
+同一类问题还有一处：`monkeypatch.setitem(sys.modules, "threading", fake)` 换掉了
+pytest 自己也要 import 的模块。
+
+修法：让平台判定**可注入** —— `process_metrics(*, platform_name=None)`，
+生产路径行为不变；四个用例改传参；线程探测改成 patch 真正的
+`threading.active_count`。另修一条过强断言（`datetime.max.timestamp()` 在 Windows 抛
+OSError、Linux 能算出巨大值，原断言 `is None` 在 Linux 上是假红）。
+
+### 修复 2：服务报告 golden 绑在了本机研究产物上（CI 第二次红）
+
+```
+~ 类型变化：...research.fields.last_snapshot_at  'string' → 'null'
+```
+
+`last_snapshot_at` 的有无取决于"这台机器是否跑过 `scripts/research.py`"。
+golden 实际上是拿"有快照的机器"生成的 —— 那不是门禁，是环境指纹。
+
+修法：`shape()` 的 volatile 判断提到类型判断**之前**（`None` 曾先返回 `"null"`），
+并把 `last_snapshot_at` / `last_diff_at` 列为 volatile。
+**刻意不收计数器**（`solves` / `failures` / `assertions_*`）：它们类型恒定（永远 number），
+标 volatile 会连"这里是数字"这条检查一起丢掉，等于自己削弱门禁。
+
+### 新增
+
+- `tests/test_service_report.py`（13 例）把门禁的**两个方向**锁死：
+  「环境差异不能进契约」（`shape(None, volatile) == shape("...", volatile)`、volatile 不暴露类型）
+  与「真实漂移必须被抓」（新增/缺少/类型变化三种 diff、计数器必须是 number、
+  endpoint 标签唯一、golden 不含凭证）。
+
+### 验证
+
+本机：Python **904 passed / 7 skipped**；`solver/` 89.4%，23 模块达标；文档 9 处一致。
+CI：run `41954927353`（commit `50253c6`）**4 job 全绿** —— python (3.11) / python (3.12) / go / findings。
+
 ## [6.2.0] - 2026-11-05
 
 主题：**把"验收"从一次性快照变成可复跑的门禁**，同时修掉 v6.1/v6.2 交付后暴露的 UI 与决策分叉。
