@@ -1302,7 +1302,16 @@ V1.1 实施采用 **A + A + C + A + A**（主色薄荷、右侧 Hero 3D、只本
 ### 16.5 剩余缺口
 
 - 真实部署头、真实低端设备、搜索量、英文母语审校未完成（§14.5）。
-- `site/package-lock.json` 已提交；CI 配置已提交，首次运行结果在 push 后观察。
+- `site/package-lock.json` 已提交。CI 已跑通：`site-ci` run `42147228247`（Install/Lint/Typecheck/Build/CSP/Content/Browser/verify-site/Lighthouse/Upload 全绿）。首次 run `42146655742` 因 CI 无沙箱导致 Lighthouse 失败，已用 `--no-sandbox` 修复（commit `77558b7`）。
+
+### 16.6 交付记录
+
+| 项 | 值 |
+|---|---|
+| 功能提交 | `bd63629` feat(site): 公开站 V1.1 + 现有 UI 可访问性收口 |
+| CI 修复 | `77558b7` fix(site-ci): Lighthouse 在无沙箱 CI 环境加 --no-sandbox |
+| CI 结果 | `site-ci` run `42147228247` 全绿 |
+| 推送 | `origin/master` |
 
 ---
 

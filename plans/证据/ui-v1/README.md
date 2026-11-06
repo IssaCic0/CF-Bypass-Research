@@ -21,6 +21,7 @@
 | UI 单测 | `python -m pytest tests/test_console.py tests/test_statuspage.py -q` | 34 passed（24 基线 + 10 新增） | `ui-unit.txt` |
 | UI E2E | `python scripts/verify_ui_e2e.py` | 31/31 PASS | `ui-e2e.txt` |
 | Go | `go test ./...` | ok 6.428s | `go-tests.txt` |
+| CI | GitHub Actions `site-ci` run `42147228247` | 全绿（含 Lighthouse desktop） | https://github.com/lza6/CF-Bypass-Research/actions/runs/42147228247 |
 
 ## 关键实现结论（写进计划书的增量）
 
