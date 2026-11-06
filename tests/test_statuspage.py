@@ -129,3 +129,50 @@ def test_status_page_uses_textcontent_not_innerhtml_for_values():
     assert "dd.textContent" in STATUS_PAGE_HTML
     # 唯一允许的 innerHTML 是表格结构（值都过了 esc()）
     assert "esc(" in STATUS_PAGE_HTML
+
+
+# ── v6.3 UI：令牌收敛 / 可访问性 / 索引控制 ───────
+
+
+def _lum(hexstr: str) -> float:
+    h = hexstr.lstrip("#")
+    vals = [int(h[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    vals = [v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4 for v in vals]
+    return 0.2126 * vals[0] + 0.7152 * vals[1] + 0.0722 * vals[2]
+
+
+def _contrast(a: str, b: str) -> float:
+    la, lb = _lum(a), _lum(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_tokens_are_single_source():
+    from solver.ui_tokens import TOKENS_CSS
+
+    assert TOKENS_CSS in STATUS_PAGE_HTML
+    # 深/浅各一次；此前是两页各复制一份，共 4 次
+    assert STATUS_PAGE_HTML.count("--bg:") == 2
+
+
+def test_wedged_badge_contrast():
+    assert "--bad-solid: #b91c1c" in STATUS_PAGE_HTML
+    assert _contrast("#ffffff", "#b91c1c") >= 4.5
+
+
+def test_status_page_is_noindex(live_server):  # noqa: F811
+    status, body = _get(live_server, "/")
+    assert status == 200
+    assert 'name="robots" content="noindex,nofollow"' in body
+    import urllib.request
+
+    with urllib.request.urlopen(urllib.request.Request(live_server + "/"), timeout=10) as r:
+        assert r.headers.get("X-Robots-Tag") == "noindex, nofollow"
+
+
+def test_status_page_has_focus_visible_rule():
+    assert ":focus-visible" in STATUS_PAGE_HTML
+
+
+def test_status_page_has_reduced_motion_block():
+    assert "prefers-reduced-motion" in STATUS_PAGE_HTML

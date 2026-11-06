@@ -1,0 +1,48 @@
+{
+  "name": "cf-solver-site",
+  "private": true,
+  "version": "0.1.0",
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "preview": "python -m http.server 3000 --directory out",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test:content": "node --test tests/content/*.test.mjs",
+    "test:tokens": "node scripts/check-tokens.mjs",
+    "test:contrast": "node scripts/check-contrast.mjs",
+    "test:e2e": "playwright test",
+    "csp": "node scripts/gen-csp.mjs",
+    "verify:csp": "node scripts/check-csp.mjs",
+    "og": "node scripts/og.mjs",
+    "lighthouse": "lhci autorun",
+    "test:seo": "node scripts/check-seo-freshness.mjs",
+    "verify:site": "node scripts/verify-site.mjs"
+  },
+  "dependencies": {
+    "@react-three/fiber": "9.8.2",
+    "motion": "14.9.1",
+    "next": "16.4.5",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "@lhci/cli": "0.16.0",
+    "@playwright/test": "1.65.0",
+    "@tailwindcss/postcss": "4.3.4",
+    "@types/node": "24.19.2",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/three": "0.187.0",
+    "axe-core": "4.14.0",
+    "eslint": "10.14.0",
+    "eslint-config-next": "16.4.5",
+    "tailwindcss": "4.3.4",
+    "typescript": "5.9.3"
+  },
+  "type": "module"
+}

@@ -71,3 +71,14 @@ corpus/
 # 万盾嫁接层的视觉模型：体积大（31MB），按需从上游获取，不入库
 # 缺失时 aliyun 回落 cv2 gap 检测、reCAPTCHA classifier=auto 回落 mistral
 *.onnx
+
+# 公开站构建产物（site/ 与 Python/Go 隔离；只入库源码、锁文件与证据）
+site/.next/
+site/out/
+site/.lighthouseci/
+site/.lighthouseci-mobile/
+site/test-results/
+site/playwright-report/
+
+# TypeScript incremental build cache
+site/tsconfig.tsbuildinfo

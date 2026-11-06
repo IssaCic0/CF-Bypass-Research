@@ -2122,6 +2122,7 @@ class Handler(BaseHTTPRequestHandler):
             "frame-ancestors 'none'",
         )
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Robots-Tag", "noindex, nofollow")
         self.end_headers()
         self.wfile.write(body)
 
@@ -2144,6 +2145,7 @@ class Handler(BaseHTTPRequestHandler):
             "frame-ancestors 'none'",
         )
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Robots-Tag", "noindex, nofollow")
         self.end_headers()
         self.wfile.write(body)
 

@@ -1,0 +1,16 @@
+{
+  "measuredAt": "2026-11-06",
+  "method": "Chromium with SwiftShader (software WebGL) + CDP Emulation.setCPUThrottlingRate; frames counted from R3F useFrame over 5s",
+  "renderer": "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (Subzero) (0x0000C0DE)), SwiftShader driver)",
+  "cases": [
+    { "case": "full-1x", "tier": "full", "fps": 60.2 },
+    { "case": "full-4x", "tier": "full", "fps": 60.2 },
+    { "case": "full-10x", "tier": "full", "fps": 60.2 },
+    { "case": "full-20x-run1", "tier": "full", "fps": 21.8 },
+    { "case": "full-20x-run2", "tier": "static", "fps": null },
+    { "case": "lite-10x", "tier": "lite", "fps": 60.4 },
+    { "case": "lite-20x", "tier": "static", "fps": null },
+    { "case": "static-lowmem-4x", "tier": "static", "fps": null }
+  ],
+  "note": "Not a real low-end device. Tier selection also uses prefers-reduced-motion, deviceMemory, hardwareConcurrency, pointer: coarse, saveData, and WebGL availability."
+}

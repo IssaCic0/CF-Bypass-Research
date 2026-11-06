@@ -1,0 +1,10 @@
+{
+  "measuredAt": "2026-11-06",
+  "method": "parse out/index.html script/link tags; zlib.gzipSync(level=9); find the chunk containing WebGLRenderer",
+  "initialJsGzipBytes": 228360,
+  "cssGzipBytes": 6669,
+  "threeChunkGzipBytes": 241826,
+  "initialJsFiles": 10,
+  "cssFiles": 1,
+  "note": "The first draft's 150 KB initial / 220 KB 3D caps were estimates; measured Next 16 + React 19 + motion baseline and three.js exceed them. Revised budgets: 250 KB initial, 260 KB 3D, no regression."
+}

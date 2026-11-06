@@ -1,0 +1,189 @@
+{
+  "base": "http://127.0.0.1:3100",
+  "generatedAt": "2026-11-06T01:49:26.707Z",
+  "routes": [
+    {
+      "route": "/",
+      "lang": "zh-CN",
+      "title": "Cloudflare 过盾 — CF Solver｜缓存热路径 <3ms",
+      "h1": 1,
+      "description": "纯协议优先的 Cloudflare 过盾服务：一次求解，30 分钟内回放；缓存热路径 p99 2.93ms；支持 cf_clearance、Turnstile token 与 route=auto。仅用于授权测试。",
+      "canonical": "http://localhost:3000/",
+      "alternates": 3,
+      "robots": "",
+      "scene": "static",
+      "errors": []
+    },
+    {
+      "route": "/how-it-works/",
+      "lang": "zh-CN",
+      "title": "工作原理 — CF Solver｜检测、求解、凭证、回放",
+      "h1": 1,
+      "description": "从 33 厂商特征检测到 cfsolve / pydoll / Camoufox / FlareSolverr 回落链，再到 cf_clearance 与同 UA 回放，逐段说明每一步的真实行为与失败模式。",
+      "canonical": "http://localhost:3000/how-it-works/",
+      "alternates": 3,
+      "robots": "",
+      "scene": null,
+      "errors": []
+    },
+    {
+      "route": "/benchmarks/",
+      "lang": "zh-CN",
+      "title": "实测数据 — CF Solver｜每个数字都有日期与条件",
+      "h1": 1,
+      "description": "数据表覆盖同站 A/B 18.43s、缓存热路径 p99 2.93ms、无盾站 0.55s 放行与测试基线；每个数字标注日期、条件、来源与已知限制，不写搜索量与成功率。",
+      "canonical": "http://localhost:3000/benchmarks/",
+      "alternates": 3,
+      "robots": "",
+      "scene": null,
+      "errors": []
+    },
+    {
+      "route": "/docs/",
+      "lang": "zh-CN",
+      "title": "文档 — CF Solver｜快速开始与 API",
+      "h1": 1,
+      "description": "本地启动、/solve、/detect、/health、/status、/logs、/stats、/metrics 的入口；Go、Python、curl 示例；完整 API 链接到仓库 docs。",
+      "canonical": "http://localhost:3000/docs/",
+      "alternates": 3,
+      "robots": "",
+      "scene": null,
+      "errors": []
+    },
+    {
+      "route": "/security/",
+      "lang": "zh-CN",
+      "title": "安全与授权使用 — CF Solver",
+      "h1": 1,
+      "description": "仅用于安全研究与授权测试。说明授权边界、数据处理、披露方式、与 Cloudflare, Inc. 的非关联声明与免责声明；不提供目标清单、批量扫描入口或绕过访问控制的教程。",
+      "canonical": "http://localhost:3000/security/",
+      "alternates": 3,
+      "robots": "",
+      "scene": null,
+      "errors": []
+    },
+    {
+      "route": "/changelog/",
+      "lang": "zh-CN",
+      "title": "版本记录 — CF Solver｜6.3.0",
+      "h1": 1,
+      "description": "6.3.0 出口实测与流量录制、6.2.2 看门狗、6.2.0 YesCaptcha 兼容层与 V1 契约；每个版本的真实能力变化与已知限制。完整历史见仓库 CHANGELOG.md。",
+      "canonical": "http://localhost:3000/changelog/",
+      "alternates": 3,
+      "robots": "",
+      "scene": null,
+      "errors": []
+    },
+    {
+      "route": "/styleguide/",
+      "lang": "zh-CN",
+      "title": "内部样式指南 — CF Solver",
+      "h1": 1,
+      "description": "色板、字号、按钮、焦点态、深/浅主题。此页不索引。",
+      "canonical": "",
+      "alternates": 0,
+      "robots": "noindex, nofollow",
+      "scene": null,
+      "errors": []
+    },
+    {
+      "route": "/en/",
+      "lang": "en",
+      "title": "Cloudflare Bypass — CF Solver | <3ms cached replay",
+      "h1": 1,
+      "description": "Cloudflare challenge solver: solve once, replay for 30 minutes; p99 2.93ms cached. cf_clearance, Turnstile, route=auto. Authorized testing only.",
+      "canonical": "http://localhost:3000/en/",
+      "alternates": 3,
+      "robots": "",
+      "scene": "full",
+      "errors": []
+    },
+    {
+      "route": "/en/how-it-works/",
+      "lang": "en",
+      "title": "How it works — CF Solver | Detect, solve, token, replay",
+      "h1": 1,
+      "description": "From 33-vendor detection to the cfsolve / pydoll / Camoufox / FlareSolverr chain, then cf_clearance and same-UA replay. Failure modes and limits.",
+      "canonical": "http://localhost:3000/en/how-it-works/",
+      "alternates": 3,
+      "robots": "",
+      "scene": null,
+      "errors": []
+    },
+    {
+      "route": "/en/benchmarks/",
+      "lang": "en",
+      "title": "Benchmarks — CF Solver | Dated and conditioned",
+      "h1": 1,
+      "description": "Same-site A/B 18.43s, cached hot path p99 2.93ms, no-shield pass 0.55s. All numbers come from real local runs, with date, conditions, source, and known limits.",
+      "canonical": "http://localhost:3000/en/benchmarks/",
+      "alternates": 3,
+      "robots": "",
+      "scene": null,
+      "errors": []
+    },
+    {
+      "route": "/en/docs/",
+      "lang": "en",
+      "title": "Docs — CF Solver | Quickstart and API",
+      "h1": 1,
+      "description": "Local start, /solve, /detect, /health, /status, /logs, /stats, /metrics entry points; Go, Python, and curl examples; full API links to the repository docs.",
+      "canonical": "http://localhost:3000/en/docs/",
+      "alternates": 3,
+      "robots": "",
+      "scene": null,
+      "errors": []
+    },
+    {
+      "route": "/en/security/",
+      "lang": "en",
+      "title": "Security and authorized use — CF Solver",
+      "h1": 1,
+      "description": "For security research and authorized testing only. Authorization boundaries, data handling, disclosure, non-affiliation, and disclaimer.",
+      "canonical": "http://localhost:3000/en/security/",
+      "alternates": 3,
+      "robots": "",
+      "scene": null,
+      "errors": []
+    },
+    {
+      "route": "/en/changelog/",
+      "lang": "en",
+      "title": "Changelog — CF Solver | 6.3.0",
+      "h1": 1,
+      "description": "6.3.0 egress verification and traffic capture, 6.2.2 watchdog, 6.2.0 YesCaptcha compatibility and V1 contract. Real capability changes per release.",
+      "canonical": "http://localhost:3000/en/changelog/",
+      "alternates": 3,
+      "robots": "",
+      "scene": null,
+      "errors": []
+    },
+    {
+      "route": "/en/styleguide/",
+      "lang": "en",
+      "title": "Internal styleguide — CF Solver",
+      "h1": 1,
+      "description": "Palette, type, buttons, focus states, dark/light themes. This page is not indexed.",
+      "canonical": "",
+      "alternates": 0,
+      "robots": "noindex, nofollow",
+      "scene": null,
+      "errors": []
+    }
+  ],
+  "reducedMotion": {
+    "tier": "static",
+    "canvas": 0
+  },
+  "webglDisabled": {
+    "tier": "static",
+    "canvas": 0
+  },
+  "notFound": {
+    "title": "404 — CF Solver",
+    "h1": 1,
+    "robots": "noindex"
+  },
+  "failures": [],
+  "axeTotal": 0
+}

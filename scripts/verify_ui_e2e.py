@@ -132,6 +132,29 @@ def case_ready(browser) -> None:
         page.click("#auto")
         page.wait_for_timeout(200)
         check("ready/自动刷新可关闭", page.get_attribute("#auto", "aria-pressed") == "false")
+
+        # v6.3：320/360 小屏不得横向溢出（D-03）。表格在 `#audit`/`#inflight-table`
+        # 内部滚动，页面本身必须保持 `scrollWidth <= clientWidth`。
+        for width in (320, 360):
+            page.set_viewport_size({"width": width, "height": 800})
+            page.reload(wait_until="domcontentloaded")
+            page.wait_for_timeout(500)
+            overflow = page.evaluate(
+                "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+            )
+            check(f"ready/{width}px 状态页无横向溢出", overflow <= 1, f"overflow={overflow}")
+            page.screenshot(path=str(OUT_DIR / f"ui-ready-statuspage-{width}.png"), full_page=True)
+
+            page2.set_viewport_size({"width": width, "height": 800})
+            page2.reload(wait_until="domcontentloaded")
+            page2.wait_for_timeout(500)
+            overflow2 = page2.evaluate(
+                "document.documentElement.scrollWidth - document.documentElement.clientWidth"
+            )
+            check(f"ready/{width}px 控制台无横向溢出", overflow2 <= 1, f"overflow={overflow2}")
+            page2.screenshot(path=str(OUT_DIR / f"ui-ready-console-{width}.png"), full_page=True)
+        page.set_viewport_size({"width": 1280, "height": 900})
+        page2.set_viewport_size({"width": 1280, "height": 900})
         ctx.close()
     finally:
         svc.close()

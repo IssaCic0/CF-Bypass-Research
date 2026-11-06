@@ -1,0 +1,2 @@
+command: python scripts/verify_ui_e2e.py
+result: 35/35 PASS (ready, wedged, degraded, no-token, audit, unreachable + 320/360 width overflow checks)

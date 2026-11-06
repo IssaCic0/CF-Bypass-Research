@@ -1,0 +1,103 @@
+{
+  "lastReviewed": "2026-11-06",
+  "reviewIntervalDays": 120,
+  "locales": ["zh", "en"],
+  "rows": [
+    {
+      "tier": "head",
+      "zh": "Cloudflare 过盾",
+      "en": "Cloudflare bypass",
+      "intent": "commercial",
+      "page": "/",
+      "placement": "H1, title, description"
+    },
+    {
+      "tier": "head",
+      "zh": "CF 挑战求解",
+      "en": "Cloudflare challenge solver",
+      "intent": "commercial",
+      "page": "/",
+      "placement": "H1, title"
+    },
+    {
+      "tier": "head",
+      "zh": "cf_clearance 获取",
+      "en": "cf_clearance cookie",
+      "intent": "technical",
+      "page": "/how-it-works/",
+      "placement": "H2, code"
+    },
+    {
+      "tier": "body",
+      "zh": "CF 五秒盾",
+      "en": "jsd challenge",
+      "intent": "technical",
+      "page": "/how-it-works/",
+      "placement": "H2, mechanism"
+    },
+    {
+      "tier": "body",
+      "zh": "managed challenge 过盾",
+      "en": "managed challenge bypass",
+      "intent": "technical",
+      "page": "/how-it-works/",
+      "placement": "H2, limitations"
+    },
+    {
+      "tier": "body",
+      "zh": "Turnstile 求解",
+      "en": "Turnstile solver",
+      "intent": "technical",
+      "page": "/benchmarks/",
+      "placement": "H2, data table"
+    },
+    {
+      "tier": "body",
+      "zh": "FlareSolverr 替代",
+      "en": "FlareSolverr alternative",
+      "intent": "comparison",
+      "page": "/",
+      "placement": "FAQ, comparison"
+    },
+    {
+      "tier": "body",
+      "zh": "无头浏览器 过盾",
+      "en": "headless browser Cloudflare",
+      "intent": "comparison",
+      "page": "/how-it-works/",
+      "placement": "comparison section"
+    },
+    {
+      "tier": "long-tail",
+      "zh": "Cloudflare 求解 API",
+      "en": "Cloudflare solver API",
+      "intent": "integration",
+      "page": "/docs/",
+      "placement": "H2, code"
+    },
+    {
+      "tier": "long-tail",
+      "zh": "纯协议 过盾 耗时",
+      "en": "pure protocol solver benchmark",
+      "intent": "research",
+      "page": "/benchmarks/",
+      "placement": "H2, data table"
+    },
+    {
+      "tier": "long-tail",
+      "zh": "cf_clearance 多久过期",
+      "en": "cf_clearance expiry",
+      "intent": "support",
+      "page": "/how-it-works/",
+      "placement": "FAQ"
+    },
+    {
+      "tier": "long-tail",
+      "zh": "Turnstile token 纯协议",
+      "en": "Turnstile token pure protocol",
+      "intent": "research",
+      "page": "/how-it-works/",
+      "placement": "H3, mechanism"
+    }
+  ]
+}

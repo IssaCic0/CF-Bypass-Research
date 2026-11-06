@@ -157,3 +157,51 @@ def test_console_formats_iso_and_epoch_timestamps():
     assert "isNaN(d.getTime())" in CONSOLE_PAGE_HTML
     # 不能有任何地方还在裸用 * 1000
     assert "new Date(r.last_snapshot_at * 1000)" not in CONSOLE_PAGE_HTML
+
+
+# ── v6.3 UI：令牌收敛 / 可访问性 / 索引控制 ───────
+
+
+def _lum(hexstr: str) -> float:
+    h = hexstr.lstrip("#")
+    vals = [int(h[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    vals = [v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4 for v in vals]
+    return 0.2126 * vals[0] + 0.7152 * vals[1] + 0.0722 * vals[2]
+
+
+def _contrast(a: str, b: str) -> float:
+    la, lb = _lum(a), _lum(b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def test_console_tokens_are_single_source():
+    from solver.ui_tokens import TOKENS_CSS
+
+    assert TOKENS_CSS in console_html.CONSOLE_PAGE_HTML
+    assert console_html.CONSOLE_PAGE_HTML.count("--bg:") == 2
+
+
+def test_console_wedged_badge_contrast():
+    assert "--bad-solid: #b91c1c" in console_html.CONSOLE_PAGE_HTML
+    assert _contrast("#ffffff", "#b91c1c") >= 4.5
+
+
+def test_console_is_noindex(live_server):
+    status, body = _get(live_server, "/console", token="test-token")
+    assert status == 200
+    assert 'name="robots" content="noindex,nofollow"' in body
+    import urllib.request
+
+    req = urllib.request.Request(f"{live_server}/console")
+    req.add_header("Authorization", "Bearer test-token")
+    with urllib.request.urlopen(req, timeout=10) as r:
+        assert r.headers.get("X-Robots-Tag") == "noindex, nofollow"
+
+
+def test_console_has_focus_visible_rule():
+    assert ":focus-visible" in console_html.CONSOLE_PAGE_HTML
+
+
+def test_console_has_reduced_motion_block():
+    assert "prefers-reduced-motion" in console_html.CONSOLE_PAGE_HTML

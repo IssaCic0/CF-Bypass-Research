@@ -19,25 +19,23 @@
 
 from __future__ import annotations
 
+try:  # package import (python -m solver.service)
+    from .ui_tokens import TOKENS_CSS
+except ImportError:  # script import (python solver/service.py)
+    from ui_tokens import TOKENS_CSS
+
 #: 页面单文件（HTML + CSS + JS）。刻意不用模板引擎、不用构建步骤。
 STATUS_PAGE_HTML = """<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f1419">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f6f8fa">
 <title>CF 求解服务 · 状态</title>
 <style>
-  :root {
-    --bg: #0f1419; --panel: #171d24; --line: #2a333d; --ink: #e6edf3;
-    --muted: #8b98a5; --ok: #2ea043; --warn: #d29922; --bad: #f85149; --accent: #58a6ff;
-  }
-  @media (prefers-color-scheme: light) {
-    :root { --bg:#f6f8fa; --panel:#fff; --line:#d0d7de; --ink:#1f2328; --muted:#656d76;
-            --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e; --accent:#0969da; }
-  }
-  * { box-sizing: border-box; }
-  body { margin:0; padding:20px; background:var(--bg); color:var(--ink);
-         font:14px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+__UI_TOKENS__
   header { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-bottom:16px; }
   h1 { font-size:17px; margin:0; font-weight:600; letter-spacing:.2px; }
   .spacer { flex:1 1 auto; }
@@ -48,7 +46,7 @@ STATUS_PAGE_HTML = """<!doctype html>
   .badge.starting, .badge.down { color:var(--bad); border-color:var(--bad); }
   /* wedged（v6.2）：worker 卡死、不会自愈 —— 用**实心反色**，比 down 更刺眼。
      这是刻意的：degraded 会自愈（黄=等等看），wedged 只能重启（红底白字=必须动手）。 */
-  .badge.wedged { background:var(--bad); border-color:var(--bad); color:#fff; }
+  .badge.wedged { background:var(--bad-solid); border-color:var(--bad-solid); color:#fff; }
   input[type=password], input[type=text] {
     padding:6px 9px; border-radius:6px; border:1px solid var(--line);
     background:var(--panel); color:var(--ink); font-size:13px; min-width:220px; }
@@ -481,4 +479,6 @@ STATUS_PAGE_HTML = """<!doctype html>
 """
 
 #: 预计算长度：`_send_html` 要写 `Content-Length`，每次请求重新 encode 是浪费。
+STATUS_PAGE_HTML = STATUS_PAGE_HTML.replace("__UI_TOKENS__", TOKENS_CSS)
+
 STATUS_PAGE_HTML_BYTES = STATUS_PAGE_HTML.encode("utf-8")
